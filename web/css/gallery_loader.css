@@ -138,6 +138,10 @@
     border-radius: 4px;
     align-content: start;
     -webkit-overflow-scrolling: touch;
+    /* Isolate the grid's layout/paint from LiteGraph's per-frame node
+     * resync. Without containment, every canvas redraw forces the
+     * browser to reconsider the grid + every card in its reflow pass. */
+    contain: layout paint;
 }
 
 .gl-grid.is-loading { opacity: 0.6; }
@@ -155,6 +159,12 @@
     user-select: none;
     -webkit-user-select: none;
     -webkit-tap-highlight-color: transparent;
+    /* Skip layout/paint for off-screen cards entirely. The intrinsic
+     * size hint keeps the scrollbar honest when many cards are skipped.
+     * Roughly: 120px thumb (1:1) + ~30px name + ~12px optional dims
+     * + ~8px padding. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 170px;
 }
 .gl-card:hover {
     background: rgba(255, 255, 255, 0.08);
