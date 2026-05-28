@@ -311,7 +311,12 @@ function attachGallery(node) {
   // Mount on the node.
   node.addDOMWidget("gl_gallery", "gallery", root, {
     serialize: false,
-    hideOnZoom: false,
+    // Hide the gallery DOM when the canvas is zoomed out past
+    // LiteGraph's readability threshold. The grid is the most
+    // expensive DOM widget in the pack — at low zoom it can't be
+    // used anyway, so dropping it avoids paying the per-frame
+    // overlay-resync cost while the user pans a large workflow.
+    hideOnZoom: true,
     getMinHeight: () => 360,
   });
 
