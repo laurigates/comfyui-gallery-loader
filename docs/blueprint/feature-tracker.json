@@ -1,0 +1,158 @@
+{
+  "format_version": "3.3.0",
+  "project": "comfyui-gallery-loader",
+  "description": "ComfyUI custom-node pack with a card-grid picker for images and VHS path loaders",
+  "created_at": "2026-05-28",
+  "last_updated": "2026-05-28",
+  "current_phase": "v0.1.0-initial-release",
+  "prd_status": "Active",
+  "statistics": {
+    "total_features": 9,
+    "complete": 9,
+    "partial": 0,
+    "in_progress": 0,
+    "not_started": 0,
+    "blocked": 0,
+    "completion_percentage": 100.0
+  },
+  "phases": [
+    {
+      "id": "v0.1.0-initial-release",
+      "name": "v0.1.0 — Initial Release",
+      "description": "GalleryLoadImage node, modal over LoadImage, VHS path integration",
+      "status": "complete",
+      "priority": "P0",
+      "features": [
+        "FR-001", "FR-002", "FR-003", "FR-004", "FR-005",
+        "FR-006", "FR-007", "FR-008", "FR-009"
+      ]
+    }
+  ],
+  "features": [
+    {
+      "id": "FR-001",
+      "title": "GalleryLoadImage node with inline card grid",
+      "description": "Drop-in LoadImage replacement with the picker rendered inline on the node body. Cards scroll independently of the canvas.",
+      "priority": "P0",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["ADR-0002"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["gallery_loader.py", "web/js/gallery_loader.js", "web/css/gallery_loader.css"]
+      }
+    },
+    {
+      "id": "FR-002",
+      "title": "Modal picker over stock LoadImage",
+      "description": "Intercept the `image` combo widget on LoadImage, LoadImageMask, LoadImageOutput. Source tabs for Input / Output / Temp; commits annotated values.",
+      "priority": "P0",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["ADR-0008", "ADR-0009"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["web/js/image-picker.js", "web/js/modal-shell.js"]
+      }
+    },
+    {
+      "id": "FR-003",
+      "title": "VHS path-loader integration",
+      "description": "Detect nodes whose STRING widget has vhs_path_extensions. Add 📁 Browse button opening path-mode modal at base_path. Commit raw absolute paths.",
+      "priority": "P0",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["ADR-0008", "ADR-0009"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["web/js/image-picker.js"]
+      }
+    },
+    {
+      "id": "FR-004",
+      "title": "fzf-lite fuzzy filter",
+      "description": "Picker rows filtered by the filter input via fuzzy subsequence matching with separator/CamelCase bonuses and AND-token semantics.",
+      "priority": "P0",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["FR-002"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["web/js/modal-fuzzy.js"],
+        "tests": ["tests/js/modal-fuzzy.test.js"]
+      }
+    },
+    {
+      "id": "FR-005",
+      "title": "HTTP listing + thumbnail + file streaming endpoints",
+      "description": "/gallery_loader/{list, base, thumb, file} powering the picker UI. Extension whitelist guards arbitrary-path reads.",
+      "priority": "P0",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["ADR-0004"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["gallery_loader.py"],
+        "tests": ["tests/test_helpers.py"]
+      }
+    },
+    {
+      "id": "FR-006",
+      "title": "Value-format contract per source",
+      "description": "Input commits bare relative; Output/Temp commit annotated; VHS commits raw absolute. Resolved by folder_paths.get_annotated_filepath or raw open.",
+      "priority": "P0",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["ADR-0008"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["gallery_loader.py", "web/js/image-picker.js"]
+      }
+    },
+    {
+      "id": "FR-007",
+      "title": "Touch-friendly modal UX",
+      "description": "Backdrop dismiss wired to pointerdown not click; touch-action: manipulation suppresses iOS double-tap zoom. Cards sized for thumb-reachability.",
+      "priority": "P1",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["FR-002"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["web/js/modal-shell.js"]
+      }
+    },
+    {
+      "id": "FR-008",
+      "title": "Frontend Hook Strategy A + B",
+      "description": "Strategy A: widget.onPointerDown patch (needs comfyui-frontend-package>=1.40). Strategy B: explicit 📁 Browse button (always works). B is the version-skew safety net.",
+      "priority": "P0",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["ADR-0009"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["web/js/image-picker.js"]
+      }
+    },
+    {
+      "id": "FR-009",
+      "title": "Static asset serving",
+      "description": "Pack served via WEB_DIRECTORY=\"./web\". Pack directory name comfyui-gallery-loader/ is part of the served URL prefix.",
+      "priority": "P0",
+      "status": "complete",
+      "source": "PRD-001",
+      "related_to": ["ADR-0002", "ADR-0005"],
+      "phase": "v0.1.0-initial-release",
+      "implementation": {
+        "files": ["__init__.py"],
+        "tests": ["tests/test_init.py"]
+      }
+    }
+  ],
+  "tasks": {
+    "in_progress": [],
+    "pending": [],
+    "completed": []
+  }
+}

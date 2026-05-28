@@ -25,8 +25,15 @@ fix-js:
 fix: fix-py fix-js
 
 # Run pytest
-test:
+test-py:
     uv run pytest -v
+
+# Run vitest
+test-js:
+    npm test
+
+# Run both Python and JavaScript tests
+test: test-py test-js
 
 # All quality gates (matches CI)
 check: lint test
