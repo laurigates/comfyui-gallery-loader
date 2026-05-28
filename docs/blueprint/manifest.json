@@ -1,0 +1,118 @@
+{
+  "format_version": "3.3.0",
+  "created_at": "2026-05-28T00:00:00.000Z",
+  "updated_at": "2026-05-28T00:00:00.000Z",
+  "created_by": {
+    "blueprint_plugin": "3.3.0"
+  },
+  "project": {
+    "name": "comfyui-gallery-loader",
+    "detected_stack": [
+      "python",
+      "javascript"
+    ]
+  },
+  "structure": {
+    "has_prds": true,
+    "has_adrs": true,
+    "has_prps": false,
+    "has_work_orders": false,
+    "has_ai_docs": false,
+    "has_modular_rules": true,
+    "has_feature_tracker": true,
+    "has_document_detection": true,
+    "claude_md_mode": "both",
+    "generated_rules_path": ".claude/rules/"
+  },
+  "id_registry": {
+    "last_prd": 1,
+    "last_adr": 9,
+    "last_trp": 1,
+    "documents": {
+      "PRD-001": {
+        "path": "docs/blueprint/prds/project-overview.md",
+        "title": "comfyui-gallery-loader — Product Requirements Document",
+        "created": "2026-05-28"
+      },
+      "ADR-0001": {
+        "path": "docs/blueprint/adrs/0001-project-language.md",
+        "title": "Project Language Choice — Python Backend + Vanilla JavaScript Frontend",
+        "status": "Accepted",
+        "domain": "build-tooling",
+        "relates_to": ["PRD-001"],
+        "created": "2026-05-28"
+      },
+      "ADR-0002": {
+        "path": "docs/blueprint/adrs/0002-frontend-heavy-python-thin-architecture.md",
+        "title": "Frontend-Heavy + Python-Thin Architecture",
+        "status": "Accepted",
+        "domain": "frontend-framework",
+        "relates_to": ["PRD-001", "ADR-0001"],
+        "created": "2026-05-28"
+      },
+      "ADR-0003": {
+        "path": "docs/blueprint/adrs/0003-multi-file-js-organization.md",
+        "title": "Multi-File JavaScript Organization (modal-shell extraction)",
+        "status": "Accepted",
+        "domain": "build-tooling",
+        "relates_to": ["PRD-001", "ADR-0002"],
+        "created": "2026-05-28"
+      },
+      "ADR-0004": {
+        "path": "docs/blueprint/adrs/0004-http-endpoint-surface-extension-whitelist.md",
+        "title": "Static HTTP Endpoint Surface + Extension Whitelist as Security Perimeter",
+        "status": "Accepted",
+        "domain": "api-design",
+        "relates_to": ["PRD-001", "ADR-0002"],
+        "created": "2026-05-28"
+      },
+      "ADR-0005": {
+        "path": "docs/blueprint/adrs/0005-package-management-and-distribution.md",
+        "title": "Package Management and Distribution via pyproject.toml and Comfy Registry",
+        "status": "Accepted",
+        "domain": "deployment",
+        "relates_to": ["PRD-001", "ADR-0001"],
+        "created": "2026-05-28"
+      },
+      "ADR-0006": {
+        "path": "docs/blueprint/adrs/0006-ci-cd-github-actions.md",
+        "title": "CI/CD via GitHub Actions (inline, not reusable workflows)",
+        "status": "Accepted",
+        "domain": "deployment",
+        "relates_to": ["PRD-001", "ADR-0005"],
+        "created": "2026-05-28"
+      },
+      "ADR-0007": {
+        "path": "docs/blueprint/adrs/0007-testing-strategy.md",
+        "title": "Testing Strategy — pytest for backend + Vitest for pure frontend helpers",
+        "status": "Accepted",
+        "domain": "testing",
+        "relates_to": ["PRD-001", "ADR-0001", "ADR-0003"],
+        "created": "2026-05-28"
+      },
+      "ADR-0008": {
+        "path": "docs/blueprint/adrs/0008-value-format-contract.md",
+        "title": "Value-Format Contract per Source (bare relative / annotated / absolute)",
+        "status": "Accepted",
+        "domain": "api-design",
+        "relates_to": ["PRD-001", "ADR-0004"],
+        "created": "2026-05-28"
+      },
+      "ADR-0009": {
+        "path": "docs/blueprint/adrs/0009-frontend-hook-strategy-a-b.md",
+        "title": "Frontend Hook Strategy A + B (onPointerDown + explicit Browse button)",
+        "status": "Accepted",
+        "domain": "frontend-framework",
+        "relates_to": ["PRD-001", "ADR-0002"],
+        "created": "2026-05-28"
+      },
+      "TRP-001": {
+        "path": "docs/trps/regression-gaps-initial-scaffold.md",
+        "title": "Initial Scaffold — Coverage Gaps from First Feature Commit",
+        "status": "Active",
+        "created": "2026-05-28",
+        "relates_to": ["PRD-001", "ADR-0007"]
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "comfyui-gallery-loader-dev",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only test harness for the comfyui-gallery-loader pack. Nothing here ships to users — the runtime is the multi-file ES module set in web/js/.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.7"
+  }
+}

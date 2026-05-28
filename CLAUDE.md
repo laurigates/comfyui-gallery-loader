@@ -120,7 +120,30 @@ npx @biomejs/biome check --write .
 
 ```sh
 uv run pytest -v             # full backend suite
+npm test                     # JS pure-helper suite (Vitest)
+just test                    # both, the local CI gate
 ```
+
+### JavaScript tests
+
+The Vitest harness covers the pure helpers in `web/js/modal-fuzzy.js`
+(`fuzzyScore`, `fuzzyRank`). DOM-dependent code in `modal-shell.js`,
+`image-picker.js`, and `gallery_loader.js` is **not** unit-tested —
+it's covered by the smoke matrix below. See `docs/trps/regression-gaps-initial-scaffold.md` for
+the rationale and the trigger conditions for promoting DOM coverage.
+
+Test files live under `tests/js/` and follow `*.test.js`. The
+`tests/js/__mocks__/app.js` stub is wired through `vitest.config.js`
+so picker-module tests can import the ComfyUI `app` without a real
+frontend. The fuzzy-matcher tests don't need that hook today.
+
+```sh
+npm test                     # one-shot run (CI mode)
+npm run test:watch           # watch mode for TDD
+```
+
+Note: `package.json` and `node_modules/` are **dev-only**. Nothing
+under `node_modules/` is served to ComfyUI.
 
 ### Iterating on JS / CSS
 

@@ -58,6 +58,24 @@ jobs:
       - name: Run tests
         run: uv run --group dev pytest -v
 
+  test-js:
+    name: Tests (JavaScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 22 LTS — matches the dev-only Vitest harness floor.
+          node-version: '22'
+
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run Vitest
+        run: npm test
+
   security:
     name: Security scanning
     runs-on: ubuntu-latest
