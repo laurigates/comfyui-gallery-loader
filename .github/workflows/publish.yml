@@ -1,0 +1,26 @@
+name: Publish to Comfy Registry
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
+
+jobs:
+  publish-node:
+    name: Publish custom node to registry
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Publish Custom Node
+        uses: Comfy-Org/publish-node-action@v1
+        with:
+          # Personal access token issued at https://registry.comfy.org/
+          # Stored as a repo secret named REGISTRY_ACCESS_TOKEN.
+          personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}

@@ -1,0 +1,66 @@
+[project]
+name = "comfyui-gallery-loader"
+description = "Touch-friendly gallery picker for ComfyUI image and path widgets. Adds an inline card-grid LoadImage node, a modal picker over stock LoadImage with Input/Output/Temp tabs, and a filesystem browser for VHS path-loader nodes (single image, image directory, video)."
+version = "0.1.0"
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Lauri Gates" }]
+keywords = [
+    "comfyui",
+    "comfyui-nodes",
+    "gallery",
+    "picker",
+    "mobile",
+    "touch",
+    "loadimage",
+    "vhs",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: JavaScript",
+    "Topic :: Multimedia :: Graphics",
+]
+
+# Floor tied to widget.onPointerDown availability — the modal Strategy A
+# hooks it before falling back to the explicit "Browse" button widget.
+# Other ComfyUI core deps (aiohttp, torch, numpy, Pillow) are not
+# re-declared; they ship with ComfyUI itself.
+dependencies = [
+    "comfyui-frontend-package>=1.40",
+]
+
+[project.urls]
+Repository = "https://github.com/laurigates/comfyui-gallery-loader"
+Issues = "https://github.com/laurigates/comfyui-gallery-loader/issues"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11",
+    "pytest>=8",
+    "pre-commit>=4",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# importlib mode avoids pytest treating the pack-root __init__.py
+# (with its `from .gallery_loader import …` relative import) as a
+# discovered package during conftest resolution.
+addopts = "--import-mode=importlib"
+
+[tool.comfy]
+PublisherId = "laurigates"
+DisplayName = "Gallery Loader"
+Icon = ""

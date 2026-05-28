@@ -1,0 +1,1105 @@
+// image-picker.js — opens a modal gallery picker on click of either:
+//   - any LoadImage-family `image` combo widget (stock LoadImage,
+//     LoadImageMask, LoadImageOutput) — Input/Output/Temp tabs, writes
+//     annotated values like "foo.png [output]" that core LoadImage's
+//     folder_paths.get_annotated_filepath resolves transparently.
+//   - any VHS path-loader's STRING widget (VHS_LoadImagePath,
+//     VHS_LoadImagesPath, VHS_LoadVideoPath, VHS_LoadVideoFFmpegPath) —
+//     opens in path-mode rooted at folder_paths.base_path; commits a
+//     raw absolute path. Directory loaders (LoadImagesPath) get a
+//     footer "Use this folder" button; clicks on folders still descend.
+//
+// Architecture:
+//   modal-shell.js  — backdrop, dialog, header, search row, body, footer,
+//                     keyboard ESC, single-modal discipline.
+//   modal-fuzzy.js  — fzf-lite fuzzy matcher.
+//   image-picker.js — this file: widget hooks + grid renderer + listing
+//                     fetch against /gallery_loader/list.
+//
+// The inline-grid `GalleryLoadImage` node (gallery_loader.js) is
+// unchanged — workflows that use it keep working.
+
+console.warn("[comfyui-gallery-loader] image-picker.js: module loading");
+
+import { app } from "../../../scripts/app.js";
+import { fuzzyScore } from "./modal-fuzzy.js";
+import { openModalShell } from "./modal-shell.js";
+
+console.warn("[comfyui-gallery-loader] image-picker.js: imports resolved");
+
+const EXT_NAME = "comfyui-gallery-loader";
+const LIST_URL = "/gallery_loader/list";
+const FILE_URL = "/gallery_loader/file";
+const BASE_URL = "/gallery_loader/base";
+const STYLE_ID = "ip-style";
+
+const IMG_EXTS = new Set([
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".avif",
+]);
+const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"]);
+
+// VHS path-loaders the picker takes over. VHS_VideoCombine also exposes
+// `vhs_path_extensions` on its filename_prefix widget, but it's an output
+// prefix — not a candidate for the picker.
+const VHS_PATH_LOADERS = new Set([
+    "VHS_LoadImagePath",
+    "VHS_LoadImagesPath",
+    "VHS_LoadVideoPath",
+    "VHS_LoadVideoFFmpegPath",
+]);
+
+// Cached /gallery_loader/base response. Set once on first picker open.
+let BASE_PATHS = null;
+
+async function fetchBasePaths() {
+    if (BASE_PATHS) return BASE_PATHS;
+    try {
+        const r = await fetch(BASE_URL);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (!data.ok) throw new Error(data.error || "base paths fetch failed");
+        BASE_PATHS = data;
+    } catch (e) {
+        console.warn(`[${EXT_NAME}] /gallery_loader/base failed`, e);
+        BASE_PATHS = { base_path: "/", input_dir: "", output_dir: "", temp_dir: "" };
+    }
+    return BASE_PATHS;
+}
+
+// ============================================================
+// image_upload defang (stock LoadImage path) — unchanged
+// ============================================================
+//
+// Modern ComfyUI mounts a Vue WidgetSelect / Asset Browser component on any
+// combo with `image_upload: true` and routes the click through Vue — so
+// widget.onPointerDown never fires. We work around that by stripping the
+// `image_upload` flag from the input spec in beforeRegisterNodeDef, before
+// the widget is constructed. With the flag gone the widget falls back to a
+// plain LiteGraph canvas combo, which calls widget.onPointerDown as
+// expected.
+//
+// Trade-off: the native "Upload image" button is tied to the same flag, so
+// it disappears too. The modal can grow its own upload action later.
+
+function isImageUploadEntry(entry) {
+    if (Array.isArray(entry) && entry.length >= 2) {
+        const opts = entry[1];
+        return opts && typeof opts === "object" && opts.image_upload === true;
+    }
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        return entry.image_upload === true;
+    }
+    return false;
+}
+
+function defangNodeData(nodeData) {
+    const inputs = nodeData?.input;
+    if (!inputs) return false;
+    let touched = false;
+    for (const group of ["required", "optional"]) {
+        const block = inputs[group];
+        if (!block) continue;
+        for (const [name, entry] of Object.entries(block)) {
+            if (!isImageUploadEntry(entry)) continue;
+            if (Array.isArray(entry)) {
+                entry[1].image_upload = false;
+                entry[1]._origImageUpload = true;
+            } else {
+                entry.image_upload = false;
+                entry._origImageUpload = true;
+            }
+            touched = true;
+            console.warn(`[${EXT_NAME}] defanged image_upload on ${nodeData.name}.${name}`);
+        }
+    }
+    return touched;
+}
+
+function findImageWidget(node) {
+    if (!node?.widgets) return null;
+    for (const w of node.widgets) {
+        if (w?.options?._origImageUpload === true) return w;
+    }
+    const looksLikeLoader =
+        node.comfyClass === "LoadImage" ||
+        node.comfyClass === "LoadImageMask" ||
+        node.comfyClass === "LoadImageOutput" ||
+        node.type === "LoadImage" ||
+        node.type === "LoadImageMask" ||
+        node.type === "LoadImageOutput";
+    if (!looksLikeLoader) return null;
+    for (const w of node.widgets) {
+        if (w?.name === "image") return w;
+    }
+    return null;
+}
+
+function enhanceLoadImageNode(node) {
+    if (!node?.widgets) return;
+    if (node._galleryPickerEnhanced) return;
+    const w = findImageWidget(node);
+    if (!w) return;
+    node._galleryPickerEnhanced = true;
+
+    // If the loaded value is an annotated output/temp form, the combo's
+    // values list (rebuilt from input/) won't contain it — the canvas
+    // shows the literal text but the dropdown looks empty. Append so the
+    // value validates against the combo's options.
+    const v = (w.value || "").trim();
+    if (/\[(output|temp)\]\s*$/.test(v)) {
+        const values = w.options?.values;
+        if (Array.isArray(values) && !values.includes(v)) values.push(v);
+    }
+
+    console.warn(`[${EXT_NAME}] enhancing ${node.comfyClass || node.type}:`, {
+        widgetName: w.name,
+        widgetType: w.type,
+    });
+
+    const existing = w.options?.tooltip || "";
+    const hint = "Click to open the gallery picker (or use the 📁 button below).";
+    if (w.options) {
+        w.options.tooltip = existing ? `${existing}\n\n${hint}` : hint;
+    }
+
+    // Strategy A — patch widget.onPointerDown (plain canvas combo).
+    const origDown = w.onPointerDown;
+    w.onPointerDown = function (pointer, ownerNode, canvas) {
+        if (typeof origDown === "function") {
+            const consumed = origDown.call(this, pointer, ownerNode, canvas);
+            if (consumed) return consumed;
+        }
+        try {
+            openImagePicker(w, ownerNode || node, { kind: "loadimage" });
+        } catch (e) {
+            console.warn(`[${EXT_NAME}] image-picker open failed`, e);
+            return false;
+        }
+        return true;
+    };
+
+    // Strategy B — guaranteed click path via a button widget.
+    addBrowseButton(node, "📁 Browse gallery", () => {
+        openImagePicker(w, node, { kind: "loadimage" });
+    });
+}
+
+// ============================================================
+// VHS path-loader hook (STRING widget + vhs_path_extensions)
+// ============================================================
+
+function findVHSPathWidget(node) {
+    if (!node?.widgets) return null;
+    for (const w of node.widgets) {
+        if (Array.isArray(w?.options?.vhs_path_extensions)) return w;
+    }
+    return null;
+}
+
+function enhanceVHSPathNode(node) {
+    if (!node?.widgets) return;
+    if (node._vhsGalleryEnhanced) return;
+    if (!VHS_PATH_LOADERS.has(node.comfyClass)) return;
+    const w = findVHSPathWidget(node);
+    if (!w) return;
+    node._vhsGalleryEnhanced = true;
+
+    const exts = w.options.vhs_path_extensions;
+    const isDirectoryMode = Array.isArray(exts) && exts.length === 0;
+    console.warn(`[${EXT_NAME}] enhancing VHS ${node.comfyClass}:`, {
+        widgetName: w.name,
+        mode: isDirectoryMode ? "directory" : "file",
+        exts,
+    });
+
+    const label = isDirectoryMode ? "📁 Browse folder" : "📁 Browse files";
+    addBrowseButton(node, label, () => {
+        openImagePicker(w, node, {
+            kind: "vhs-path",
+            mode: isDirectoryMode ? "directory" : "file",
+            extensions: exts,
+        });
+    });
+}
+
+function addBrowseButton(node, label, onClick) {
+    try {
+        const btn = node.addWidget(
+            "button",
+            label,
+            null,
+            () => {
+                try {
+                    onClick();
+                } catch (e) {
+                    console.warn(`[${EXT_NAME}] open from button failed`, e);
+                }
+            },
+            { serialize: false },
+        );
+        if (btn && node.widgets) {
+            const idx = node.widgets.indexOf(btn);
+            if (idx !== -1 && idx !== node.widgets.length - 1) {
+                node.widgets.splice(idx, 1);
+                node.widgets.push(btn);
+            }
+        }
+        node.setDirtyCanvas?.(true, true);
+    } catch (e) {
+        console.warn(`[${EXT_NAME}] addWidget(button) failed`, e);
+    }
+}
+
+// ============================================================
+// Value parsing / building
+// ============================================================
+
+function isAbsPath(v) {
+    return v.startsWith("/") || /^[A-Za-z]:[\\/]/.test(v);
+}
+
+function parseLoadImageValue(v) {
+    // LoadImage value: "filename" or "subfolder/filename" or annotated
+    // "foo.png [input|output|temp]". Returns { type, subfolder, name }.
+    const s = (v || "").trim();
+    if (!s) return { type: "input", subfolder: "", name: "" };
+    const ann = s.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
+    if (ann) {
+        const rel = ann[1].replace(/\\/g, "/");
+        const idx = rel.lastIndexOf("/");
+        return {
+            type: ann[2],
+            subfolder: idx >= 0 ? rel.slice(0, idx) : "",
+            name: idx >= 0 ? rel.slice(idx + 1) : rel,
+        };
+    }
+    const norm = s.replace(/\\/g, "/");
+    const idx = norm.lastIndexOf("/");
+    return {
+        type: "input",
+        subfolder: idx >= 0 ? norm.slice(0, idx) : "",
+        name: idx >= 0 ? norm.slice(idx + 1) : norm,
+    };
+}
+
+function parseAbsPath(v) {
+    // For VHS path widgets. Splits an abs path into { dir, name }.
+    const s = (v || "").trim();
+    if (!s || !isAbsPath(s)) return { dir: "", name: "" };
+    const norm = s.replace(/\\/g, "/");
+    const idx = norm.lastIndexOf("/");
+    return {
+        dir: idx > 0 ? norm.slice(0, idx) : "/",
+        name: idx >= 0 ? norm.slice(idx + 1) : "",
+    };
+}
+
+function buildLoadImageValue(type, subfolder, name) {
+    const sub = (subfolder || "").replace(/^\/+|\/+$/g, "");
+    const rel = sub ? `${sub}/${name}` : name;
+    // Preserve the existing bare-relative form for input so existing
+    // workflows don't churn on save/reload.
+    return type === "input" ? rel : `${rel} [${type}]`;
+}
+
+function joinAbs(dir, name) {
+    const d = (dir || "/").replace(/\/+$/, "");
+    return d === "" ? `/${name}` : `${d}/${name}`;
+}
+
+// ============================================================
+// Thumbnail URL dispatch
+// ============================================================
+
+function imageThumbURL(type, subfolder, name) {
+    const p = new URLSearchParams({
+        filename: name,
+        type,
+        subfolder: subfolder || "",
+        preview: "webp;75",
+    });
+    return `/api/view?${p.toString()}`;
+}
+
+function imageThumbURLAbs(absDir, name) {
+    const full = joinAbs(absDir, name);
+    return `/gallery_loader/thumb?path=${encodeURIComponent(full)}`;
+}
+
+function videoSrcURL(type, subfolder, name, absDir) {
+    if (type === "path") {
+        const full = joinAbs(absDir, name);
+        return `${FILE_URL}?path=${encodeURIComponent(full)}`;
+    }
+    const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
+    return `/api/view?${p.toString()}`;
+}
+
+// ============================================================
+// Picker
+// ============================================================
+
+async function openImagePicker(widget, node, opts) {
+    ensureStyle();
+
+    // Resolve opts → initial state
+    const kind = opts.kind; // "loadimage" | "vhs-path"
+    const mode = opts.mode || "file"; // "file" | "directory"
+    const extensions = Array.isArray(opts.extensions) ? opts.extensions : null;
+
+    const state = {
+        kind,
+        mode,
+        // For loadimage: type ∈ {input, output, temp}; subfolder relative to root.
+        // For vhs-path: type = "path"; absPath holds the current absolute dir.
+        type: "input",
+        subfolder: "",
+        absPath: "",
+        currentName: "",
+        // Listing data
+        dirs: [],
+        files: [],
+        sortKey: "mtime",
+        sortDir: "desc",
+        query: "",
+        // The set of extension strings (".mp4", ".png", …) we'll send to the
+        // backend. null → backend's default (images).
+        extensionsParam: null,
+    };
+
+    let initialSnapshot;
+    if (kind === "loadimage") {
+        const init = parseLoadImageValue(widget.value);
+        state.type = init.type;
+        state.subfolder = init.subfolder;
+        state.currentName = init.name;
+        initialSnapshot = { type: init.type, subfolder: init.subfolder, name: init.name };
+    } else {
+        // vhs-path mode
+        state.type = "path";
+        state.extensionsParam = extensions?.length
+            ? extensions.map((e) => (e.startsWith(".") ? e : `.${e}`))
+            : mode === "directory"
+              ? [".__none__"]
+              : null;
+        // For directory mode we don't want any files listed — backend will
+        // skip everything with a non-matching ext, leaving only folders.
+
+        const parsed = parseAbsPath(widget.value);
+        if (parsed.dir) {
+            state.absPath =
+                mode === "directory" && parsed.name ? joinAbs(parsed.dir, parsed.name) : parsed.dir;
+            state.currentName = parsed.name;
+        } else {
+            const bp = await fetchBasePaths();
+            state.absPath = bp.base_path || "/";
+        }
+        initialSnapshot = { type: "path", subfolder: state.absPath, name: state.currentName };
+    }
+
+    const titleByKind =
+        kind === "loadimage"
+            ? "Choose image"
+            : mode === "directory"
+              ? "Choose folder"
+              : "Choose file";
+
+    const footerLeftHTML =
+        mode === "directory"
+            ? "<kbd>Esc</kbd> close · click a folder to descend · click <b>Use this folder</b> to commit"
+            : "<kbd>Esc</kbd> close · click a card to select · click a folder to descend";
+
+    const modal = openModalShell({
+        title: titleByKind,
+        subtitle: `(${widget.name})`,
+        placeholder: "Filter by filename…",
+        width: "min(1100px, calc(100vw - 16px))",
+        height: "min(88vh, 820px)",
+        footerLeftHTML,
+        footerRightHTML: '<span class="ip-count"></span>',
+    });
+
+    // ---- Toolbar: tabs (loadimage only) + breadcrumbs + sort + refresh -
+    let tabsEl = null;
+    if (kind === "loadimage") {
+        tabsEl = document.createElement("div");
+        tabsEl.className = "ip-tabs";
+        for (const t of ["input", "output", "temp"]) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = "ip-tab";
+            b.dataset.type = t;
+            b.textContent = t;
+            tabsEl.appendChild(b);
+        }
+        modal.toolbarEl.appendChild(tabsEl);
+    }
+
+    const crumbsEl = document.createElement("div");
+    crumbsEl.className = "ip-crumbs";
+
+    const sortEl = document.createElement("select");
+    sortEl.className = "ip-control";
+    sortEl.title = "Sort";
+    sortEl.innerHTML = `
+        <option value="mtime:desc">Newest</option>
+        <option value="mtime:asc">Oldest</option>
+        <option value="name:asc">Name A→Z</option>
+        <option value="name:desc">Name Z→A</option>
+        <option value="size:desc">Largest file</option>
+        <option value="pixels:desc">Highest resolution</option>
+    `;
+    sortEl.value = `${state.sortKey}:${state.sortDir}`;
+
+    const refreshEl = document.createElement("button");
+    refreshEl.type = "button";
+    refreshEl.className = "ip-control ip-icon";
+    refreshEl.title = "Refresh";
+    refreshEl.textContent = "⟳";
+
+    modal.toolbarEl.append(crumbsEl, sortEl, refreshEl);
+
+    // ---- Body: grid -------------------------------------------------
+    const gridEl = document.createElement("div");
+    gridEl.className = "ip-grid";
+    modal.bodyEl.appendChild(gridEl);
+
+    const countEl = modal.footerEl.querySelector(".ip-count");
+    function setCount(visible, total) {
+        if (!countEl) return;
+        countEl.textContent = `${visible} / ${total}`;
+    }
+
+    // ---- Footer "Use this folder" button (directory mode only) -----
+    let useFolderEl = null;
+    if (mode === "directory") {
+        useFolderEl = document.createElement("button");
+        useFolderEl.type = "button";
+        useFolderEl.className = "ip-use-folder";
+        useFolderEl.textContent = "Use this folder";
+        // Replace the right cell content so the count chip moves up to
+        // the toolbar feel (still visible above the button).
+        const rightCell = modal.footerEl.lastElementChild;
+        if (rightCell) {
+            rightCell.appendChild(useFolderEl);
+        }
+        useFolderEl.addEventListener("click", () => commitFolder());
+    }
+
+    // ---- Wiring ----------------------------------------------------
+    modal.searchEl.addEventListener("input", () => {
+        state.query = modal.searchEl.value.toLowerCase().trim();
+        renderGrid();
+    });
+
+    sortEl.addEventListener("change", () => {
+        const [k, d] = sortEl.value.split(":");
+        state.sortKey = k;
+        state.sortDir = d;
+        renderGrid();
+    });
+
+    refreshEl.addEventListener("click", () => loadAndRender());
+
+    if (tabsEl) {
+        tabsEl.addEventListener("click", (e) => {
+            const b = e.target.closest("[data-type]");
+            if (!b) return;
+            if (state.type === b.dataset.type) return;
+            state.type = b.dataset.type;
+            state.subfolder = "";
+            loadAndRender();
+        });
+    }
+
+    crumbsEl.addEventListener("click", (e) => {
+        const c = e.target.closest("[data-sub], [data-abs]");
+        if (!c) return;
+        if (c.dataset.abs !== undefined) {
+            state.absPath = c.dataset.abs || "/";
+        } else {
+            state.subfolder = c.dataset.sub || "";
+        }
+        loadAndRender();
+    });
+
+    gridEl.addEventListener("click", (e) => {
+        const card = e.target.closest(".ip-card");
+        if (!card) return;
+        if (card.classList.contains("is-up")) {
+            navigateUp();
+            return;
+        }
+        if (card.classList.contains("is-dir")) {
+            navigateInto(card.dataset.name);
+            return;
+        }
+        if (card.classList.contains("is-file")) {
+            if (mode === "directory") return; // files are inert in dir mode
+            commitFile(card.dataset.name, card.dataset.ext || "");
+        }
+    });
+
+    function navigateUp() {
+        if (state.type === "path") {
+            const p = (state.absPath || "/").replace(/\/+$/, "");
+            if (p === "" || p === "/") return; // already at root
+            const i = p.lastIndexOf("/");
+            state.absPath = i <= 0 ? "/" : p.slice(0, i);
+        } else {
+            const p = state.subfolder.replace(/\/+$/, "");
+            const i = p.lastIndexOf("/");
+            state.subfolder = i <= 0 ? "" : p.slice(0, i);
+        }
+        loadAndRender();
+    }
+
+    function navigateInto(name) {
+        if (state.type === "path") {
+            state.absPath = joinAbs(state.absPath, name);
+        } else {
+            const base = state.subfolder.replace(/\/+$/, "");
+            state.subfolder = base ? `${base}/${name}` : name;
+        }
+        loadAndRender();
+    }
+
+    // ---- Render ----------------------------------------------------
+
+    function renderTabs() {
+        if (!tabsEl) return;
+        for (const b of tabsEl.querySelectorAll(".ip-tab")) {
+            b.classList.toggle("is-active", b.dataset.type === state.type);
+        }
+    }
+
+    function renderCrumbs() {
+        crumbsEl.innerHTML = "";
+        const mk = (text, attr, value) => {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = "ip-crumb";
+            b.setAttribute(attr, value);
+            b.textContent = text;
+            return b;
+        };
+        if (state.type === "path") {
+            // Absolute-path breadcrumbs: "/", then each path segment.
+            crumbsEl.appendChild(mk("/", "data-abs", "/"));
+            const parts = state.absPath.split("/").filter(Boolean);
+            let acc = "";
+            for (const p of parts) {
+                acc = `${acc}/${p}`;
+                crumbsEl.appendChild(mk(p, "data-abs", acc));
+            }
+        } else {
+            crumbsEl.appendChild(mk(state.type, "data-sub", ""));
+            const parts = state.subfolder.split("/").filter(Boolean);
+            let acc = "";
+            for (const p of parts) {
+                acc = acc ? `${acc}/${p}` : p;
+                crumbsEl.appendChild(mk(p, "data-sub", acc));
+            }
+        }
+    }
+
+    function buildListingURL() {
+        const p = new URLSearchParams();
+        if (state.type === "path") {
+            p.set("type", "path");
+            p.set("path", state.absPath || "/");
+        } else {
+            p.set("type", state.type);
+            p.set("subfolder", state.subfolder);
+        }
+        if (state.extensionsParam?.length) {
+            p.set("extensions", state.extensionsParam.join(","));
+        }
+        return `${LIST_URL}?${p.toString()}`;
+    }
+
+    async function loadAndRender() {
+        renderTabs();
+        renderCrumbs();
+        modal.setBusy(true);
+        modal.setStatus("Loading…");
+        try {
+            const r = await fetch(buildListingURL());
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            if (!data.ok) throw new Error(data.error || "listing failed");
+            state.dirs = data.dirs || [];
+            state.files = data.files || [];
+            modal.setStatus(data.exists ? "" : "Directory not found.");
+        } catch (e) {
+            console.error(`[${EXT_NAME}] list failed:`, e);
+            modal.setStatus(`Error: ${e.message}`);
+            state.dirs = [];
+            state.files = [];
+        }
+        modal.setBusy(false);
+        renderGrid();
+    }
+
+    function thumbForFile(f) {
+        const ext = (f.ext || "").toLowerCase();
+        if (state.type === "path") {
+            if (IMG_EXTS.has(ext)) {
+                return { kind: "img", src: imageThumbURLAbs(state.absPath, f.name) };
+            }
+            if (VIDEO_EXTS.has(ext)) {
+                return { kind: "video", src: videoSrcURL("path", "", f.name, state.absPath) };
+            }
+            return { kind: "icon", text: "📄" };
+        }
+        if (IMG_EXTS.has(ext)) {
+            return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f.name) };
+        }
+        if (VIDEO_EXTS.has(ext)) {
+            return { kind: "video", src: videoSrcURL(state.type, state.subfolder, f.name) };
+        }
+        return { kind: "icon", text: "📄" };
+    }
+
+    function renderGrid() {
+        const q = state.query;
+        gridEl.innerHTML = "";
+
+        const showUp =
+            state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder;
+        if (showUp) {
+            const up = document.createElement("div");
+            up.className = "ip-card is-up";
+            up.innerHTML = `
+                <div class="ip-thumb ip-thumb-icon">↑</div>
+                <div class="ip-name">..</div>
+            `;
+            gridEl.appendChild(up);
+        }
+
+        for (const d of state.dirs) {
+            if (q && !d.name.toLowerCase().includes(q)) continue;
+            const c = document.createElement("div");
+            c.className = "ip-card is-dir";
+            c.dataset.name = d.name;
+            c.innerHTML = `
+                <div class="ip-thumb ip-thumb-icon">📁</div>
+                <div class="ip-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>
+            `;
+            gridEl.appendChild(c);
+        }
+
+        let files = state.files;
+        if (q) {
+            const scored = [];
+            for (const f of files) {
+                const r = fuzzyScore(q, f.name);
+                if (r) scored.push({ f, score: r.score });
+            }
+            scored.sort((a, b) => b.score - a.score);
+            files = scored.map((x) => x.f);
+        } else {
+            files = sortFiles(files, state.sortKey, state.sortDir);
+        }
+
+        let visible = 0;
+        const inSameLocation =
+            state.type === "path"
+                ? state.absPath === initialSnapshot.subfolder
+                : state.type === initialSnapshot.type &&
+                  state.subfolder === initialSnapshot.subfolder;
+        for (const f of files) {
+            const c = document.createElement("div");
+            c.className = "ip-card is-file";
+            c.dataset.name = f.name;
+            c.dataset.ext = (f.ext || "").toLowerCase();
+            if (inSameLocation && f.name === initialSnapshot.name) {
+                c.classList.add("is-selected");
+            }
+            if (mode === "directory") {
+                c.classList.add("is-inert");
+            }
+            const t = thumbForFile(f);
+            const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
+            const when = new Date(f.mtime * 1000).toLocaleString();
+            const titleText = dims ? `${f.name}\n${dims}\n${when}` : `${f.name}\n${when}`;
+            const thumbInner =
+                t.kind === "img"
+                    ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">`
+                    : t.kind === "video"
+                      ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
+                      : `<div class="ip-thumb-icon">${t.text}</div>`;
+            c.innerHTML = `
+                <div class="ip-thumb">${thumbInner}</div>
+                <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
+                ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
+            `;
+            gridEl.appendChild(c);
+            visible++;
+        }
+
+        const empty = !visible && !state.dirs.length && !showUp;
+        if (empty) {
+            const el = document.createElement("div");
+            el.className = "ip-empty";
+            el.textContent =
+                mode === "directory"
+                    ? "No subfolders here."
+                    : "No matching files in this directory.";
+            gridEl.appendChild(el);
+        }
+
+        if (useFolderEl) {
+            useFolderEl.textContent =
+                state.type === "path"
+                    ? `Use ${shortenPath(state.absPath)}`
+                    : `Use ${state.type}${state.subfolder ? `/${state.subfolder}` : ""}`;
+        }
+
+        setCount(visible, state.files.length);
+        installLazyThumbs(gridEl);
+    }
+
+    function shortenPath(p) {
+        if (!p) return "/";
+        if (p.length <= 48) return p;
+        return `…${p.slice(-46)}`;
+    }
+
+    function installLazyThumbs(root) {
+        const els = root.querySelectorAll("img[data-src], video[data-src]");
+        if (!els.length) return;
+        const io = new IntersectionObserver(
+            (entries) => {
+                for (const e of entries) {
+                    if (!e.isIntersecting) continue;
+                    const el = e.target;
+                    const src = el.dataset.src;
+                    if (src) {
+                        if (el.tagName === "VIDEO") {
+                            // Switch to preload=metadata only when in view, so
+                            // the browser only fetches video headers for thumbs
+                            // the user actually scrolled to.
+                            el.preload = "metadata";
+                        }
+                        el.src = src;
+                        el.removeAttribute("data-src");
+                    }
+                    io.unobserve(el);
+                }
+            },
+            { root, rootMargin: "300px" },
+        );
+        for (const el of els) io.observe(el);
+    }
+
+    function commitFile(name, _ext) {
+        let value;
+        if (state.type === "path") {
+            value = joinAbs(state.absPath, name);
+        } else {
+            value = buildLoadImageValue(state.type, state.subfolder, name);
+            // The native LiteGraph combo validates against options.values;
+            // append so re-renders treat the new value as valid.
+            const values = widget.options?.values;
+            if (Array.isArray(values) && !values.includes(value)) {
+                values.push(value);
+            }
+        }
+        applyValue(value);
+        modal.close();
+    }
+
+    function commitFolder() {
+        const value =
+            state.type === "path"
+                ? state.absPath || "/"
+                : state.subfolder
+                  ? state.subfolder
+                  : state.type;
+        applyValue(value);
+        modal.close();
+    }
+
+    function applyValue(value) {
+        widget.value = value;
+        // STRING widgets that render via a DOM input keep their own copy;
+        // sync it so the user sees the new value before the canvas redraws.
+        if (widget.inputEl && typeof widget.inputEl.value === "string") {
+            widget.inputEl.value = value;
+        }
+        try {
+            widget.callback?.call(widget, value, app.canvas, node);
+        } catch (e) {
+            console.warn(`[${EXT_NAME}] widget callback threw`, e);
+        }
+        node?.setDirtyCanvas?.(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+    }
+
+    function sortFiles(files, key, dir) {
+        const mul = dir === "asc" ? 1 : -1;
+        const nameCmp = (a, b) =>
+            a.name.localeCompare(b.name, undefined, {
+                numeric: true,
+                sensitivity: "base",
+            });
+        const numCmp = (getter) => (a, b) => (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
+        let cmp;
+        switch (key) {
+            case "name":
+                cmp = nameCmp;
+                break;
+            case "size":
+                cmp = numCmp((f) => f.size);
+                break;
+            case "pixels":
+                cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
+                break;
+            default:
+                cmp = numCmp((f) => f.mtime);
+                break;
+        }
+        return [...files].sort((a, b) => mul * cmp(a, b));
+    }
+
+    // First paint.
+    loadAndRender();
+}
+
+// ============================================================
+// Picker-specific styles (the modal shell handles the chrome)
+// ============================================================
+
+const PICKER_CSS = `
+.ip-tabs {
+    display: flex;
+    gap: 2px;
+    align-items: center;
+    background: #1a1a22;
+    border: 1px solid #2a2a32;
+    border-radius: 4px;
+    padding: 2px;
+}
+.ip-tab {
+    background: transparent;
+    color: #8a8a92;
+    border: 0;
+    border-radius: 3px;
+    padding: 4px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    text-transform: capitalize;
+}
+.ip-tab:hover {
+    background: #2a2a36;
+    color: #e0e0e4;
+}
+.ip-tab.is-active {
+    background: #2f3a52;
+    color: #9ec6ff;
+}
+.ip-crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+}
+.ip-crumb {
+    background: #2a2a36;
+    color: #b8b8c0;
+    border: 1px solid #3a3a44;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+}
+.ip-crumb:hover {
+    background: #3a3a4a;
+    color: #fff;
+}
+.ip-control {
+    background: #2a2a36;
+    color: #d8d8dc;
+    border: 1px solid #3a3a44;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+}
+.ip-control:hover {
+    background: #3a3a4a;
+    color: #fff;
+}
+.ip-icon {
+    min-width: 32px;
+    text-align: center;
+}
+.ip-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+    padding: 4px;
+}
+.ip-card {
+    background: #21212a;
+    border: 1px solid #2a2a32;
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.06s ease, border-color 0.1s ease;
+}
+.ip-card:hover {
+    border-color: #6ba6ff;
+    transform: translateY(-1px);
+}
+.ip-card.is-selected {
+    border-color: #6bff8e;
+    box-shadow: 0 0 0 1px #6bff8e inset;
+}
+.ip-card.is-up,
+.ip-card.is-dir {
+    background: #1f1f26;
+}
+.ip-card.is-file.is-inert {
+    cursor: default;
+    opacity: 0.55;
+}
+.ip-card.is-file.is-inert:hover {
+    border-color: #2a2a32;
+    transform: none;
+}
+.ip-thumb {
+    aspect-ratio: 1 / 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #12121a;
+    overflow: hidden;
+}
+.ip-thumb-icon {
+    font-size: 32px;
+    color: #777;
+}
+.ip-thumb img,
+.ip-thumb video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    background: #000;
+}
+.ip-name {
+    padding: 6px 8px;
+    font-size: 11.5px;
+    color: #d8d8dc;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.ip-meta {
+    padding: 0 8px 6px;
+    font-size: 10.5px;
+    color: #888;
+}
+.ip-empty {
+    grid-column: 1 / -1;
+    padding: 40px;
+    text-align: center;
+    color: #777;
+    font-style: italic;
+}
+.ip-count {
+    color: #888;
+}
+.ip-use-folder {
+    background: #2f3a52;
+    color: #9ec6ff;
+    border: 1px solid #4a5878;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    margin-left: 8px;
+}
+.ip-use-folder:hover {
+    background: #3a4868;
+    color: #fff;
+}
+/* Kept for parity with sampler-info's si-match. */
+.cmp-match {
+    color: #ffd866;
+    font-weight: 700;
+}
+`;
+
+function ensureStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    const s = document.createElement("style");
+    s.id = STYLE_ID;
+    s.textContent = PICKER_CSS;
+    document.head.appendChild(s);
+}
+
+function escHTML(s) {
+    return String(s).replace(
+        /[&<>"']/g,
+        (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+    );
+}
+
+// ============================================================
+// Extension registration
+// ============================================================
+
+try {
+    app.registerExtension({
+        name: "comfyui.gallery-loader.image-picker",
+        async beforeRegisterNodeDef(_nodeType, nodeData) {
+            try {
+                defangNodeData(nodeData);
+            } catch (e) {
+                console.warn(`[${EXT_NAME}] defang failed for ${nodeData?.name}`, e);
+            }
+        },
+        setup() {
+            ensureStyle();
+            console.warn(`[${EXT_NAME}] image-picker setup running`);
+            const nodes = app?.graph?._nodes;
+            if (Array.isArray(nodes)) {
+                for (const n of nodes) {
+                    enhanceLoadImageNode(n);
+                    enhanceVHSPathNode(n);
+                }
+            }
+        },
+        nodeCreated(node) {
+            enhanceLoadImageNode(node);
+            enhanceVHSPathNode(node);
+        },
+        loadedGraphNode(node) {
+            enhanceLoadImageNode(node);
+            enhanceVHSPathNode(node);
+        },
+    });
+    console.warn(`[${EXT_NAME}] image-picker.js: registerExtension returned`);
+} catch (e) {
+    console.error(`[${EXT_NAME}] image-picker.js: registerExtension threw`, e);
+}

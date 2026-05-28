@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+.venv/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+coverage/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local notes / scratch
+TODO.local.md
+NOTES.local.md
