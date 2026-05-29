@@ -39,6 +39,8 @@ git clone https://github.com/laurigates/comfyui-gallery-loader
 
 ## `Load Image (Gallery)` node
 
+![inline gallery grid on the GalleryLoadImage node](docs/gallery.png)
+
 | Output  | Type   | Notes                                          |
 |---------|--------|------------------------------------------------|
 | `image` | IMAGE  | Same loading semantics as the core `LoadImage`. |
@@ -50,6 +52,8 @@ or a bare absolute path. Both forms resolve via
 `folder_paths.get_annotated_filepath`.
 
 ## Modal over stock LoadImage
+
+![modal picker over LoadImage with Input/Output/Temp tabs](docs/picker.png)
 
 Click the `image` combo widget — instead of the native dropdown, the
 modal opens with three source tabs:
