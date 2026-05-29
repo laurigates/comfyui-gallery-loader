@@ -130,4 +130,4 @@ dependency not in `requirements.txt` — bump `COMFYUI_REF` to a tag whose
 | `seed_images.py` | PIL sample-image seeder for `input/`/`output/`/`temp/` |
 | `workflow.json` | Two-node workflow (`LoadImage` + `GalleryLoadImage`) at fixed positions |
 | `package.json` | Pins `playwright` (the only npm dependency) |
-| `.dockerignore` | Keeps the build context lean — excludes `docs/`, `.git/`, `tests/`, etc. |
+| `Dockerfile.dockerignore` | Keeps the build context lean — excludes `docs/`, `.git/`, `tests/`, etc. Named per-Dockerfile (not a bare `.dockerignore`) so BuildKit consults it for `-f screenshots/Dockerfile` builds — a bare `.dockerignore` in a subdirectory is ignored; only `<Dockerfile>.dockerignore` next to it or `.dockerignore` at the context root is read. |
