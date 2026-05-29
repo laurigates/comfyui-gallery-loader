@@ -1,0 +1,48 @@
+{
+  "last_node_id": 2,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [120, 120],
+      "size": [320, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "links": null, "shape": 3 },
+        { "name": "MASK", "type": "MASK", "links": null, "shape": 3 }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": ["landscape_01.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "GalleryLoadImage",
+      "pos": [620, 120],
+      "size": [400, 520],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "links": null, "shape": 3 },
+        { "name": "MASK", "type": "MASK", "links": null, "shape": 3 },
+        { "name": "path", "type": "STRING", "links": null, "shape": 3 }
+      ],
+      "properties": {
+        "Node name for S&R": "GalleryLoadImage"
+      },
+      "widgets_values": [""]
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

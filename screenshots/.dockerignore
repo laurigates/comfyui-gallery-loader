@@ -1,0 +1,18 @@
+# Keep the Docker build context lean. The pack source + screenshots/
+# directory are all the build needs.
+.git/
+.github/
+.venv/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+docs/
+tests/
+uv.lock
+*.egg-info/
+__pycache__/
+.DS_Store
+.vscode/
+.idea/
+.claude/
+*.local.md
