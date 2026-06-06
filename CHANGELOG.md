@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.2](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.1...comfyui-gallery-loader-v0.1.2) (2026-06-06)
+
+
+### Features
+
+* **picker:** persist sort option and scroll to loaded image ([#12](https://github.com/laurigates/comfyui-gallery-loader/issues/12)) ([133fe6d](https://github.com/laurigates/comfyui-gallery-loader/commit/133fe6d0fd5558e8aebb006758028fa2a78c3f43))
+
+
+### Miscellaneous
+
+* **deps-dev:** Bump vitest from 4.1.7 to 4.1.8 ([#11](https://github.com/laurigates/comfyui-gallery-loader/issues/11)) ([ced4198](https://github.com/laurigates/comfyui-gallery-loader/commit/ced4198a82dc15260d1633a3d29550296f2d8f46))
+* **deps:** Bump gitleaks/gitleaks-action from 2 to 3 ([#10](https://github.com/laurigates/comfyui-gallery-loader/issues/10)) ([1690555](https://github.com/laurigates/comfyui-gallery-loader/commit/16905555ff53da8894366d456ceb3a5a7621bf50))
+* **deps:** Bump googleapis/release-please-action from 4 to 5 ([#9](https://github.com/laurigates/comfyui-gallery-loader/issues/9)) ([f82a146](https://github.com/laurigates/comfyui-gallery-loader/commit/f82a14668bb59453c8c46f99a0d72e56b929e012))
+
 ## [0.1.1](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.0...comfyui-gallery-loader-v0.1.1) (2026-05-29)
 
 
