@@ -18,6 +18,14 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies and build frontend
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       - name: Publish Custom Node
         uses: Comfy-Org/publish-node-action@v1
         with:

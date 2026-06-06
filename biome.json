@@ -28,12 +28,14 @@
   },
   "files": {
     "includes": [
-      "**/web/**/*.js",
-      "**/web/**/*.json",
+      "src/**/*.ts",
       "**/tests/js/**/*.js",
       "vitest.config.js",
       "package.json",
+      "knip.json",
+      "tsconfig.json",
       "!**/node_modules",
+      "!**/web/dist",
       "!**/dist",
       "!**/coverage"
     ]

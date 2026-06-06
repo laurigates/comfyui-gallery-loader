@@ -5,9 +5,8 @@
 // would add a heavyweight dev dependency for one helper; revisit if we later
 // pull modal-shell DOM helpers under coverage.
 
+import { fuzzyRank, fuzzyScore } from "@laurigates/comfy-modal-kit";
 import { describe, expect, test } from "vitest";
-
-import { fuzzyRank, fuzzyScore } from "../../web/js/modal-fuzzy.js";
 
 describe("fuzzyScore", () => {
   test("empty query returns zero score and no matches", () => {

@@ -1,7 +1,8 @@
 ---
 id: ADR-0003
 created: 2026-05-28
-status: Accepted
+status: Superseded
+superseded-by: ADR-0010
 domain: build-tooling
 relates-to: [PRD-001, ADR-0001, ADR-0002]
 ---
@@ -10,7 +11,11 @@ relates-to: [PRD-001, ADR-0001, ADR-0002]
 
 ## Status
 
-Accepted
+Superseded by [ADR-0010](0010-adopt-typescript-bun-build.md) — the
+deliberately-extractable `modal-shell.js` + `modal-fuzzy.js` files anticipated
+here are now the published `@laurigates/comfy-modal-kit`, which this pack
+consumes (and bun inlines) instead of vendoring. The frontend is now TypeScript
+in `src/`, built to `web/dist/`.
 
 ## Context
 
