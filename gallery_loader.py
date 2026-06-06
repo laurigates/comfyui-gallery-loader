@@ -21,6 +21,8 @@ import hashlib
 import logging
 import mimetypes
 import os
+from email.utils import formatdate
+from io import BytesIO
 from typing import Any
 
 import folder_paths
@@ -375,17 +377,35 @@ async def gallery_thumb(request: web.Request) -> web.Response:
     if not os.path.isfile(path) or not _is_image_file(path):
         return web.Response(status=404)
 
+    # A thumbnail is fully determined by the source file's path, mtime and
+    # size, so we hand the browser cache validators and honour conditional
+    # requests. Re-scrolling or reopening the picker then reuses the cached
+    # copy (or gets a cheap 304) instead of re-encoding the WebP each time.
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        log.warning("thumb stat failed for %s: %s", path, exc)
+        return web.Response(status=404)
+    etag = '"{}"'.format(
+        hashlib.sha1(f"{path}:{st.st_mtime_ns}:{st.st_size}".encode()).hexdigest()
+    )
+    cache_headers = {
+        "ETag": etag,
+        "Last-Modified": formatdate(st.st_mtime, usegmt=True),
+        "Cache-Control": "private, max-age=300",
+    }
+    if request.headers.get("If-None-Match") == etag:
+        return web.Response(status=304, headers=cache_headers)
+
     # Cap thumb encode size to keep big PNGs cheap.
     try:
         with Image.open(path) as im:
             im.thumbnail((512, 512))
             im = im.convert("RGB") if im.mode not in ("RGB", "RGBA") else im
-            from io import BytesIO
-
             buf = BytesIO()
             im.save(buf, format="webp", quality=80)
             buf.seek(0)
-            return web.Response(body=buf.read(), content_type="image/webp")
+            return web.Response(body=buf.read(), content_type="image/webp", headers=cache_headers)
     except Exception as exc:
         log.warning("thumb failed for %s: %s", path, exc)
         return web.Response(status=500)

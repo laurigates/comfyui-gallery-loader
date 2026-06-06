@@ -94,7 +94,10 @@ function buildAnnotated(type, subfolder, name) {
 function thumbURL(type, subfolder, name, absDir) {
   if (type === "path") {
     const full = `${(absDir || "").replace(/\/$/, "")}/${name}`;
-    return `/gallery_loader/thumb?path=${encodeURIComponent(full)}&_t=${Date.now()}`;
+    // No cache bust — the /thumb endpoint sends an mtime+size ETag, so the
+    // browser revalidates cheaply (304) and reuses the cached thumbnail
+    // across re-renders instead of re-encoding on every Date.now() URL.
+    return `/gallery_loader/thumb?path=${encodeURIComponent(full)}`;
   }
   const params = new URLSearchParams({
     filename: name,

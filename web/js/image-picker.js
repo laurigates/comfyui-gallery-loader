@@ -46,6 +46,38 @@ const IMG_EXTS = new Set([
 ]);
 const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"]);
 
+// Persisted sort preference. One shared key across every picker flavour so a
+// user's "Name A→Z" choice sticks regardless of which node opened the modal.
+const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
+const VALID_SORTS = new Set([
+  "mtime:desc",
+  "mtime:asc",
+  "name:asc",
+  "name:desc",
+  "size:desc",
+  "pixels:desc",
+]);
+
+function loadSavedSort() {
+  try {
+    const raw = localStorage.getItem(SORT_STORAGE_KEY);
+    if (!raw || !VALID_SORTS.has(raw)) return null;
+    const [key, dir] = raw.split(":");
+    return { key, dir };
+  } catch (e) {
+    console.warn(`[${EXT_NAME}] could not read saved sort`, e);
+    return null;
+  }
+}
+
+function saveSort(key, dir) {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+  } catch (e) {
+    console.warn(`[${EXT_NAME}] could not save sort`, e);
+  }
+}
+
 // VHS path-loaders the picker takes over. VHS_VideoCombine also exposes
 // `vhs_path_extensions` on its filename_prefix widget, but it's an output
 // prefix — not a candidate for the picker.
@@ -370,10 +402,20 @@ async function openImagePicker(widget, node, opts) {
     sortKey: "mtime",
     sortDir: "desc",
     query: "",
+    // Whether the modal has performed its one-time scroll to the currently
+    // loaded image. Restoring that position makes finding the next image easy.
+    didInitialScroll: false,
     // The set of extension strings (".mp4", ".png", …) we'll send to the
     // backend. null → backend's default (images).
     extensionsParam: null,
   };
+
+  // Restore the user's last-used sort so it persists across modal opens.
+  const savedSort = loadSavedSort();
+  if (savedSort) {
+    state.sortKey = savedSort.key;
+    state.sortDir = savedSort.dir;
+  }
 
   let initialSnapshot;
   if (kind === "loadimage") {
@@ -500,6 +542,7 @@ async function openImagePicker(widget, node, opts) {
     const [k, d] = sortEl.value.split(":");
     state.sortKey = k;
     state.sortDir = d;
+    saveSort(k, d);
     renderGrid();
   });
 
@@ -759,6 +802,22 @@ async function openImagePicker(widget, node, opts) {
 
     setCount(visible, state.files.length);
     installLazyThumbs(gridEl);
+
+    // On first paint, scroll the currently loaded image into the middle of the
+    // viewport so the user lands where they left off — neighbours visible above
+    // and below make picking the next image quick. Only once per modal open.
+    if (!state.didInitialScroll) {
+      state.didInitialScroll = true;
+      scrollToSelected();
+    }
+  }
+
+  function scrollToSelected() {
+    const card = gridEl.querySelector(".ip-card.is-selected");
+    if (!card) return;
+    const body = modal.bodyEl;
+    const target = card.offsetTop - Math.max(0, (body.clientHeight - card.offsetHeight) / 2);
+    body.scrollTop = Math.max(0, target);
   }
 
   function shortenPath(p) {
