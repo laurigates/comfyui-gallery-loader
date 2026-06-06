@@ -8,7 +8,7 @@
 //
 // Backend node + listing endpoints live in gallery_loader.py.
 
-import { app } from "../../../scripts/app.js";
+import { app } from "/scripts/app.js";
 
 const NODE = "GalleryLoadImage";
 const LIST_URL = "/gallery_loader/list";
@@ -22,20 +22,87 @@ if (!document.querySelector(`link[href="${CSS_URL}"]`)) {
   document.head.appendChild(link);
 }
 
-const TYPES = ["input", "output", "temp", "path"];
+const TYPES = ["input", "output", "temp", "path"] as const;
 
 // Some sensible mins. The grid is internally scrollable, so the user can
 // keep the node compact and still see thumbnails.
 const MIN_NODE_W = 360;
 const MIN_NODE_H = 460;
 
+// ============================================================
+// Types
+// ============================================================
+//
+// The package's `ComfyApp` type is the only widget/graph type it exports at
+// the module root — `LGraphNode`, `LGraphCanvas`, and the widget interfaces
+// are declared internally but not re-exported, so they cannot be imported.
+// We model the small surface this pack touches with local structural
+// interfaces instead (narrower blast radius). `ComfyApp` types the imported
+// `app` via the shim in `comfyui-shims.d.ts`.
+
+interface GalleryWidget {
+  name: string;
+  value: unknown;
+  type?: string;
+  hidden?: boolean;
+  options?: { hidden?: boolean; values?: unknown } & Record<string, unknown>;
+  computeSize?: (...args: unknown[]) => [number, number];
+  element?: { style?: CSSStyleDeclaration };
+  inputEl?: { style?: CSSStyleDeclaration };
+}
+
+interface GalleryNode {
+  widgets?: GalleryWidget[];
+  size: [number, number];
+  addDOMWidget: (
+    name: string,
+    type: string,
+    element: HTMLElement,
+    options: Record<string, unknown>,
+  ) => unknown;
+  setDirtyCanvas?: (fg: boolean, bg: boolean) => void;
+}
+
+// A node-definition prototype as exposed by `beforeRegisterNodeDef`. Only the
+// lifecycle hook this pack wraps is modelled.
+interface NodeTypeProto {
+  prototype: {
+    onNodeCreated?: (...args: unknown[]) => unknown;
+  };
+}
+
+interface NodeData {
+  name: string;
+}
+
+interface ListingDir {
+  name: string;
+}
+
+interface ListingFile {
+  name: string;
+  mtime: number;
+  size?: number;
+  width?: number;
+  height?: number;
+}
+
+interface ParsedValue {
+  type: string;
+  subfolder: string;
+  name: string;
+  isAbs: boolean;
+}
+
 app.registerExtension({
   name: "comfyui.gallery_loader",
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== NODE) return;
-    const orig = nodeType.prototype.onNodeCreated;
-    nodeType.prototype.onNodeCreated = function () {
-      const r = orig?.apply(this, arguments);
+    const data = nodeData as unknown as NodeData;
+    if (data.name !== NODE) return;
+    const proto = (nodeType as unknown as NodeTypeProto).prototype;
+    const orig = proto.onNodeCreated;
+    proto.onNodeCreated = function (this: GalleryNode, ...args: unknown[]) {
+      const r = orig?.apply(this, args);
       try {
         attachGallery(this);
       } catch (e) {
@@ -46,16 +113,16 @@ app.registerExtension({
   },
 });
 
-function parseAnnotated(value) {
+function parseAnnotated(value: unknown): ParsedValue {
   // Returns { type, subfolder, name, isAbs } for a stored widget value.
-  const v = (value || "").trim();
+  const v = (typeof value === "string" ? value : "").trim();
   if (!v) return { type: "input", subfolder: "", name: "", isAbs: false };
   const m = v.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
   if (m) {
-    const rel = m[1].replace(/\\/g, "/");
+    const rel = (m[1] as string).replace(/\\/g, "/");
     const idx = rel.lastIndexOf("/");
     return {
-      type: m[2],
+      type: m[2] as string,
       subfolder: idx >= 0 ? rel.slice(0, idx) : "",
       name: idx >= 0 ? rel.slice(idx + 1) : rel,
       isAbs: false,
@@ -81,7 +148,7 @@ function parseAnnotated(value) {
   };
 }
 
-function buildAnnotated(type, subfolder, name) {
+function buildAnnotated(type: string, subfolder: string, name: string): string {
   if (type === "path") {
     if (subfolder) return `${subfolder.replace(/\/$/, "")}/${name}`;
     return name;
@@ -91,7 +158,7 @@ function buildAnnotated(type, subfolder, name) {
   return `${rel} [${type}]`;
 }
 
-function thumbURL(type, subfolder, name, absDir) {
+function thumbURL(type: string, subfolder: string, name: string, absDir: string): string {
   if (type === "path") {
     const full = `${(absDir || "").replace(/\/$/, "")}/${name}`;
     // No cache bust — the /thumb endpoint sends an mtime+size ETag, so the
@@ -110,9 +177,25 @@ function thumbURL(type, subfolder, name, absDir) {
   return `/api/view?${params.toString()}`;
 }
 
-function attachGallery(node) {
-  const widget = node.widgets?.find((w) => w.name === "image");
-  if (!widget) return;
+interface GalleryState {
+  type: string;
+  subfolder: string;
+  absDir: string;
+  search: string;
+  sortKey: string;
+  sortDir: string;
+  dirs: ListingDir[];
+  files: ListingFile[];
+  selectedName: string;
+}
+
+function attachGallery(node: GalleryNode): void {
+  const found = node.widgets?.find((w) => w.name === "image");
+  if (!found) return;
+  // Bind a non-undefined alias so the nested render closures below see the
+  // narrowed type (TS does not always carry `find()`-undefined narrowing into
+  // every closure body).
+  const widget: GalleryWidget = found;
 
   // Hide the string widget but keep it serializable so the backend
   // still receives the path. The canonical "hide" toggle pair the
@@ -125,7 +208,7 @@ function attachGallery(node) {
   widget.options = widget.options || {};
   widget.options.hidden = true;
   widget.computeSize = () => [0, -4];
-  for (const key of ["element", "inputEl"]) {
+  for (const key of ["element", "inputEl"] as const) {
     const el = widget[key];
     if (el?.style) el.style.display = "none";
   }
@@ -159,7 +242,7 @@ function attachGallery(node) {
     `;
 
   // Build chips.
-  const chipsEl = root.querySelector(".gl-chips");
+  const chipsEl = root.querySelector(".gl-chips") as HTMLElement;
   for (const t of TYPES) {
     const b = document.createElement("button");
     b.className = "gl-chip";
@@ -170,7 +253,7 @@ function attachGallery(node) {
 
   const initial = parseAnnotated(widget.value);
 
-  const state = {
+  const state: GalleryState = {
     type: initial.type,
     subfolder: initial.subfolder,
     absDir: initial.isAbs ? initial.subfolder : "",
@@ -184,29 +267,29 @@ function attachGallery(node) {
   };
 
   const refs = {
-    grid: root.querySelector(".gl-grid"),
-    status: root.querySelector(".gl-status"),
-    crumbs: root.querySelector(".gl-crumbs"),
+    grid: root.querySelector(".gl-grid") as HTMLElement,
+    status: root.querySelector(".gl-status") as HTMLElement,
+    crumbs: root.querySelector(".gl-crumbs") as HTMLElement,
     chips: chipsEl,
-    search: root.querySelector(".gl-search"),
-    path: root.querySelector(".gl-pathinput"),
-    selected: root.querySelector(".gl-selected"),
-    refresh: root.querySelector(".gl-refresh"),
-    sort: root.querySelector(".gl-sort"),
+    search: root.querySelector(".gl-search") as HTMLInputElement,
+    path: root.querySelector(".gl-pathinput") as HTMLInputElement,
+    selected: root.querySelector(".gl-selected") as HTMLElement,
+    refresh: root.querySelector(".gl-refresh") as HTMLElement,
+    sort: root.querySelector(".gl-sort") as HTMLSelectElement,
   };
   refs.sort.value = `${state.sortKey}:${state.sortDir}`;
   refs.sort.addEventListener("change", (e) => {
-    const [key, dir] = e.target.value.split(":");
-    state.sortKey = key;
-    state.sortDir = dir;
+    const [key, dir] = (e.target as HTMLSelectElement).value.split(":");
+    state.sortKey = key as string;
+    state.sortDir = dir as string;
     renderGrid();
   });
 
   // Wire up handlers.
   chipsEl.addEventListener("click", (e) => {
-    const t = e.target.closest(".gl-chip");
+    const t = (e.target as HTMLElement).closest(".gl-chip") as HTMLElement | null;
     if (!t) return;
-    state.type = t.dataset.type;
+    state.type = t.dataset.type as string;
     if (state.type !== "path") state.subfolder = "";
     renderControls();
     loadAndRender();
@@ -215,7 +298,7 @@ function attachGallery(node) {
   refs.refresh.addEventListener("click", () => loadAndRender());
 
   refs.search.addEventListener("input", (e) => {
-    state.search = e.target.value.toLowerCase();
+    state.search = (e.target as HTMLInputElement).value.toLowerCase();
     renderGrid();
   });
 
@@ -237,7 +320,7 @@ function attachGallery(node) {
 
   // Crumbs click = navigate up.
   refs.crumbs.addEventListener("click", (e) => {
-    const seg = e.target.closest("[data-crumb]");
+    const seg = (e.target as HTMLElement).closest("[data-crumb]") as HTMLElement | null;
     if (!seg) return;
     if (state.type === "path") {
       state.absDir = seg.dataset.crumb || "/";
@@ -249,7 +332,7 @@ function attachGallery(node) {
 
   // Grid clicks: dir descends, file selects, ".." goes up.
   refs.grid.addEventListener("click", (e) => {
-    const card = e.target.closest(".gl-card");
+    const card = (e.target as HTMLElement).closest(".gl-card") as HTMLElement | null;
     if (!card) return;
     if (card.classList.contains("is-up")) {
       if (state.type === "path") {
@@ -265,7 +348,7 @@ function attachGallery(node) {
       return;
     }
     if (card.classList.contains("is-dir")) {
-      const name = card.dataset.name;
+      const name = card.dataset.name as string;
       if (state.type === "path") {
         const base = (state.absDir || "").replace(/\/+$/, "");
         state.absDir = `${base}/${name}`;
@@ -277,14 +360,14 @@ function attachGallery(node) {
       return;
     }
     if (card.classList.contains("is-file")) {
-      state.selectedName = card.dataset.name;
+      state.selectedName = card.dataset.name as string;
       commitSelection();
       renderGrid();
     }
   });
 
   // Block LiteGraph from intercepting input on the DOM widget.
-  const stop = (e) => e.stopPropagation();
+  const stop = (e: Event) => e.stopPropagation();
   for (const ev of [
     "pointerdown",
     "pointermove",
@@ -328,10 +411,10 @@ function attachGallery(node) {
 
   // ---- rendering ---------------------------------------------------------
 
-  function renderControls() {
+  function renderControls(): void {
     // Active chip
     for (const c of chipsEl.querySelectorAll(".gl-chip")) {
-      c.classList.toggle("is-active", c.dataset.type === state.type);
+      c.classList.toggle("is-active", (c as HTMLElement).dataset.type === state.type);
     }
     // Path input visible only for type=path
     refs.path.style.display = state.type === "path" ? "" : "none";
@@ -341,11 +424,11 @@ function attachGallery(node) {
     refs.crumbs.innerHTML = "";
     if (state.type === "path") {
       const parts = (state.absDir || "/").split("/").filter(Boolean);
-      const root = document.createElement("button");
-      root.dataset.crumb = "/";
-      root.className = "gl-crumb";
-      root.textContent = "/";
-      refs.crumbs.appendChild(root);
+      const rootBtn = document.createElement("button");
+      rootBtn.dataset.crumb = "/";
+      rootBtn.className = "gl-crumb";
+      rootBtn.textContent = "/";
+      refs.crumbs.appendChild(rootBtn);
       let cur = "";
       for (const seg of parts) {
         cur += `/${seg}`;
@@ -374,7 +457,7 @@ function attachGallery(node) {
     }
   }
 
-  async function loadAndRender() {
+  async function loadAndRender(): Promise<void> {
     renderControls();
     refs.status.textContent = "Loading…";
     refs.grid.classList.add("is-loading");
@@ -402,7 +485,7 @@ function attachGallery(node) {
         : "Directory not found.";
     } catch (e) {
       console.error("[gallery_loader] list failed:", e);
-      refs.status.textContent = `Error: ${e.message}`;
+      refs.status.textContent = `Error: ${(e as Error).message}`;
       state.dirs = [];
       state.files = [];
     }
@@ -410,7 +493,7 @@ function attachGallery(node) {
     renderGrid();
   }
 
-  function renderGrid() {
+  function renderGrid(): void {
     const grid = refs.grid;
     grid.innerHTML = "";
 
@@ -458,7 +541,7 @@ function attachGallery(node) {
     updateSelectedFooter();
   }
 
-  function currentSelectionDirMatches() {
+  function currentSelectionDirMatches(): boolean {
     const sel = parseAnnotated(widget.value);
     if (sel.type !== state.type) return false;
     if (state.type === "path") {
@@ -467,7 +550,7 @@ function attachGallery(node) {
     return (sel.subfolder || "") === (state.subfolder || "");
   }
 
-  function commitSelection() {
+  function commitSelection(): void {
     const value =
       state.type === "path"
         ? buildAnnotated("path", state.absDir, state.selectedName)
@@ -478,20 +561,20 @@ function attachGallery(node) {
     updateSelectedFooter();
   }
 
-  function updateSelectedFooter() {
-    refs.selected.textContent = widget.value || "(none)";
+  function updateSelectedFooter(): void {
+    refs.selected.textContent = (typeof widget.value === "string" ? widget.value : "") || "(none)";
   }
 
   // Use IntersectionObserver to defer thumbnail loading until visible.
   // Cheap and self-contained per re-render.
-  function installLazyThumbs(grid) {
+  function installLazyThumbs(grid: HTMLElement): void {
     const imgs = grid.querySelectorAll("img[data-src]");
     if (!imgs.length) return;
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           if (!e.isIntersecting) continue;
-          const im = e.target;
+          const im = e.target as HTMLImageElement;
           const src = im.dataset.src;
           if (src) {
             im.src = src;
@@ -511,12 +594,14 @@ function attachGallery(node) {
   updateSelectedFooter();
 }
 
-function sortFiles(files, key, dir) {
+function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[] {
   const mul = dir === "asc" ? 1 : -1;
-  const nameCmp = (a, b) =>
+  const nameCmp = (a: ListingFile, b: ListingFile) =>
     a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-  const numCmp = (extract) => (a, b) => (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
-  let cmp;
+  const numCmp =
+    (extract: (f: ListingFile) => number | undefined) => (a: ListingFile, b: ListingFile) =>
+      (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
+  let cmp: (a: ListingFile, b: ListingFile) => number;
   switch (key) {
     case "name":
       cmp = nameCmp;
@@ -535,9 +620,15 @@ function sortFiles(files, key, dir) {
   return [...files].sort((a, b) => mul * cmp(a, b));
 }
 
-function escapeHTML(s) {
+function escapeHTML(s: unknown): string {
   return String(s).replace(
     /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+    (c) =>
+      (
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }) as Record<
+          string,
+          string
+        >
+      )[c] as string,
   );
 }

@@ -10,6 +10,10 @@ __pycache__/
 node_modules/
 coverage/
 
+# Built frontend output — emitted by `bun run build`, force-shipped to
+# the Comfy Registry via [tool.comfy] includes in pyproject.toml.
+web/dist/
+
 # Editor
 .vscode/
 .idea/

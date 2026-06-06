@@ -1,25 +1,27 @@
 # CLAUDE.md
 
 ComfyUI custom-node pack with a small Python backend (one node + four
-HTTP endpoints) and a single frontend extension (`image-picker.js` +
-a reusable `modal-shell.js`). Both halves share a card-grid picker
-that targets touch-friendly mobile/tablet use as well as desktop.
+HTTP endpoints) and a TypeScript frontend (`src/`) built to `web/dist/`
+via `bun build`. The modal shell + fuzzy matcher come from the shared
+`@laurigates/comfy-modal-kit` (inlined into the bundle). Both halves
+share a card-grid picker that targets touch-friendly mobile/tablet use
+as well as desktop. See ADR-0010 for the TypeScript + bun build decision.
 
 ## What it does
 
 Three entry points share one picker UI:
 
 1. **`Load Image (Gallery)` node** (`gallery_loader.py` +
-   `web/js/gallery_loader.js`) — drop-in `LoadImage` replacement with
+   `src/gallery_loader.ts`) — drop-in `LoadImage` replacement with
    the picker rendered inline on the node body. Cards scroll
    independently of the canvas.
-2. **Modal over stock `LoadImage`** (`web/js/image-picker.js`) —
+2. **Modal over stock `LoadImage`** (`src/image-picker.ts`) —
    intercepts the `image` combo widget on `LoadImage`,
    `LoadImageMask`, `LoadImageOutput`. Source tabs for **Input /
    Output / Temp**; commits annotated values (`foo.png [output]`)
    that core's `folder_paths.get_annotated_filepath` resolves
    transparently.
-3. **VHS path-loader integration** (`web/js/image-picker.js`) —
+3. **VHS path-loader integration** (`src/image-picker.ts`) —
    detects nodes whose `STRING` widget has `vhs_path_extensions`
    (`VHS_LoadImagePath`, `VHS_LoadImagesPath`, `VHS_LoadVideoPath`,
    `VHS_LoadVideoFFmpegPath`). Adds a `📁 Browse` button that opens
@@ -31,19 +33,23 @@ Three entry points share one picker UI:
 
 | Path | Purpose |
 |------|---------|
-| `__init__.py` | Loader stub. Exports `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY="./web"`. |
+| `__init__.py` | Loader stub. Exports `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY="./web/dist"`. |
 | `gallery_loader.py` | `GalleryLoadImage` node + four HTTP endpoints (`/gallery_loader/{list,base,thumb,file}`). |
-| `web/js/gallery_loader.js` | Inline-grid frontend for the `GalleryLoadImage` node. |
-| `web/js/image-picker.js` | Modal picker for stock `LoadImage` + VHS path loaders. |
-| `web/js/modal-shell.js` | Reusable modal dialog: backdrop, dialog, toolbar, search, body, footer, ESC, single-modal discipline. |
-| `web/js/modal-fuzzy.js` | fzf-lite fuzzy matcher used by the modal's filter input. |
-| `web/css/gallery_loader.css` | Inline-grid styles. (The modal injects its own `<style>` from `image-picker.js`.) |
-| `pyproject.toml` | Comfy Registry metadata. `PublisherId` and `version` are the fields you'd touch. |
-| `.github/workflows/publish.yml` | Auto-publish on `pyproject.toml` version bump. |
-| `.github/workflows/ci.yml` | CI: ruff, biome, pytest, gitleaks. |
-| `.pre-commit-config.yaml` | Pre-commit hooks: ruff, biome, gitleaks, file hygiene. |
-| `biome.json` | Biome (JS/JSON) lint + format config. |
-| `tests/` | pytest suite for the Python backend. |
+| `src/index.ts` | Lone `bun build` entry. Imports both extension modules for their `app.registerExtension` side-effects. |
+| `src/gallery_loader.ts` | Inline-grid frontend for the `GalleryLoadImage` node (TS port of the former `web/js/gallery_loader.js`). |
+| `src/image-picker.ts` | Modal picker for stock `LoadImage` + VHS path loaders (TS port; consumes `@laurigates/comfy-modal-kit`). |
+| `src/comfyui-shims.d.ts` | Types the `/scripts/app.js` runtime import via the `tsconfig.json` `paths` shim. |
+| `web/css/gallery_loader.css` | Inline-grid styles, copied into `web/dist/css/` by the build. (The modal injects its own `<style>` from `image-picker.ts`.) |
+| `web/dist/` | **Generated** build output (`bun run build`). Git-ignored; force-shipped to the registry via `[tool.comfy] includes`. |
+| `tsconfig.json` | TypeScript config: strict, `noEmit` (bun emits), `/scripts/app.js` `paths` shim. |
+| `knip.json` | Dead-export / unused-dependency checker config. |
+| `package.json` | Bun scripts (`build`, `typecheck`, `test`, `lint`, `knip`); runtime dep `@laurigates/comfy-modal-kit`; dev deps. |
+| `pyproject.toml` | Comfy Registry metadata + `[tool.comfy] includes = ["web/dist"]`. `PublisherId` and `version` are the fields you'd touch. |
+| `.github/workflows/publish.yml` | Auto-publish on `pyproject.toml` version bump (runs `bun run build` first). |
+| `.github/workflows/ci.yml` | CI: ruff, biome, tsc+build (bun), pytest, vitest (bun), gitleaks. |
+| `.pre-commit-config.yaml` | Pre-commit hooks: ruff, biome (2.4.15), gitleaks, file hygiene. |
+| `biome.json` | Biome (TS/JSON) lint + format config. |
+| `tests/` | pytest suite for the Python backend + Vitest suite (`tests/js/`) for the kit's pure helpers. |
 | `screenshots/` | Containerized Playwright pipeline that regenerates `docs/picker.png` + `docs/gallery.png` (`capture.mjs`, `seed_images.py`, `Dockerfile`, `entrypoint.sh`, `workflow.json`). |
 | `justfile` | `lint`, `test`, `format`, `check`, `screenshots` recipes. |
 | `RELEASE-CHECKLIST.md` | One-time and per-release publish steps. |
@@ -105,53 +111,70 @@ hook), the button still works. Don't remove the button widget.
 
 ```sh
 uv sync --group dev          # install ruff, pytest, pre-commit
+bun install                  # install TS toolchain + @laurigates/comfy-modal-kit
 pre-commit install
 ```
 
-### Lint & format
+### Build the frontend
+
+The served frontend is `web/dist/index.js`, emitted from `src/` by bun.
+`web/dist/` is git-ignored — build it after a fresh checkout and after any
+`src/` change before hard-refreshing ComfyUI.
+
+```sh
+bun run build                # bun build src/index.ts → web/dist/ (+ copies web/css)
+```
+
+### Lint, typecheck, format
 
 ```sh
 uv run ruff check .
 uv run ruff format .
-npx @biomejs/biome check .
-npx @biomejs/biome check --write .
+bunx biome check .
+bunx biome check --write .
+bun run typecheck            # tsc --noEmit against the frontend types
+bun run knip                 # dead-export / unused-dependency check
 ```
 
 ### Tests
 
 ```sh
 uv run pytest -v             # full backend suite
-npm test                     # JS pure-helper suite (Vitest)
+bun run test                 # JS pure-helper suite (Vitest)
 just test                    # both, the local CI gate
 ```
 
 ### JavaScript tests
 
-The Vitest harness covers the pure helpers in `web/js/modal-fuzzy.js`
-(`fuzzyScore`, `fuzzyRank`). DOM-dependent code in `modal-shell.js`,
-`image-picker.js`, and `gallery_loader.js` is **not** unit-tested —
-it's covered by the smoke matrix below. See `docs/trps/regression-gaps-initial-scaffold.md` for
-the rationale and the trigger conditions for promoting DOM coverage.
+The Vitest harness covers the pure helpers `fuzzyScore` / `fuzzyRank`,
+now imported from `@laurigates/comfy-modal-kit` (the kit replaced the
+former vendored `modal-fuzzy.js` / `modal-shell.js`). DOM-dependent code
+in `src/image-picker.ts` and `src/gallery_loader.ts` is **not**
+unit-tested — it's covered by the smoke matrix below. See
+`docs/trps/regression-gaps-initial-scaffold.md` for the rationale and the
+trigger conditions for promoting DOM coverage.
 
 Test files live under `tests/js/` and follow `*.test.js`. The
 `tests/js/__mocks__/app.js` stub is wired through `vitest.config.js`
-so picker-module tests can import the ComfyUI `app` without a real
-frontend. The fuzzy-matcher tests don't need that hook today.
+(aliased on the `/scripts/app.js` specifier) so future picker-module
+tests can import the ComfyUI `app` without a real frontend. The
+fuzzy-matcher tests don't need that hook today.
 
 ```sh
-npm test                     # one-shot run (CI mode)
-npm run test:watch           # watch mode for TDD
+bun run test                 # one-shot run (CI mode)
+bun run test:watch           # watch mode for TDD
 ```
 
-Note: `package.json` and `node_modules/` are **dev-only**. Nothing
-under `node_modules/` is served to ComfyUI.
+Note: `package.json`, `node_modules/`, and `src/` are **dev/source-time**.
+Only the built `web/dist/` is served to ComfyUI; the kit is inlined into
+the bundle (nothing under `node_modules/` is served).
 
 ### Iterating on JS / CSS
 
-**No ComfyUI restart needed** for changes under `web/`. Hard-refresh
-the browser tab (Ctrl+Shift+R / Cmd+Shift+R). Changes to
-`gallery_loader.py` (backend node, endpoints) **do** require a
-restart:
+Changes under `src/` (or `web/css/`) require a **`bun run build`** to
+refresh `web/dist/`, then a browser hard-refresh
+(Ctrl+Shift+R / Cmd+Shift+R) — **no ComfyUI restart**. Changes to
+`gallery_loader.py` (backend node, endpoints) **do** require a restart:
 
 ```sh
 sudo -n systemctl restart comfyui.service
@@ -161,7 +184,7 @@ sudo -n systemctl restart comfyui.service
 
 ```sh
 curl -s -o /dev/null -w "%{http_code}\n" \
-  http://127.0.0.1:8188/extensions/comfyui-gallery-loader/js/image-picker.js
+  http://127.0.0.1:8188/extensions/comfyui-gallery-loader/index.js
 # Expected: 200
 
 curl -s http://127.0.0.1:8188/gallery_loader/base | jq .

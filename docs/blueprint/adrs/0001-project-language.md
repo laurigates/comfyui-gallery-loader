@@ -1,7 +1,8 @@
 ---
 id: ADR-0001
 created: 2026-05-28
-status: Accepted
+status: Superseded
+superseded-by: ADR-0010
 domain: build-tooling
 relates-to: [PRD-001]
 ---
@@ -10,7 +11,9 @@ relates-to: [PRD-001]
 
 ## Status
 
-Accepted
+Superseded by [ADR-0010](0010-adopt-typescript-bun-build.md) — the frontend
+moved from vanilla JavaScript to TypeScript compiled via `bun build`. The
+Python-backend half of this decision still holds.
 
 ## Context
 

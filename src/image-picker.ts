@@ -1,4 +1,4 @@
-// image-picker.js — opens a modal gallery picker on click of either:
+// image-picker.ts — opens a modal gallery picker on click of either:
 //   - any LoadImage-family `image` combo widget (stock LoadImage,
 //     LoadImageMask, LoadImageOutput) — Input/Output/Temp tabs, writes
 //     annotated values like "foo.png [output]" that core LoadImage's
@@ -10,20 +10,20 @@
 //     footer "Use this folder" button; clicks on folders still descend.
 //
 // Architecture:
-//   modal-shell.js  — backdrop, dialog, header, search row, body, footer,
-//                     keyboard ESC, single-modal discipline.
-//   modal-fuzzy.js  — fzf-lite fuzzy matcher.
-//   image-picker.js — this file: widget hooks + grid renderer + listing
+//   @laurigates/comfy-modal-kit — backdrop, dialog, header, search row,
+//                     body, footer, keyboard ESC, single-modal discipline
+//                     (openModalShell) + fzf-lite fuzzy matcher (fuzzyScore).
+//                     Inlined into web/dist by bun build. See ADR-0010.
+//   image-picker.ts — this file: widget hooks + grid renderer + listing
 //                     fetch against /gallery_loader/list.
 //
-// The inline-grid `GalleryLoadImage` node (gallery_loader.js) is
+// The inline-grid `GalleryLoadImage` node (gallery_loader.ts) is
 // unchanged — workflows that use it keep working.
 
 console.warn("[comfyui-gallery-loader] image-picker.js: module loading");
 
-import { app } from "../../../scripts/app.js";
-import { fuzzyScore } from "./modal-fuzzy.js";
-import { openModalShell } from "./modal-shell.js";
+import { fuzzyScore, openModalShell } from "@laurigates/comfy-modal-kit";
+import { app } from "/scripts/app.js";
 
 console.warn("[comfyui-gallery-loader] image-picker.js: imports resolved");
 
@@ -58,19 +58,104 @@ const VALID_SORTS = new Set([
   "pixels:desc",
 ]);
 
-function loadSavedSort() {
+// ============================================================
+// Types
+// ============================================================
+//
+// The package exports `ComfyApp` at the module root but not the widget / node
+// / node-def interfaces (declared internally, un-exported). The pack models
+// the small surface it touches with local structural interfaces.
+
+interface PickerWidget {
+  name: string;
+  value: unknown;
+  type?: string;
+  options?: {
+    values?: unknown;
+    tooltip?: string;
+    vhs_path_extensions?: unknown;
+    _origImageUpload?: boolean;
+  } & Record<string, unknown>;
+  callback?: (value: unknown, ...rest: unknown[]) => unknown;
+  onPointerDown?: (pointer: unknown, node: PickerNode, canvas: unknown) => boolean | undefined;
+  inputEl?: { value?: string } & Record<string, unknown>;
+}
+
+interface PickerNode {
+  widgets?: PickerWidget[];
+  comfyClass?: string;
+  type?: string;
+  addWidget: (
+    type: string,
+    label: string,
+    value: unknown,
+    callback: (...args: unknown[]) => unknown,
+    options?: Record<string, unknown>,
+  ) => unknown;
+  setDirtyCanvas?: (fg: boolean, bg: boolean) => void;
+  _galleryPickerEnhanced?: boolean;
+  _vhsGalleryEnhanced?: boolean;
+}
+
+interface NodeDataInput {
+  required?: Record<string, unknown>;
+  optional?: Record<string, unknown>;
+}
+
+interface NodeData {
+  name?: string;
+  input?: NodeDataInput;
+}
+
+interface BasePaths {
+  base_path: string;
+  input_dir: string;
+  output_dir: string;
+  temp_dir: string;
+  ok?: boolean;
+  error?: string;
+}
+
+interface ListingDir {
+  name: string;
+}
+
+interface ListingFile {
+  name: string;
+  ext?: string;
+  mtime: number;
+  size?: number;
+  width?: number;
+  height?: number;
+}
+
+type PickerKind = "loadimage" | "vhs-path";
+type PickerMode = "file" | "directory";
+
+interface OpenOpts {
+  kind: PickerKind;
+  mode?: PickerMode;
+  extensions?: string[];
+}
+
+interface SavedSort {
+  key: string;
+  dir: string;
+}
+
+function loadSavedSort(): SavedSort | null {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
     if (!raw || !VALID_SORTS.has(raw)) return null;
     const [key, dir] = raw.split(":");
-    return { key, dir };
+    return { key: key as string, dir: dir as string };
   } catch (e) {
     console.warn(`[${EXT_NAME}] could not read saved sort`, e);
     return null;
   }
 }
 
-function saveSort(key, dir) {
+function saveSort(key: string, dir: string): void {
   try {
     localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
   } catch (e) {
@@ -89,21 +174,23 @@ const VHS_PATH_LOADERS = new Set([
 ]);
 
 // Cached /gallery_loader/base response. Set once on first picker open.
-let BASE_PATHS = null;
+let BASE_PATHS: BasePaths | null = null;
 
-async function fetchBasePaths() {
+async function fetchBasePaths(): Promise<BasePaths> {
   if (BASE_PATHS) return BASE_PATHS;
+  let resolved: BasePaths;
   try {
     const r = await fetch(BASE_URL);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     if (!data.ok) throw new Error(data.error || "base paths fetch failed");
-    BASE_PATHS = data;
+    resolved = data;
   } catch (e) {
     console.warn(`[${EXT_NAME}] /gallery_loader/base failed`, e);
-    BASE_PATHS = { base_path: "/", input_dir: "", output_dir: "", temp_dir: "" };
+    resolved = { base_path: "/", input_dir: "", output_dir: "", temp_dir: "" };
   }
-  return BASE_PATHS;
+  BASE_PATHS = resolved;
+  return resolved;
 }
 
 // ============================================================
@@ -121,41 +208,43 @@ async function fetchBasePaths() {
 // Trade-off: the native "Upload image" button is tied to the same flag, so
 // it disappears too. The modal can grow its own upload action later.
 
-function isImageUploadEntry(entry) {
+function isImageUploadEntry(entry: unknown): boolean {
   if (Array.isArray(entry) && entry.length >= 2) {
     const opts = entry[1];
-    return opts && typeof opts === "object" && opts.image_upload === true;
+    return (
+      !!opts && typeof opts === "object" && (opts as Record<string, unknown>).image_upload === true
+    );
   }
   if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    return entry.image_upload === true;
+    return (entry as Record<string, unknown>).image_upload === true;
   }
   return false;
 }
 
-function defangNodeData(nodeData) {
+function defangNodeData(nodeData: NodeData | null | undefined): boolean {
   const inputs = nodeData?.input;
   if (!inputs) return false;
   let touched = false;
-  for (const group of ["required", "optional"]) {
+  for (const group of ["required", "optional"] as const) {
     const block = inputs[group];
     if (!block) continue;
     for (const [name, entry] of Object.entries(block)) {
       if (!isImageUploadEntry(entry)) continue;
       if (Array.isArray(entry)) {
-        entry[1].image_upload = false;
-        entry[1]._origImageUpload = true;
+        (entry[1] as Record<string, unknown>).image_upload = false;
+        (entry[1] as Record<string, unknown>)._origImageUpload = true;
       } else {
-        entry.image_upload = false;
-        entry._origImageUpload = true;
+        (entry as Record<string, unknown>).image_upload = false;
+        (entry as Record<string, unknown>)._origImageUpload = true;
       }
       touched = true;
-      console.warn(`[${EXT_NAME}] defanged image_upload on ${nodeData.name}.${name}`);
+      console.warn(`[${EXT_NAME}] defanged image_upload on ${nodeData?.name}.${name}`);
     }
   }
   return touched;
 }
 
-function findImageWidget(node) {
+function findImageWidget(node: PickerNode): PickerWidget | null {
   if (!node?.widgets) return null;
   for (const w of node.widgets) {
     if (w?.options?._origImageUpload === true) return w;
@@ -174,7 +263,7 @@ function findImageWidget(node) {
   return null;
 }
 
-function enhanceLoadImageNode(node) {
+function enhanceLoadImageNode(node: PickerNode): void {
   if (!node?.widgets) return;
   if (node._galleryPickerEnhanced) return;
   const w = findImageWidget(node);
@@ -185,7 +274,7 @@ function enhanceLoadImageNode(node) {
   // values list (rebuilt from input/) won't contain it — the canvas
   // shows the literal text but the dropdown looks empty. Append so the
   // value validates against the combo's options.
-  const v = (w.value || "").trim();
+  const v = (typeof w.value === "string" ? w.value : "").trim();
   if (/\[(output|temp)\]\s*$/.test(v)) {
     const values = w.options?.values;
     if (Array.isArray(values) && !values.includes(v)) values.push(v);
@@ -204,7 +293,12 @@ function enhanceLoadImageNode(node) {
 
   // Strategy A — patch widget.onPointerDown (plain canvas combo).
   const origDown = w.onPointerDown;
-  w.onPointerDown = function (pointer, ownerNode, canvas) {
+  w.onPointerDown = function (
+    this: PickerWidget,
+    pointer: unknown,
+    ownerNode: PickerNode,
+    canvas: unknown,
+  ): boolean | undefined {
     if (typeof origDown === "function") {
       const consumed = origDown.call(this, pointer, ownerNode, canvas);
       if (consumed) return consumed;
@@ -228,7 +322,7 @@ function enhanceLoadImageNode(node) {
 // VHS path-loader hook (STRING widget + vhs_path_extensions)
 // ============================================================
 
-function findVHSPathWidget(node) {
+function findVHSPathWidget(node: PickerNode): PickerWidget | null {
   if (!node?.widgets) return null;
   for (const w of node.widgets) {
     if (Array.isArray(w?.options?.vhs_path_extensions)) return w;
@@ -236,15 +330,15 @@ function findVHSPathWidget(node) {
   return null;
 }
 
-function enhanceVHSPathNode(node) {
+function enhanceVHSPathNode(node: PickerNode): void {
   if (!node?.widgets) return;
   if (node._vhsGalleryEnhanced) return;
-  if (!VHS_PATH_LOADERS.has(node.comfyClass)) return;
+  if (!node.comfyClass || !VHS_PATH_LOADERS.has(node.comfyClass)) return;
   const w = findVHSPathWidget(node);
   if (!w) return;
   node._vhsGalleryEnhanced = true;
 
-  const exts = w.options.vhs_path_extensions;
+  const exts = w.options?.vhs_path_extensions as unknown[] | undefined;
   const isDirectoryMode = Array.isArray(exts) && exts.length === 0;
   console.warn(`[${EXT_NAME}] enhancing VHS ${node.comfyClass}:`, {
     widgetName: w.name,
@@ -257,12 +351,12 @@ function enhanceVHSPathNode(node) {
     openImagePicker(w, node, {
       kind: "vhs-path",
       mode: isDirectoryMode ? "directory" : "file",
-      extensions: exts,
+      extensions: exts as string[],
     });
   });
 }
 
-function addBrowseButton(node, label, onClick) {
+function addBrowseButton(node: PickerNode, label: string, onClick: () => void): void {
   try {
     const btn = node.addWidget(
       "button",
@@ -278,10 +372,10 @@ function addBrowseButton(node, label, onClick) {
       { serialize: false },
     );
     if (btn && node.widgets) {
-      const idx = node.widgets.indexOf(btn);
+      const idx = node.widgets.indexOf(btn as PickerWidget);
       if (idx !== -1 && idx !== node.widgets.length - 1) {
         node.widgets.splice(idx, 1);
-        node.widgets.push(btn);
+        node.widgets.push(btn as PickerWidget);
       }
     }
     node.setDirtyCanvas?.(true, true);
@@ -294,21 +388,27 @@ function addBrowseButton(node, label, onClick) {
 // Value parsing / building
 // ============================================================
 
-function isAbsPath(v) {
+function isAbsPath(v: string): boolean {
   return v.startsWith("/") || /^[A-Za-z]:[\\/]/.test(v);
 }
 
-function parseLoadImageValue(v) {
+interface ParsedLoadImage {
+  type: string;
+  subfolder: string;
+  name: string;
+}
+
+function parseLoadImageValue(v: unknown): ParsedLoadImage {
   // LoadImage value: "filename" or "subfolder/filename" or annotated
   // "foo.png [input|output|temp]". Returns { type, subfolder, name }.
-  const s = (v || "").trim();
+  const s = (typeof v === "string" ? v : "").trim();
   if (!s) return { type: "input", subfolder: "", name: "" };
   const ann = s.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
   if (ann) {
-    const rel = ann[1].replace(/\\/g, "/");
+    const rel = (ann[1] as string).replace(/\\/g, "/");
     const idx = rel.lastIndexOf("/");
     return {
-      type: ann[2],
+      type: ann[2] as string,
       subfolder: idx >= 0 ? rel.slice(0, idx) : "",
       name: idx >= 0 ? rel.slice(idx + 1) : rel,
     };
@@ -322,9 +422,14 @@ function parseLoadImageValue(v) {
   };
 }
 
-function parseAbsPath(v) {
+interface ParsedAbs {
+  dir: string;
+  name: string;
+}
+
+function parseAbsPath(v: unknown): ParsedAbs {
   // For VHS path widgets. Splits an abs path into { dir, name }.
-  const s = (v || "").trim();
+  const s = (typeof v === "string" ? v : "").trim();
   if (!s || !isAbsPath(s)) return { dir: "", name: "" };
   const norm = s.replace(/\\/g, "/");
   const idx = norm.lastIndexOf("/");
@@ -334,7 +439,7 @@ function parseAbsPath(v) {
   };
 }
 
-function buildLoadImageValue(type, subfolder, name) {
+function buildLoadImageValue(type: string, subfolder: string, name: string): string {
   const sub = (subfolder || "").replace(/^\/+|\/+$/g, "");
   const rel = sub ? `${sub}/${name}` : name;
   // Preserve the existing bare-relative form for input so existing
@@ -342,7 +447,7 @@ function buildLoadImageValue(type, subfolder, name) {
   return type === "input" ? rel : `${rel} [${type}]`;
 }
 
-function joinAbs(dir, name) {
+function joinAbs(dir: string, name: string): string {
   const d = (dir || "/").replace(/\/+$/, "");
   return d === "" ? `/${name}` : `${d}/${name}`;
 }
@@ -351,7 +456,7 @@ function joinAbs(dir, name) {
 // Thumbnail URL dispatch
 // ============================================================
 
-function imageThumbURL(type, subfolder, name) {
+function imageThumbURL(type: string, subfolder: string, name: string): string {
   const p = new URLSearchParams({
     filename: name,
     type,
@@ -361,14 +466,14 @@ function imageThumbURL(type, subfolder, name) {
   return `/api/view?${p.toString()}`;
 }
 
-function imageThumbURLAbs(absDir, name) {
+function imageThumbURLAbs(absDir: string, name: string): string {
   const full = joinAbs(absDir, name);
   return `/gallery_loader/thumb?path=${encodeURIComponent(full)}`;
 }
 
-function videoSrcURL(type, subfolder, name, absDir) {
+function videoSrcURL(type: string, subfolder: string, name: string, absDir?: string): string {
   if (type === "path") {
-    const full = joinAbs(absDir, name);
+    const full = joinAbs(absDir || "", name);
     return `${FILE_URL}?path=${encodeURIComponent(full)}`;
   }
   const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
@@ -379,15 +484,47 @@ function videoSrcURL(type, subfolder, name, absDir) {
 // Picker
 // ============================================================
 
-async function openImagePicker(widget, node, opts) {
+interface PickerState {
+  kind: PickerKind;
+  mode: PickerMode;
+  type: string;
+  subfolder: string;
+  absPath: string;
+  currentName: string;
+  dirs: ListingDir[];
+  files: ListingFile[];
+  sortKey: string;
+  sortDir: string;
+  query: string;
+  didInitialScroll: boolean;
+  extensionsParam: string[] | null;
+}
+
+interface InitialSnapshot {
+  type: string;
+  subfolder: string;
+  name: string;
+}
+
+interface ThumbDescriptor {
+  kind: "img" | "video" | "icon";
+  src?: string;
+  text?: string;
+}
+
+async function openImagePicker(
+  widget: PickerWidget,
+  node: PickerNode,
+  opts: OpenOpts,
+): Promise<void> {
   ensureStyle();
 
   // Resolve opts → initial state
   const kind = opts.kind; // "loadimage" | "vhs-path"
-  const mode = opts.mode || "file"; // "file" | "directory"
+  const mode: PickerMode = opts.mode || "file"; // "file" | "directory"
   const extensions = Array.isArray(opts.extensions) ? opts.extensions : null;
 
-  const state = {
+  const state: PickerState = {
     kind,
     mode,
     // For loadimage: type ∈ {input, output, temp}; subfolder relative to root.
@@ -417,7 +554,7 @@ async function openImagePicker(widget, node, opts) {
     state.sortDir = savedSort.dir;
   }
 
-  let initialSnapshot;
+  let initialSnapshot: InitialSnapshot;
   if (kind === "loadimage") {
     const init = parseLoadImageValue(widget.value);
     state.type = init.type;
@@ -466,7 +603,7 @@ async function openImagePicker(widget, node, opts) {
   });
 
   // ---- Toolbar: tabs (loadimage only) + breadcrumbs + sort + refresh -
-  let tabsEl = null;
+  let tabsEl: HTMLElement | null = null;
   if (kind === "loadimage") {
     tabsEl = document.createElement("div");
     tabsEl.className = "ip-tabs";
@@ -510,14 +647,14 @@ async function openImagePicker(widget, node, opts) {
   gridEl.className = "ip-grid";
   modal.bodyEl.appendChild(gridEl);
 
-  const countEl = modal.footerEl.querySelector(".ip-count");
-  function setCount(visible, total) {
+  const countEl = modal.footerEl.querySelector(".ip-count") as HTMLElement | null;
+  function setCount(visible: number, total: number): void {
     if (!countEl) return;
     countEl.textContent = `${visible} / ${total}`;
   }
 
   // ---- Footer "Use this folder" button (directory mode only) -----
-  let useFolderEl = null;
+  let useFolderEl: HTMLButtonElement | null = null;
   if (mode === "directory") {
     useFolderEl = document.createElement("button");
     useFolderEl.type = "button";
@@ -540,9 +677,9 @@ async function openImagePicker(widget, node, opts) {
 
   sortEl.addEventListener("change", () => {
     const [k, d] = sortEl.value.split(":");
-    state.sortKey = k;
-    state.sortDir = d;
-    saveSort(k, d);
+    state.sortKey = k as string;
+    state.sortDir = d as string;
+    saveSort(k as string, d as string);
     renderGrid();
   });
 
@@ -550,17 +687,17 @@ async function openImagePicker(widget, node, opts) {
 
   if (tabsEl) {
     tabsEl.addEventListener("click", (e) => {
-      const b = e.target.closest("[data-type]");
+      const b = (e.target as HTMLElement).closest("[data-type]") as HTMLElement | null;
       if (!b) return;
       if (state.type === b.dataset.type) return;
-      state.type = b.dataset.type;
+      state.type = b.dataset.type as string;
       state.subfolder = "";
       loadAndRender();
     });
   }
 
   crumbsEl.addEventListener("click", (e) => {
-    const c = e.target.closest("[data-sub], [data-abs]");
+    const c = (e.target as HTMLElement).closest("[data-sub], [data-abs]") as HTMLElement | null;
     if (!c) return;
     if (c.dataset.abs !== undefined) {
       state.absPath = c.dataset.abs || "/";
@@ -571,23 +708,23 @@ async function openImagePicker(widget, node, opts) {
   });
 
   gridEl.addEventListener("click", (e) => {
-    const card = e.target.closest(".ip-card");
+    const card = (e.target as HTMLElement).closest(".ip-card") as HTMLElement | null;
     if (!card) return;
     if (card.classList.contains("is-up")) {
       navigateUp();
       return;
     }
     if (card.classList.contains("is-dir")) {
-      navigateInto(card.dataset.name);
+      navigateInto(card.dataset.name as string);
       return;
     }
     if (card.classList.contains("is-file")) {
       if (mode === "directory") return; // files are inert in dir mode
-      commitFile(card.dataset.name, card.dataset.ext || "");
+      commitFile(card.dataset.name as string, card.dataset.ext || "");
     }
   });
 
-  function navigateUp() {
+  function navigateUp(): void {
     if (state.type === "path") {
       const p = (state.absPath || "/").replace(/\/+$/, "");
       if (p === "" || p === "/") return; // already at root
@@ -601,7 +738,7 @@ async function openImagePicker(widget, node, opts) {
     loadAndRender();
   }
 
-  function navigateInto(name) {
+  function navigateInto(name: string): void {
     if (state.type === "path") {
       state.absPath = joinAbs(state.absPath, name);
     } else {
@@ -613,16 +750,16 @@ async function openImagePicker(widget, node, opts) {
 
   // ---- Render ----------------------------------------------------
 
-  function renderTabs() {
+  function renderTabs(): void {
     if (!tabsEl) return;
     for (const b of tabsEl.querySelectorAll(".ip-tab")) {
-      b.classList.toggle("is-active", b.dataset.type === state.type);
+      b.classList.toggle("is-active", (b as HTMLElement).dataset.type === state.type);
     }
   }
 
-  function renderCrumbs() {
+  function renderCrumbs(): void {
     crumbsEl.innerHTML = "";
-    const mk = (text, attr, value) => {
+    const mk = (text: string, attr: string, value: string) => {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "ip-crumb";
@@ -650,7 +787,7 @@ async function openImagePicker(widget, node, opts) {
     }
   }
 
-  function buildListingURL() {
+  function buildListingURL(): string {
     const p = new URLSearchParams();
     if (state.type === "path") {
       p.set("type", "path");
@@ -665,7 +802,7 @@ async function openImagePicker(widget, node, opts) {
     return `${LIST_URL}?${p.toString()}`;
   }
 
-  async function loadAndRender() {
+  async function loadAndRender(): Promise<void> {
     renderTabs();
     renderCrumbs();
     modal.setBusy(true);
@@ -680,7 +817,7 @@ async function openImagePicker(widget, node, opts) {
       modal.setStatus(data.exists ? "" : "Directory not found.");
     } catch (e) {
       console.error(`[${EXT_NAME}] list failed:`, e);
-      modal.setStatus(`Error: ${e.message}`);
+      modal.setStatus(`Error: ${(e as Error).message}`);
       state.dirs = [];
       state.files = [];
     }
@@ -688,7 +825,7 @@ async function openImagePicker(widget, node, opts) {
     renderGrid();
   }
 
-  function thumbForFile(f) {
+  function thumbForFile(f: ListingFile): ThumbDescriptor {
     const ext = (f.ext || "").toLowerCase();
     if (state.type === "path") {
       if (IMG_EXTS.has(ext)) {
@@ -708,7 +845,7 @@ async function openImagePicker(widget, node, opts) {
     return { kind: "icon", text: "📄" };
   }
 
-  function renderGrid() {
+  function renderGrid(): void {
     const q = state.query;
     gridEl.innerHTML = "";
 
@@ -738,7 +875,7 @@ async function openImagePicker(widget, node, opts) {
 
     let files = state.files;
     if (q) {
-      const scored = [];
+      const scored: { f: ListingFile; score: number }[] = [];
       for (const f of files) {
         const r = fuzzyScore(q, f.name);
         if (r) scored.push({ f, score: r.score });
@@ -812,35 +949,35 @@ async function openImagePicker(widget, node, opts) {
     }
   }
 
-  function scrollToSelected() {
-    const card = gridEl.querySelector(".ip-card.is-selected");
+  function scrollToSelected(): void {
+    const card = gridEl.querySelector(".ip-card.is-selected") as HTMLElement | null;
     if (!card) return;
     const body = modal.bodyEl;
     const target = card.offsetTop - Math.max(0, (body.clientHeight - card.offsetHeight) / 2);
     body.scrollTop = Math.max(0, target);
   }
 
-  function shortenPath(p) {
+  function shortenPath(p: string): string {
     if (!p) return "/";
     if (p.length <= 48) return p;
     return `…${p.slice(-46)}`;
   }
 
-  function installLazyThumbs(root) {
+  function installLazyThumbs(root: HTMLElement): void {
     const els = root.querySelectorAll("img[data-src], video[data-src]");
     if (!els.length) return;
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           if (!e.isIntersecting) continue;
-          const el = e.target;
-          const src = el.dataset.src;
+          const el = e.target as HTMLImageElement | HTMLVideoElement;
+          const src = (el as HTMLElement).dataset.src;
           if (src) {
             if (el.tagName === "VIDEO") {
               // Switch to preload=metadata only when in view, so
               // the browser only fetches video headers for thumbs
               // the user actually scrolled to.
-              el.preload = "metadata";
+              (el as HTMLVideoElement).preload = "metadata";
             }
             el.src = src;
             el.removeAttribute("data-src");
@@ -853,8 +990,8 @@ async function openImagePicker(widget, node, opts) {
     for (const el of els) io.observe(el);
   }
 
-  function commitFile(name, _ext) {
-    let value;
+  function commitFile(name: string, _ext: string): void {
+    let value: string;
     if (state.type === "path") {
       value = joinAbs(state.absPath, name);
     } else {
@@ -870,14 +1007,14 @@ async function openImagePicker(widget, node, opts) {
     modal.close();
   }
 
-  function commitFolder() {
+  function commitFolder(): void {
     const value =
       state.type === "path" ? state.absPath || "/" : state.subfolder ? state.subfolder : state.type;
     applyValue(value);
     modal.close();
   }
 
-  function applyValue(value) {
+  function applyValue(value: string): void {
     widget.value = value;
     // STRING widgets that render via a DOM input keep their own copy;
     // sync it so the user sees the new value before the canvas redraws.
@@ -893,15 +1030,17 @@ async function openImagePicker(widget, node, opts) {
     app.graph?.setDirtyCanvas?.(true, true);
   }
 
-  function sortFiles(files, key, dir) {
+  function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[] {
     const mul = dir === "asc" ? 1 : -1;
-    const nameCmp = (a, b) =>
+    const nameCmp = (a: ListingFile, b: ListingFile) =>
       a.name.localeCompare(b.name, undefined, {
         numeric: true,
         sensitivity: "base",
       });
-    const numCmp = (getter) => (a, b) => (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
-    let cmp;
+    const numCmp =
+      (getter: (f: ListingFile) => number | undefined) => (a: ListingFile, b: ListingFile) =>
+        (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
+    let cmp: (a: ListingFile, b: ListingFile) => number;
     switch (key) {
       case "name":
         cmp = nameCmp;
@@ -1098,7 +1237,7 @@ const PICKER_CSS = `
 }
 `;
 
-function ensureStyle() {
+function ensureStyle(): void {
   if (document.getElementById(STYLE_ID)) return;
   const s = document.createElement("style");
   s.id = STYLE_ID;
@@ -1106,10 +1245,16 @@ function ensureStyle() {
   document.head.appendChild(s);
 }
 
-function escHTML(s) {
+function escHTML(s: unknown): string {
   return String(s).replace(
     /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+    (c) =>
+      (
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }) as Record<
+          string,
+          string
+        >
+      )[c] as string,
   );
 }
 
@@ -1122,29 +1267,29 @@ try {
     name: "comfyui.gallery-loader.image-picker",
     async beforeRegisterNodeDef(_nodeType, nodeData) {
       try {
-        defangNodeData(nodeData);
+        defangNodeData(nodeData as unknown as NodeData);
       } catch (e) {
-        console.warn(`[${EXT_NAME}] defang failed for ${nodeData?.name}`, e);
+        console.warn(`[${EXT_NAME}] defang failed for ${(nodeData as NodeData)?.name}`, e);
       }
     },
     setup() {
       ensureStyle();
       console.warn(`[${EXT_NAME}] image-picker setup running`);
-      const nodes = app?.graph?._nodes;
+      const nodes = (app?.graph as { _nodes?: unknown[] } | undefined)?._nodes;
       if (Array.isArray(nodes)) {
         for (const n of nodes) {
-          enhanceLoadImageNode(n);
-          enhanceVHSPathNode(n);
+          enhanceLoadImageNode(n as PickerNode);
+          enhanceVHSPathNode(n as PickerNode);
         }
       }
     },
     nodeCreated(node) {
-      enhanceLoadImageNode(node);
-      enhanceVHSPathNode(node);
+      enhanceLoadImageNode(node as unknown as PickerNode);
+      enhanceVHSPathNode(node as unknown as PickerNode);
     },
     loadedGraphNode(node) {
-      enhanceLoadImageNode(node);
-      enhanceVHSPathNode(node);
+      enhanceLoadImageNode(node as unknown as PickerNode);
+      enhanceVHSPathNode(node as unknown as PickerNode);
     },
   });
   console.warn(`[${EXT_NAME}] image-picker.js: registerExtension returned`);

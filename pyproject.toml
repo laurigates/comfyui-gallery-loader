@@ -64,3 +64,7 @@ addopts = "--import-mode=importlib"
 PublisherId = "laurigates"
 DisplayName = "Gallery Loader"
 Icon = ""
+# The built frontend (web/dist/) is git-ignored — emitted by `bun run
+# build`. publish-node-action honors [tool.comfy] includes to force-add
+# otherwise-ignored paths into the published tarball. See ADR-0010.
+includes = ["web/dist"]

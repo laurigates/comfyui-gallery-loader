@@ -1,13 +1,24 @@
 {
-  "name": "comfyui-gallery-loader-dev",
+  "name": "comfyui-gallery-loader",
   "private": true,
   "type": "module",
-  "description": "Dev-only test harness for the comfyui-gallery-loader pack. Nothing here ships to users — the runtime is the multi-file ES module set in web/js/.",
+  "description": "Touch-friendly gallery picker for ComfyUI image and path widgets. TypeScript source in src/, built to web/dist/ via bun build (the @laurigates/comfy-modal-kit primitives are inlined). See ADR-0010.",
   "scripts": {
+    "build": "bun build ./src/index.ts --target browser --format esm --outdir web/dist --external '/scripts/*' && rm -rf web/dist/css && cp -R web/css web/dist/css",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint": "biome check",
+    "knip": "knip"
+  },
+  "dependencies": {
+    "@laurigates/comfy-modal-kit": "^0.2.0"
   },
   "devDependencies": {
-    "vitest": "^4.1.8"
+    "typescript": "^5.7.0",
+    "@comfyorg/comfyui-frontend-types": "^1.43.0",
+    "@biomejs/biome": "^2.4.15",
+    "vitest": "^4.1.7",
+    "knip": "^5.0.0"
   }
 }
