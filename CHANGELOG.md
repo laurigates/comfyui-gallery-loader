@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.2...comfyui-gallery-loader-v0.1.3) (2026-06-06)
+
+
+### Features
+
+* **build:** migrate to TypeScript + bun build ([#16](https://github.com/laurigates/comfyui-gallery-loader/issues/16)) ([79937d1](https://github.com/laurigates/comfyui-gallery-loader/commit/79937d1aa1c9bbe19dca4180987833fd934c008c))
+
 ## [0.1.2](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.1...comfyui-gallery-loader-v0.1.2) (2026-06-06)
 
 
