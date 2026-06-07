@@ -111,14 +111,15 @@ suppress iOS double-tap zoom inside the modal:
 
 ## HTTP Endpoint Surface
 
-Four endpoints under `/gallery_loader/`:
+Five endpoints under `/gallery_loader/`:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/list` | GET | Directory listing for picker (`type=input/output/temp/path`) |
+| `/list` | GET | Directory listing for picker (`type=input/output/temp/path`); each file carries a `rating` (0–5) |
 | `/base` | GET | ComfyUI well-known dirs (base_path, input_dir, output_dir, ...) |
 | `/thumb` | GET | Thumbnail for arbitrary-absolute-path images |
 | `/file` | GET | Stream arbitrary-absolute-path file (image or video preview) |
+| `/rating` | POST | Persist a 0–5 star rating into a file's XMP (or `.xmp` sidecar). Body `{type, subfolder\|path, name, rating}`; same extension-whitelist + traversal gate as `/thumb`/`/file` |
 
 The frontend keeps **no hard-coded paths**. It calls `/base` once,
 then drives the picker from there.

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-ComfyUI custom-node pack with a small Python backend (one node + four
+ComfyUI custom-node pack with a small Python backend (one node + five
 HTTP endpoints) and a TypeScript frontend (`src/`) built to `web/dist/`
 via `bun build`. The modal shell + fuzzy matcher come from the shared
 `@laurigates/comfy-modal-kit` (inlined into the bundle). Both halves
@@ -29,12 +29,22 @@ Three entry points share one picker UI:
    Commits raw absolute paths. Directory loaders get a footer
    "Use this folder" button.
 
+All three surfaces show a **0–5 star rating** on each image card (click a
+star to set, click the active star to clear) and a **sort-by-rating**
+option. Ratings persist as standard `xmp:Rating` (mirrored to
+`MicrosoftPhoto:Rating` for Windows) written **losslessly in-place** into
+PNG/JPEG via stdlib byte surgery, or to a `<name>.xmp` sidecar for other
+formats — no new Python dependency, no pixel re-encode, ComfyUI's own
+workflow chunks preserved. Rating is display-only metadata; it never
+changes the committed widget value. See `xmp_meta.py` and ADR-0011.
+
 ## File layout
 
 | Path | Purpose |
 |------|---------|
 | `__init__.py` | Loader stub. Exports `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY="./web/dist"`. |
-| `gallery_loader.py` | `GalleryLoadImage` node + four HTTP endpoints (`/gallery_loader/{list,base,thumb,file}`). |
+| `gallery_loader.py` | `GalleryLoadImage` node + five HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating}`). |
+| `xmp_meta.py` | Pure, stdlib-only XMP star-rating read/write (in-file PNG/JPEG surgery + `.xmp` sidecar fallback). No ComfyUI imports. See ADR-0011. |
 | `src/index.ts` | Lone `bun build` entry. Imports both extension modules for their `app.registerExtension` side-effects. |
 | `src/gallery_loader.ts` | Inline-grid frontend for the `GalleryLoadImage` node (TS port of the former `web/js/gallery_loader.js`). |
 | `src/image-picker.ts` | Modal picker for stock `LoadImage` + VHS path loaders (TS port; consumes `@laurigates/comfy-modal-kit`). |

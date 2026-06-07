@@ -79,3 +79,52 @@ def test_resolve_listing_base_normalizes_path_type():
     base, err = gallery_loader._resolve_listing_base("path", "", "/tmp/../tmp/x")
     assert err == ""
     assert base == "/tmp/x"
+
+
+# ---------- _validate_rating_request --------------------------------
+
+
+def test_validate_rating_request_accepts_well_formed():
+    parsed, err = gallery_loader._validate_rating_request(
+        {"type": "output", "subfolder": "sub", "name": "foo.png", "rating": 3}
+    )
+    assert err == ""
+    assert parsed == {
+        "type": "output",
+        "subfolder": "sub",
+        "path": "",
+        "name": "foo.png",
+        "rating": 3,
+    }
+
+
+def test_validate_rating_request_rejects_out_of_range():
+    for bad in (-1, 6, 99):
+        parsed, err = gallery_loader._validate_rating_request({"name": "a.png", "rating": bad})
+        assert parsed is None
+        assert "0..5" in err
+
+
+def test_validate_rating_request_rejects_non_int_rating():
+    # bool is an int subclass — must be rejected too.
+    for bad in (True, 2.5, "3", None):
+        parsed, err = gallery_loader._validate_rating_request({"name": "a.png", "rating": bad})
+        assert parsed is None
+        assert "0..5" in err
+
+
+def test_validate_rating_request_rejects_name_with_separators():
+    for bad in ("../etc/passwd", "sub/foo.png", "..", ".", ""):
+        parsed, err = gallery_loader._validate_rating_request({"name": bad, "rating": 1})
+        assert parsed is None
+        assert "invalid name" in err
+
+
+def test_validate_rating_request_enforces_extension_whitelist():
+    parsed, err = gallery_loader._validate_rating_request({"name": "evil.txt", "rating": 1})
+    assert parsed is None
+    assert "unsupported file type" in err
+    # An allowed video extension passes the gate.
+    parsed, err = gallery_loader._validate_rating_request({"name": "clip.mp4", "rating": 1})
+    assert err == ""
+    assert parsed is not None

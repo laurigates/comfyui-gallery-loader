@@ -164,7 +164,7 @@
      * Roughly: 120px thumb (1:1) + ~30px name + ~12px optional dims
      * + ~8px padding. */
     content-visibility: auto;
-    contain-intrinsic-size: auto 170px;
+    contain-intrinsic-size: auto 188px;
 }
 .gl-card:hover {
     background: rgba(255, 255, 255, 0.08);
@@ -213,6 +213,26 @@
     font-variant-numeric: tabular-nums;
 }
 
+.gl-stars {
+    display: flex;
+    justify-content: center;
+    gap: 1px;
+}
+.gl-star {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 0 1px;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--border-color, #555);
+    cursor: pointer;
+}
+.gl-star.is-on,
+.gl-star:hover {
+    color: #ffd866;
+}
+
 .gl-foot {
     display: flex;
     gap: 8px;
@@ -243,4 +263,5 @@
     }
     .gl-chip, .gl-icon { min-height: 36px; padding: 6px 12px; }
     .gl-search, .gl-pathinput { min-height: 38px; font-size: 13px; }
+    .gl-star { font-size: 16px; padding: 2px; }
 }

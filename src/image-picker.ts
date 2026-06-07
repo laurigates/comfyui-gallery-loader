@@ -24,6 +24,15 @@ console.warn("[comfyui-gallery-loader] image-picker.js: module loading");
 
 import { fuzzyScore, openModalShell } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
+import {
+  applyStars,
+  nextRating,
+  postRating,
+  type RatingAddress,
+  ratingOf,
+  starsHTML,
+  warnRating,
+} from "./rating.js";
 
 console.warn("[comfyui-gallery-loader] image-picker.js: imports resolved");
 
@@ -56,6 +65,8 @@ const VALID_SORTS = new Set([
   "name:desc",
   "size:desc",
   "pixels:desc",
+  "rating:desc",
+  "rating:asc",
 ]);
 
 // ============================================================
@@ -127,6 +138,7 @@ interface ListingFile {
   size?: number;
   width?: number;
   height?: number;
+  rating?: number;
 }
 
 type PickerKind = "loadimage" | "vhs-path";
@@ -631,6 +643,8 @@ async function openImagePicker(
         <option value="name:desc">Name Z→A</option>
         <option value="size:desc">Largest file</option>
         <option value="pixels:desc">Highest resolution</option>
+        <option value="rating:desc">Highest rating</option>
+        <option value="rating:asc">Lowest rating</option>
     `;
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
 
@@ -707,7 +721,21 @@ async function openImagePicker(
     loadAndRender();
   });
 
+  // Star clicks rate the file without selecting/closing. Handled first; the
+  // card handler below early-returns when the click landed on a star.
   gridEl.addEventListener("click", (e) => {
+    const star = (e.target as HTMLElement).closest(".ip-star") as HTMLElement | null;
+    if (!star) return;
+    e.stopPropagation();
+    const card = star.closest(".ip-card") as HTMLElement | null;
+    const row = star.parentElement as HTMLElement | null;
+    if (!card || !row) return;
+    const cur = Number(row.dataset.rating || "0");
+    setStarRating(card.dataset.name as string, row, nextRating(cur, Number(star.dataset.val)));
+  });
+
+  gridEl.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).closest(".ip-star")) return;
     const card = (e.target as HTMLElement).closest(".ip-card") as HTMLElement | null;
     if (!card) return;
     if (card.classList.contains("is-up")) {
@@ -723,6 +751,31 @@ async function openImagePicker(
       commitFile(card.dataset.name as string, card.dataset.ext || "");
     }
   });
+
+  function setStarRating(name: string, row: HTMLElement, next: number): void {
+    const prev = Number(row.dataset.rating || "0");
+    applyStars(row, next);
+    const f = state.files.find((x) => x.name === name);
+    if (f) f.rating = next;
+    const addr: RatingAddress = {
+      type: state.type,
+      subfolder: state.subfolder,
+      absDir: state.absPath,
+      name,
+    };
+    postRating(addr, next)
+      .then((confirmed) => {
+        if (confirmed !== next) {
+          applyStars(row, confirmed);
+          if (f) f.rating = confirmed;
+        }
+      })
+      .catch((e) => {
+        warnRating(e);
+        applyStars(row, prev);
+        if (f) f.rating = prev;
+      });
+  }
 
   function navigateUp(): void {
     if (state.type === "path") {
@@ -912,10 +965,12 @@ async function openImagePicker(
           : t.kind === "video"
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
             : `<div class="ip-thumb-icon">${t.text}</div>`;
+      const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
       c.innerHTML = `
                 <div class="ip-thumb">${thumbInner}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
+                ${stars}
             `;
       gridEl.appendChild(c);
       visible++;
@@ -1050,6 +1105,9 @@ async function openImagePicker(
         break;
       case "pixels":
         cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
+        break;
+      case "rating":
+        cmp = numCmp((f) => f.rating);
         break;
       default:
         cmp = numCmp((f) => f.mtime);
@@ -1204,6 +1262,27 @@ const PICKER_CSS = `
     padding: 0 8px 6px;
     font-size: 10.5px;
     color: #888;
+}
+.ip-stars {
+    display: flex;
+    justify-content: center;
+    gap: 1px;
+    padding: 0 6px 6px;
+    margin-top: auto;
+}
+.ip-star {
+    background: transparent;
+    border: 0;
+    padding: 0 1px;
+    font-size: 13px;
+    line-height: 1;
+    color: #555;
+    cursor: pointer;
+    font-family: inherit;
+}
+.ip-star.is-on,
+.ip-star:hover {
+    color: #ffd866;
 }
 .ip-empty {
     grid-column: 1 / -1;
