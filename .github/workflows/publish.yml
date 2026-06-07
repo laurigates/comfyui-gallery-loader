@@ -32,3 +32,9 @@ jobs:
           # Personal access token issued at https://registry.comfy.org/
           # Stored as a repo secret named REGISTRY_ACCESS_TOKEN.
           personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+          # Reuse the workspace the prior step already built. `bun run build`
+          # emits web/dist/ (git-ignored, force-shipped via [tool.comfy]
+          # includes). Without skip_checkout the action runs its own
+          # actions/checkout, wiping web/dist before `comfy node publish`, so the
+          # registry tarball ships an empty web/dist and the extension never loads.
+          skip_checkout: 'true'
