@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.3...comfyui-gallery-loader-v0.1.4) (2026-06-07)
+
+
+### Bug Fixes
+
+* **ci:** set skip_checkout so the built web/dist reaches the registry ([#18](https://github.com/laurigates/comfyui-gallery-loader/issues/18)) ([3f15286](https://github.com/laurigates/comfyui-gallery-loader/commit/3f1528640d3928ca0cbc935bef6fca844555241f))
+
 ## [0.1.3](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.2...comfyui-gallery-loader-v0.1.3) (2026-06-06)
 
 
