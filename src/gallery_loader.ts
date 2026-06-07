@@ -9,6 +9,15 @@
 // Backend node + listing endpoints live in gallery_loader.py.
 
 import { app } from "/scripts/app.js";
+import {
+  applyStars,
+  nextRating,
+  postRating,
+  type RatingAddress,
+  ratingOf,
+  starsHTML,
+  warnRating,
+} from "./rating.js";
 
 const NODE = "GalleryLoadImage";
 const LIST_URL = "/gallery_loader/list";
@@ -85,6 +94,7 @@ interface ListingFile {
   size?: number;
   width?: number;
   height?: number;
+  rating?: number;
 }
 
 interface ParsedValue {
@@ -227,6 +237,8 @@ function attachGallery(node: GalleryNode): void {
                 <option value="size:asc">Smallest file</option>
                 <option value="pixels:desc">Largest resolution</option>
                 <option value="pixels:asc">Smallest resolution</option>
+                <option value="rating:desc">Highest rating</option>
+                <option value="rating:asc">Lowest rating</option>
             </select>
             <button class="gl-icon gl-refresh" title="Refresh">⟳</button>
         </div>
@@ -330,8 +342,18 @@ function attachGallery(node: GalleryNode): void {
     loadAndRender();
   });
 
-  // Grid clicks: dir descends, file selects, ".." goes up.
+  // Grid clicks: star rates, dir descends, file selects, ".." goes up.
   refs.grid.addEventListener("click", (e) => {
+    const star = (e.target as HTMLElement).closest(".gl-star") as HTMLElement | null;
+    if (star) {
+      const card = star.closest(".gl-card") as HTMLElement | null;
+      const row = star.parentElement as HTMLElement | null;
+      if (card && row) {
+        const cur = Number(row.dataset.rating || "0");
+        setStarRating(card.dataset.name as string, row, nextRating(cur, Number(star.dataset.val)));
+      }
+      return;
+    }
     const card = (e.target as HTMLElement).closest(".gl-card") as HTMLElement | null;
     if (!card) return;
     if (card.classList.contains("is-up")) {
@@ -533,6 +555,7 @@ function attachGallery(node: GalleryNode): void {
                 <div class="gl-thumb"><img loading="lazy" decoding="async" data-src="${url}" alt=""></div>
                 <div class="gl-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="gl-dims">${dims}</div>` : ""}
+                ${starsHTML("gl", ratingOf(f))}
             `;
       grid.appendChild(c);
     }
@@ -563,6 +586,31 @@ function attachGallery(node: GalleryNode): void {
 
   function updateSelectedFooter(): void {
     refs.selected.textContent = (typeof widget.value === "string" ? widget.value : "") || "(none)";
+  }
+
+  function setStarRating(name: string, row: HTMLElement, next: number): void {
+    const prev = Number(row.dataset.rating || "0");
+    applyStars(row, next);
+    const f = state.files.find((x) => x.name === name);
+    if (f) f.rating = next;
+    const addr: RatingAddress = {
+      type: state.type,
+      subfolder: state.subfolder,
+      absDir: state.absDir,
+      name,
+    };
+    postRating(addr, next)
+      .then((confirmed) => {
+        if (confirmed !== next) {
+          applyStars(row, confirmed);
+          if (f) f.rating = confirmed;
+        }
+      })
+      .catch((e) => {
+        warnRating(e);
+        applyStars(row, prev);
+        if (f) f.rating = prev;
+      });
   }
 
   // Use IntersectionObserver to defer thumbnail loading until visible.
@@ -611,6 +659,9 @@ function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[
       break;
     case "pixels":
       cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
+      break;
+    case "rating":
+      cmp = numCmp((f) => f.rating);
       break;
     default:
       cmp = numCmp((f) => f.mtime);

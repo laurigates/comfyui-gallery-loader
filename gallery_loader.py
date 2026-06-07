@@ -33,6 +33,8 @@ from aiohttp import web
 from PIL import Image, ImageOps, ImageSequence
 from server import PromptServer
 
+import xmp_meta
+
 log = logging.getLogger("comfyui-gallery-loader")
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif", ".avif"}
@@ -216,6 +218,38 @@ def _resolve_listing_base(type_name: str, subfolder: str, abs_path: str) -> tupl
     return None, f"unknown type: {type_name}"
 
 
+def _validate_rating_request(body: Any) -> tuple[dict[str, Any] | None, str]:
+    """Validate a /gallery_loader/rating POST body. Returns (parsed, error).
+
+    Enforces an integer 0..5 rating, a bare (traversal-free) filename, and
+    the image/video extension whitelist — the same security perimeter as
+    the /thumb and /file endpoints. Path resolution stays in the handler.
+    """
+    if not isinstance(body, dict):
+        return None, "invalid body"
+    rating = body.get("rating")
+    # bool is an int subclass — reject it explicitly.
+    if isinstance(rating, bool) or not isinstance(rating, int) or not (0 <= rating <= 5):
+        return None, "rating must be an integer 0..5"
+    name = body.get("name")
+    if not isinstance(name, str) or not name:
+        return None, "invalid name"
+    if os.path.basename(name) != name or name in (".", ".."):
+        return None, "invalid name"
+    type_name = body.get("type", "input")
+    if not isinstance(type_name, str):
+        return None, "invalid type"
+    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):
+        return None, "unsupported file type"
+    return {
+        "type": type_name,
+        "subfolder": body.get("subfolder") or "",
+        "path": body.get("path") or "",
+        "name": name,
+        "rating": rating,
+    }, ""
+
+
 @PromptServer.instance.routes.get("/gallery_loader/list")
 async def gallery_list(request: web.Request) -> web.Response:
     q = request.rel_url.query
@@ -274,6 +308,10 @@ async def gallery_list(request: web.Request) -> web.Response:
                                     width, height = im.size
                             except Exception:
                                 pass
+                        try:
+                            rating = xmp_meta.read_rating_cached(entry.path, st)
+                        except Exception:
+                            rating = 0
                         files.append(
                             {
                                 "name": entry.name,
@@ -282,6 +320,7 @@ async def gallery_list(request: web.Request) -> web.Response:
                                 "width": width,
                                 "height": height,
                                 "ext": ext,
+                                "rating": rating,
                             }
                         )
                 except OSError:
@@ -409,6 +448,45 @@ async def gallery_thumb(request: web.Request) -> web.Response:
     except Exception as exc:
         log.warning("thumb failed for %s: %s", path, exc)
         return web.Response(status=500)
+
+
+@PromptServer.instance.routes.post("/gallery_loader/rating")
+async def gallery_set_rating(request: web.Request) -> web.Response:
+    """Persist a 0..5 star rating into a file's XMP (or a sidecar).
+
+    Body: ``{type, subfolder|path, name, rating}`` — the same addressing
+    the picker already uses. Rating is metadata-only; the value contract
+    (what the widget commits) is untouched.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+
+    parsed, err = _validate_rating_request(body)
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert parsed is not None
+
+    base, berr = _resolve_listing_base(parsed["type"], parsed["subfolder"], parsed["path"])
+    if berr:
+        return web.json_response({"ok": False, "error": berr}, status=400)
+    assert base is not None
+
+    target = os.path.abspath(os.path.join(base, parsed["name"]))
+    # Belt-and-braces: the name is already separator-free, but re-assert
+    # containment so the target can't escape the sandboxed root.
+    if parsed["type"] in ("input", "output", "temp") and (
+        os.path.commonpath([target, base]) != base
+    ):
+        return web.json_response({"ok": False, "error": "name escapes root"}, status=400)
+    if not os.path.isfile(target):
+        return web.json_response({"ok": False, "error": "file not found"}, status=404)
+
+    ok, backend = xmp_meta.write_rating(target, parsed["rating"])
+    if not ok:
+        return web.json_response({"ok": False, "error": backend}, status=500)
+    return web.json_response({"ok": True, "rating": parsed["rating"], "backend": backend})
 
 
 NODE_CLASS_MAPPINGS = {"GalleryLoadImage": GalleryLoadImage}
