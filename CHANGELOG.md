@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.4...comfyui-gallery-loader-v0.1.5) (2026-06-07)
+
+
+### Features
+
+* **rating:** XMP star ratings + sort-by-rating ([#20](https://github.com/laurigates/comfyui-gallery-loader/issues/20)) ([3ffd312](https://github.com/laurigates/comfyui-gallery-loader/commit/3ffd312565a7830cec6097e0fa0d7b465d02f18f))
+
 ## [0.1.4](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.3...comfyui-gallery-loader-v0.1.4) (2026-06-07)
 
 
