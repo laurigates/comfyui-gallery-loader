@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.7...comfyui-gallery-loader-v0.1.8) (2026-06-08)
+
+
+### Miscellaneous
+
+* release 0.2.1 (republish with web/dist fix, supersede phantom 0.2.0) ([#31](https://github.com/laurigates/comfyui-gallery-loader/issues/31)) ([78cf57d](https://github.com/laurigates/comfyui-gallery-loader/commit/78cf57d391a237eddc40930bc53d7d2a9b8ec1aa))
+
 ## [0.1.7](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.6...comfyui-gallery-loader-v0.1.7) (2026-06-08)
 
 
