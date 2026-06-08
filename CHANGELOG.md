@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.5...comfyui-gallery-loader-v0.1.6) (2026-06-08)
+
+
+### Bug Fixes
+
+* add Comfy Registry icon/banner and publish on release event ([#23](https://github.com/laurigates/comfyui-gallery-loader/issues/23)) ([a11f7ea](https://github.com/laurigates/comfyui-gallery-loader/commit/a11f7eafcab7faf6a9640ac62b99c70116705711))
+
 ## [0.1.5](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.4...comfyui-gallery-loader-v0.1.5) (2026-06-07)
 
 
