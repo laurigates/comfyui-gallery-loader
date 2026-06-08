@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-gallery-loader"
 description = "Touch-friendly gallery picker for ComfyUI image and path widgets. Adds an inline card-grid LoadImage node, a modal picker over stock LoadImage with Input/Output/Temp tabs, and a filesystem browser for VHS path-loader nodes (single image, image directory, video)."
-version = "0.1.5"
+version = "0.1.6"
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.10"
@@ -63,7 +63,8 @@ addopts = "--import-mode=importlib"
 [tool.comfy]
 PublisherId = "laurigates"
 DisplayName = "Gallery Loader"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/icon.png"
+Banner = "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/banner.png"
 # The built frontend (web/dist/) is git-ignored — emitted by `bun run
 # build`. publish-node-action honors [tool.comfy] includes to force-add
 # otherwise-ignored paths into the published tarball. See ADR-0010.
