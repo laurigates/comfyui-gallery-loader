@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.6...comfyui-gallery-loader-v0.1.7) (2026-06-08)
+
+
+### Bug Fixes
+
+* import sibling xmp_meta relatively so the pack loads under ComfyUI ([#27](https://github.com/laurigates/comfyui-gallery-loader/issues/27)) ([2bae5e4](https://github.com/laurigates/comfyui-gallery-loader/commit/2bae5e4830477ce65ff30f38ed8ef8b3115b5b06))
+
 ## [0.1.6](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.5...comfyui-gallery-loader-v0.1.6) (2026-06-08)
 
 
