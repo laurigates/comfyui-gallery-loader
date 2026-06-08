@@ -24,7 +24,13 @@ jobs:
           bun run build
 
       - name: Publish Custom Node
-        uses: Comfy-Org/publish-node-action@v1
+        # Pinned to the commit that supports `skip_checkout`. The `@v1` and
+        # tagged `1.0.x` releases predate that input: they run an
+        # unconditional actions/checkout that wipes the git-ignored web/dist
+        # built above, so `comfy node publish` ships an EMPTY web/dist and the
+        # frontend extension never loads. No tag carries the fix yet, so we
+        # pin the immutable main SHA.
+        uses: Comfy-Org/publish-node-action@d2366e7abb6ab16f3bb03e3520ae25c8cf749bc9 # main: skip_checkout support
         with:
           # Personal access token issued at https://registry.comfy.org/
           # Stored as a repo secret named REGISTRY_ACCESS_TOKEN.
