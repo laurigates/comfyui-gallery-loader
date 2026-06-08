@@ -33,7 +33,15 @@ from aiohttp import web
 from PIL import Image, ImageOps, ImageSequence
 from server import PromptServer
 
-import xmp_meta
+try:
+    # ComfyUI imports custom_nodes as packages, so the sibling module must
+    # be pulled in relatively — a bare ``import xmp_meta`` raises
+    # ModuleNotFoundError at load time because the pack dir isn't on sys.path.
+    from . import xmp_meta
+except ImportError:
+    # Pytest imports this module flat (pack root on sys.path via pyproject's
+    # ``pythonpath = ["."]``); fall back to the absolute import.
+    import xmp_meta
 
 log = logging.getLogger("comfyui-gallery-loader")
 
