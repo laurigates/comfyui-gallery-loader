@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.8...comfyui-gallery-loader-v0.1.9) (2026-06-09)
+
+
+### Bug Fixes
+
+* **registry:** ship runtime-only files in the Comfy Registry tarball ([0953561](https://github.com/laurigates/comfyui-gallery-loader/commit/0953561359c71d1363b6dd5dc1f068889e165c00))
+
 ## [0.1.8](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.7...comfyui-gallery-loader-v0.1.8) (2026-06-08)
 
 
