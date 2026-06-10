@@ -41,3 +41,37 @@ jobs:
           # actions/checkout, wiping web/dist before `comfy node publish`, so the
           # registry tarball ships an empty web/dist and the extension never loads.
           skip_checkout: 'true'
+
+      - name: Set registry changelog from release notes
+        # `comfy node publish` cannot send a changelog (Comfy-Org/comfy-cli#467),
+        # so the registry's per-version "Updates" section stays empty. The
+        # registry does accept the publisher PAT on the version-update endpoint
+        # (fixed in Comfy-Org/registry-backend#168), so push the release-please
+        # release notes there after publishing. The {versionId} path segment
+        # must be the version's database UUID, not the semver string.
+        # Best-effort: a failure here must not fail the publish itself.
+        if: github.event_name == 'release' && github.event.release.body != ''
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+          # Passed via env (not inline interpolation) so markdown/quotes in the
+          # release notes cannot inject into the shell.
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          set -u
+          node_id=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["name"])')
+          publisher_id=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["tool"]["comfy"]["PublisherId"])')
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          version_id=$(curl -sf "https://api.comfy.org/nodes/${node_id}/versions" | jq -r --arg v "$version" '.[] | select(.version == $v) | .id')
+          if [ -z "$version_id" ] || [ "$version_id" = "null" ]; then
+            echo "::warning::registry changelog: could not resolve UUID for ${node_id}@${version}; Updates section left empty"
+            exit 0
+          fi
+          if jq -n --arg c "$RELEASE_BODY" '{changelog: $c}' | curl -sf -X PUT \
+              "https://api.comfy.org/publishers/${publisher_id}/nodes/${node_id}/versions/${version_id}" \
+              -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              --data-binary @- > /dev/null; then
+            echo "registry changelog set for ${node_id}@${version} (${version_id})"
+          else
+            echo "::warning::registry changelog PUT failed for ${node_id}@${version}; Updates section left empty"
+          fi
