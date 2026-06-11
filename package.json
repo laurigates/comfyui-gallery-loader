@@ -19,6 +19,6 @@
     "@comfyorg/comfyui-frontend-types": "^1.43.0",
     "@biomejs/biome": "^2.4.15",
     "vitest": "^4.1.7",
-    "knip": "^5.0.0"
+    "knip": "^6.16.1"
   }
 }
