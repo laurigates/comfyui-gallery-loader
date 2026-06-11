@@ -15,7 +15,7 @@
     "@laurigates/comfy-modal-kit": "^0.2.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "typescript": "^6.0.3",
     "@comfyorg/comfyui-frontend-types": "^1.43.0",
     "@biomejs/biome": "^2.4.15",
     "vitest": "^4.1.7",
