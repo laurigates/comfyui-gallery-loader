@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.10](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.9...comfyui-gallery-loader-v0.1.10) (2026-06-12)
+
+
+### Miscellaneous
+
+* **deps-dev:** Bump knip from 5.88.1 to 6.16.1 ([1eb5585](https://github.com/laurigates/comfyui-gallery-loader/commit/1eb5585320184d129d9d2d39a579e71f1e62c4dc))
+* **deps-dev:** Bump typescript from 5.9.3 to 6.0.3 ([26822da](https://github.com/laurigates/comfyui-gallery-loader/commit/26822dad58df1066d07faf7973ae40dcbf18212b))
+
 ## [0.1.9](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.8...comfyui-gallery-loader-v0.1.9) (2026-06-09)
 
 
