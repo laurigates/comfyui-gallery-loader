@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.11](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.10...comfyui-gallery-loader-v0.1.11) (2026-06-20)
+
+
+### Bug Fixes
+
+* pin comfyui-frontend-package to 3-part version (&gt;=1.40.0) ([#43](https://github.com/laurigates/comfyui-gallery-loader/issues/43)) ([0dd37a2](https://github.com/laurigates/comfyui-gallery-loader/commit/0dd37a2ad41bfd976c9a83a351c6cebcb5c07c07))
+
+
+### Miscellaneous
+
+* **deps:** remove Dependabot config, consolidate on Renovate ([#42](https://github.com/laurigates/comfyui-gallery-loader/issues/42)) ([dd728e6](https://github.com/laurigates/comfyui-gallery-loader/commit/dd728e629f4d02d2890ae3e981c1491aae45d0db))
+
 ## [0.1.10](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.9...comfyui-gallery-loader-v0.1.10) (2026-06-12)
 
 
