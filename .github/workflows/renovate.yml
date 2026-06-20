@@ -1,0 +1,34 @@
+name: Renovate
+
+on:
+  schedule:
+    # Avoid the top of the hour to reduce GitHub Actions scheduling congestion,
+    # which was causing scheduled runs to be delayed and fail with startup_failure.
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: 'Dry run mode'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'full'
+          - 'lookup'
+      logLevel:
+        description: 'Log level'
+        required: false
+        default: 'info'
+        type: choice
+        options:
+          - info
+          - debug
+          - warn
+
+jobs:
+  renovate:
+    uses: laurigates/.github/.github/workflows/reusable-renovate.yml@main
+    with:
+      dry-run: ${{ inputs.dryRun || 'false' }}
+      log-level: ${{ inputs.logLevel || 'info' }}
