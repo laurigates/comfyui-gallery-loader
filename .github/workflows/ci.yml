@@ -60,6 +60,12 @@ jobs:
 
       - name: Build
         run: bun run build
+      - name: Verify committed web/dist is up to date
+        run: |
+          if ! git diff --exit-code -- web/dist; then
+            echo "::error::web/dist is stale vs src/. Run 'bun run build' and commit web/dist."
+            exit 1
+          fi
 
   test:
     name: Tests (Python)

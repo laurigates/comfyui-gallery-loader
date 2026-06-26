@@ -1,0 +1,267 @@
+/* comfyui-gallery-loader — DOM widget styles
+ *
+ * Uses ComfyUI's CSS variables for theming so the gallery follows light/dark.
+ */
+
+.gl-root {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    box-sizing: border-box;
+    padding: 6px;
+    gap: 6px;
+    font: 12px/1.2 var(--p-font-family, system-ui, sans-serif);
+    color: var(--input-text, #ddd);
+    background: var(--comfy-input-bg, #1e1e1e);
+    border-radius: 6px;
+    overflow: hidden;
+    touch-action: pan-y;
+}
+
+.gl-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.gl-chips {
+    display: flex;
+    gap: 4px;
+    flex: 1;
+    flex-wrap: wrap;
+}
+
+.gl-chip {
+    appearance: none;
+    border: 1px solid var(--border-color, #444);
+    background: transparent;
+    color: inherit;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    cursor: pointer;
+    min-height: 28px;
+    touch-action: manipulation;
+}
+
+.gl-chip:hover {
+    border-color: var(--p-primary-color, #6cf);
+}
+
+.gl-chip.is-active {
+    background: var(--p-primary-color, #4ad);
+    border-color: var(--p-primary-color, #4ad);
+    color: var(--p-primary-contrast-color, #000);
+}
+
+.gl-icon {
+    appearance: none;
+    border: 1px solid var(--border-color, #444);
+    background: transparent;
+    color: inherit;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    min-height: 28px;
+    font-size: 14px;
+}
+
+.gl-icon:hover { border-color: var(--p-primary-color, #6cf); }
+
+.gl-sort {
+    appearance: none;
+    border: 1px solid var(--border-color, #444);
+    background: var(--comfy-menu-bg, #2a2a2a);
+    color: inherit;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    min-height: 28px;
+    max-width: 160px;
+}
+.gl-sort:hover { border-color: var(--p-primary-color, #6cf); }
+
+.gl-crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    min-height: 22px;
+}
+
+.gl-crumb {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--input-text, #aaa);
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+}
+.gl-crumb:hover { background: rgba(255, 255, 255, 0.08); color: var(--input-text, #fff); }
+.gl-crumb + .gl-crumb::before {
+    content: "›";
+    margin-right: 6px;
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.gl-search,
+.gl-pathinput {
+    appearance: none;
+    border: 1px solid var(--border-color, #444);
+    background: var(--comfy-menu-bg, #2a2a2a);
+    color: inherit;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 32px;
+}
+
+.gl-grid {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px;
+    padding: 4px;
+    background: var(--comfy-menu-bg, #181818);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+    align-content: start;
+    -webkit-overflow-scrolling: touch;
+    /* Isolate the grid's layout/paint from LiteGraph's per-frame node
+     * resync. Without containment, every canvas redraw forces the
+     * browser to reconsider the grid + every card in its reflow pass. */
+    contain: layout paint;
+}
+
+.gl-grid.is-loading { opacity: 0.6; }
+
+.gl-card {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid transparent;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    /* Skip layout/paint for off-screen cards entirely. The intrinsic
+     * size hint keeps the scrollbar honest when many cards are skipped.
+     * Roughly: 120px thumb (1:1) + ~30px name + ~12px optional dims
+     * + ~8px padding. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 188px;
+}
+.gl-card:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--p-primary-color, #6cf);
+}
+.gl-card.is-selected {
+    border-color: var(--p-primary-color, #4ad);
+    background: rgba(80, 170, 240, 0.18);
+}
+
+.gl-thumb {
+    aspect-ratio: 1 / 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.35);
+    border-radius: 3px;
+    overflow: hidden;
+    font-size: 28px;
+    line-height: 1;
+}
+.gl-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.gl-folder { color: var(--p-primary-color, #6cf); }
+
+.gl-name {
+    font-size: 11px;
+    line-height: 1.25;
+    text-align: center;
+    word-break: break-all;
+    max-height: 2.5em;
+    overflow: hidden;
+}
+
+.gl-dims {
+    font-size: 10px;
+    line-height: 1.2;
+    text-align: center;
+    color: var(--input-text, #aaa);
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
+}
+
+.gl-stars {
+    display: flex;
+    justify-content: center;
+    gap: 1px;
+}
+.gl-star {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 0 1px;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--border-color, #555);
+    cursor: pointer;
+}
+.gl-star.is-on,
+.gl-star:hover {
+    color: #ffd866;
+}
+
+.gl-foot {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 10.5px;
+    color: var(--input-text, #aaa);
+    min-height: 18px;
+}
+.gl-status {
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+.gl-selected {
+    flex: 1;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+}
+
+/* Mobile-friendly tweaks: bigger cards, tighter padding */
+@media (pointer: coarse), (max-width: 640px) {
+    .gl-root { padding: 4px; gap: 4px; }
+    .gl-grid {
+        grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+        gap: 6px;
+    }
+    .gl-chip, .gl-icon { min-height: 36px; padding: 6px 12px; }
+    .gl-search, .gl-pathinput { min-height: 38px; font-size: 13px; }
+    .gl-star { font-size: 16px; padding: 2px; }
+}
