@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.11...comfyui-gallery-loader-v0.1.12) (2026-06-26)
+
+
+### Bug Fixes
+
+* **dist:** commit web/dist so git-based updates carry the built frontend ([#50](https://github.com/laurigates/comfyui-gallery-loader/issues/50)) ([1b1442c](https://github.com/laurigates/comfyui-gallery-loader/commit/1b1442ce282753be518a9f2a196940cc4861c0a9))
+
 ## [0.1.11](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.10...comfyui-gallery-loader-v0.1.11) (2026-06-20)
 
 
