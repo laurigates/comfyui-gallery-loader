@@ -1,1 +1,8 @@
 docs/*.png binary -diff
+
+# Built frontend bundle — committed (not gitignored) so git clone / a touch-manager
+# git update carries the real served artifact, and force-shipped to the Comfy
+# Registry via [tool.comfy] includes in pyproject.toml. Treat as generated:
+# collapse/exclude in GitHub diffs+stats, suppress the noisy minified textual diff,
+# and keep current-branch copy on merge (the bundle is regenerated, never hand-merged).
+web/dist/** linguist-generated=true -diff -merge
