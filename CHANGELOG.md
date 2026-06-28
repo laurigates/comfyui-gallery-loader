@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.12...comfyui-gallery-loader-v0.1.13) (2026-06-28)
+
+
+### Miscellaneous
+
+* sync uv.lock and auto-bump it via release-please ([#53](https://github.com/laurigates/comfyui-gallery-loader/issues/53)) ([8f8482d](https://github.com/laurigates/comfyui-gallery-loader/commit/8f8482d03aae3329af8be899bee627aee42d7c4a))
+
 ## [0.1.12](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.11...comfyui-gallery-loader-v0.1.12) (2026-06-26)
 
 
