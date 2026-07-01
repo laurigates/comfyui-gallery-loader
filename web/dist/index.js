@@ -1104,6 +1104,8 @@ function addBrowseButton(node, label, onClick) {
         console.warn(`[${EXT_NAME2}] open from button failed`, e);
       }
     }, { serialize: false });
+    if (btn)
+      btn.serialize = false;
     if (btn && node.widgets) {
       const idx = node.widgets.indexOf(btn);
       if (idx !== -1 && idx !== node.widgets.length - 1) {

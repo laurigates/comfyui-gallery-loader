@@ -90,6 +90,9 @@ interface PickerWidget {
   callback?: (value: unknown, ...rest: unknown[]) => unknown;
   onPointerDown?: (pointer: unknown, node: PickerNode, canvas: unknown) => boolean | undefined;
   inputEl?: { value?: string } & Record<string, unknown>;
+  // The frontend's widgets_values save/restore keys on THIS flag, not
+  // options.serialize — a non-serialized widget must set it directly.
+  serialize?: boolean;
 }
 
 interface PickerNode {
@@ -383,6 +386,11 @@ function addBrowseButton(node: PickerNode, label: string, onClick: () => void): 
       },
       { serialize: false },
     );
+    // The addWidget option only sets widget.options.serialize; the frontend's
+    // widgets_values loops check widget.serialize. Set it directly so the button
+    // never occupies a widgets_values slot (harmless here since it's appended to
+    // the end, but keeps saved workflows free of a trailing null).
+    if (btn) (btn as PickerWidget).serialize = false;
     if (btn && node.widgets) {
       const idx = node.widgets.indexOf(btn as PickerWidget);
       if (idx !== -1 && idx !== node.widgets.length - 1) {
