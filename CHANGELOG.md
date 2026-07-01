@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.14](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.13...comfyui-gallery-loader-v0.1.14) (2026-07-01)
+
+
+### Bug Fixes
+
+* set serialize=false on the Browse button widget itself ([#57](https://github.com/laurigates/comfyui-gallery-loader/issues/57)) ([bb64bc5](https://github.com/laurigates/comfyui-gallery-loader/commit/bb64bc5cc81b8ac73dcde86048aa20e909260699))
+
 ## [0.1.13](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.12...comfyui-gallery-loader-v0.1.13) (2026-06-28)
 
 
