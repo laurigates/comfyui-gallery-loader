@@ -8,7 +8,6 @@
 //
 // Backend node + listing endpoints live in gallery_loader.py.
 
-import { app } from "/scripts/app.js";
 import {
   applyStars,
   nextRating,
@@ -17,10 +16,13 @@ import {
   ratingOf,
   starsHTML,
   warnRating,
-} from "./rating.js";
+} from "@laurigates/comfy-modal-kit";
+import { app } from "/scripts/app.js";
 
+const EXT_NAME = "comfyui-gallery-loader";
 const NODE = "GalleryLoadImage";
 const LIST_URL = "/gallery_loader/list";
+const RATING_URL = "/gallery_loader/rating";
 const CSS_URL = "/extensions/comfyui-gallery-loader/css/gallery_loader.css";
 
 // Inject styles once.
@@ -599,7 +601,7 @@ function attachGallery(node: GalleryNode): void {
       absDir: state.absDir,
       name,
     };
-    postRating(addr, next)
+    postRating(RATING_URL, addr, next)
       .then((confirmed) => {
         if (confirmed !== next) {
           applyStars(row, confirmed);
@@ -607,7 +609,7 @@ function attachGallery(node: GalleryNode): void {
         }
       })
       .catch((e) => {
-        warnRating(e);
+        warnRating(EXT_NAME, e);
         applyStars(row, prev);
         if (f) f.rating = prev;
       });
