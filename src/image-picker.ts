@@ -22,17 +22,18 @@
 
 console.warn("[comfyui-gallery-loader] image-picker.js: module loading");
 
-import { fuzzyScore, openModalShell } from "@laurigates/comfy-modal-kit";
-import { app } from "/scripts/app.js";
 import {
   applyStars,
+  fuzzyScore,
   nextRating,
+  openModalShell,
   postRating,
   type RatingAddress,
   ratingOf,
   starsHTML,
   warnRating,
-} from "./rating.js";
+} from "@laurigates/comfy-modal-kit";
+import { app } from "/scripts/app.js";
 
 console.warn("[comfyui-gallery-loader] image-picker.js: imports resolved");
 
@@ -40,6 +41,7 @@ const EXT_NAME = "comfyui-gallery-loader";
 const LIST_URL = "/gallery_loader/list";
 const FILE_URL = "/gallery_loader/file";
 const BASE_URL = "/gallery_loader/base";
+const RATING_URL = "/gallery_loader/rating";
 const STYLE_ID = "ip-style";
 
 const IMG_EXTS = new Set([
@@ -771,7 +773,7 @@ async function openImagePicker(
       absDir: state.absPath,
       name,
     };
-    postRating(addr, next)
+    postRating(RATING_URL, addr, next)
       .then((confirmed) => {
         if (confirmed !== next) {
           applyStars(row, confirmed);
@@ -779,7 +781,7 @@ async function openImagePicker(
         }
       })
       .catch((e) => {
-        warnRating(e);
+        warnRating(EXT_NAME, e);
         applyStars(row, prev);
         if (f) f.rating = prev;
       });

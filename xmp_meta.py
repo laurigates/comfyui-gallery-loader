@@ -1,5 +1,11 @@
 """XMP rating read/write for the comfyui-gallery-loader pack.
 
+CANONICAL SOURCE: this file is the canonical copy of the shared XMP
+rating module. Other packs (comfyui-image-browser) vendor it verbatim
+via their ``just sync-xmp`` recipe — land fixes HERE, then re-sync the
+vendored copies. Keep it pure stdlib with no ComfyUI imports so it
+stays portable.
+
 Pure, stdlib-only helpers (``struct``/``zlib``/``xml.etree``/``os``/
 ``tempfile``) — no ComfyUI imports, so this module unit-tests in a bare
 environment. The pack stays MIT and takes **no new dependencies**.
