@@ -170,23 +170,23 @@ function buildAnnotated(type: string, subfolder: string, name: string): string {
   return `${rel} [${type}]`;
 }
 
-function thumbURL(type: string, subfolder: string, name: string, absDir: string): string {
+// All thumbnails go through the pack's /thumb endpoint (never core /api/view,
+// which re-encodes on every request with no cache headers). ?v= (mtime+size
+// from /list) pairs with the backend's long max-age: a changed file keys a
+// new URL, an unchanged one never re-fetches.
+function thumbURL(type: string, subfolder: string, f: ListingFile, absDir: string): string {
+  const v = `${f.mtime}-${f.size ?? 0}`;
   if (type === "path") {
-    const full = `${(absDir || "").replace(/\/$/, "")}/${name}`;
-    // No cache bust — the /thumb endpoint sends an mtime+size ETag, so the
-    // browser revalidates cheaply (304) and reuses the cached thumbnail
-    // across re-renders instead of re-encoding on every Date.now() URL.
-    return `/gallery_loader/thumb?path=${encodeURIComponent(full)}`;
+    const full = `${(absDir || "").replace(/\/$/, "")}/${f.name}`;
+    return `/gallery_loader/thumb?path=${encodeURIComponent(full)}&v=${encodeURIComponent(v)}`;
   }
   const params = new URLSearchParams({
-    filename: name,
     type,
     subfolder: subfolder || "",
-    preview: "webp;75",
-    // No cache bust — IS_CHANGED already detects file changes; cached
-    // thumbnails are fine and keep mobile fast.
+    name: f.name,
+    v,
   });
-  return `/api/view?${params.toString()}`;
+  return `/gallery_loader/thumb?${params.toString()}`;
 }
 
 interface GalleryState {
@@ -549,7 +549,7 @@ function attachGallery(node: GalleryNode): void {
       if (f.name === state.selectedName && currentSelectionDirMatches()) {
         c.classList.add("is-selected");
       }
-      const url = thumbURL(state.type, state.subfolder, f.name, state.absDir);
+      const url = thumbURL(state.type, state.subfolder, f, state.absDir);
       const stamp = new Date(f.mtime * 1000).toLocaleString();
       const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
       const titleText = dims ? `${f.name}\n${dims}\n${stamp}` : `${f.name}\n${stamp}`;
