@@ -22,7 +22,6 @@ import logging
 import mimetypes
 import os
 from email.utils import formatdate
-from io import BytesIO
 from typing import Any
 
 import folder_paths
@@ -37,10 +36,11 @@ try:
     # ComfyUI imports custom_nodes as packages, so the sibling module must
     # be pulled in relatively — a bare ``import xmp_meta`` raises
     # ModuleNotFoundError at load time because the pack dir isn't on sys.path.
-    from . import xmp_meta
+    from . import thumb_cache, xmp_meta
 except ImportError:
     # Pytest imports this module flat (pack root on sys.path via pyproject's
     # ``pythonpath = ["."]``); fall back to the absolute import.
+    import thumb_cache
     import xmp_meta
 
 log = logging.getLogger("comfyui-gallery-loader")
@@ -51,6 +51,8 @@ VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"}
 # browser (for previews in type=path mode where /api/view doesn't apply).
 # Keep this narrow — it's an arbitrary-path read.
 STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS
+
+SANDBOXED_TYPES = ("input", "output", "temp")
 
 # Image-content mimetypes guard for the picker; covers the common cases
 # that mimetypes.guess_type misses on this distro.
@@ -207,9 +209,19 @@ class GalleryLoadImage:
 # ---------------------------------------------------------------------------
 
 
+def _is_bare_name(name: Any) -> bool:
+    """True if ``name`` is a single path component with no traversal."""
+    return (
+        isinstance(name, str)
+        and bool(name)
+        and os.path.basename(name) == name
+        and name not in (".", "..")
+    )
+
+
 def _resolve_listing_base(type_name: str, subfolder: str, abs_path: str) -> tuple[str | None, str]:
     """Return (base_dir, error_msg). On success error_msg == ''."""
-    if type_name in ("input", "output", "temp"):
+    if type_name in SANDBOXED_TYPES:
         root = folder_paths.get_directory_by_type(type_name)
         if not root:
             return None, f"unknown type: {type_name}"
@@ -407,55 +419,74 @@ async def gallery_file(request: web.Request) -> web.Response:
     )
 
 
-@PromptServer.instance.routes.get("/gallery_loader/thumb")
-async def gallery_thumb(request: web.Request) -> web.Response:
-    """Thumbnail endpoint for type=path (absolute) listings.
+def _resolve_thumb_target(q: Any) -> tuple[str | None, str]:
+    """Resolve /thumb query params to an absolute file path.
 
-    For type=input|output|temp the frontend uses core /api/view, which
-    has subfolder + preview scaling already. Arbitrary absolute paths
-    are not allowed by /api/view, so we serve them here — small,
-    rate-limited by file size, image-only.
+    Two addressing modes, mirroring /list:
+      ?type=input|output|temp&subfolder=&name=   (sandboxed roots)
+      ?path=/abs/file.png                        (arbitrary read, image-gated)
     """
-    q = request.rel_url.query
+    type_name = q.get("type", "path")
+    if type_name in SANDBOXED_TYPES:
+        name = q.get("name", "")
+        if not _is_bare_name(name):
+            return None, "invalid name"
+        base, err = _resolve_listing_base(type_name, q.get("subfolder", ""), "")
+        if err:
+            return None, err
+        assert base is not None
+        target = os.path.abspath(os.path.join(base, name))
+        if os.path.commonpath([target, base]) != base:
+            return None, "name escapes root"
+        return target, ""
     abs_path = q.get("path", "")
     if not abs_path:
+        return None, "missing path"
+    return os.path.abspath(os.path.expanduser(abs_path)), ""
+
+
+def _thumb_cache_dir() -> str:
+    # Resolved lazily (not at import) so test stubs of folder_paths don't
+    # break module load. The same <user_dir>/comfy-thumb-cache is used by
+    # comfyui-image-browser — the packs share encoded thumbnails.
+    return os.path.join(str(folder_paths.get_user_directory()), thumb_cache.CACHE_DIR_NAME)
+
+
+@PromptServer.instance.routes.get("/gallery_loader/thumb")
+async def gallery_thumb(request: web.Request) -> web.Response:
+    """WebP thumbnail for any listed image — sandboxed roots AND type=path.
+
+    Core /api/view re-encodes previews on every request with no cache
+    headers, so sandboxed thumbnails are served here instead: through the
+    shared on-disk cache (thumb_cache.py) with an ETag and a long max-age.
+    The frontend embeds ?v=<mtime>-<size> in the URL, so a changed file
+    keys a new URL and a stale cached copy can never be shown.
+    """
+    path, err = _resolve_thumb_target(request.rel_url.query)
+    if err:
         return web.Response(status=400)
-    path = os.path.abspath(os.path.expanduser(abs_path))
+    assert path is not None
     if not os.path.isfile(path) or not _is_image_file(path):
         return web.Response(status=404)
 
-    # A thumbnail is fully determined by the source file's path, mtime and
-    # size, so we hand the browser cache validators and honour conditional
-    # requests. Re-scrolling or reopening the picker then reuses the cached
-    # copy (or gets a cheap 304) instead of re-encoding the WebP each time.
     try:
         st = os.stat(path)
     except OSError as exc:
         log.warning("thumb stat failed for %s: %s", path, exc)
         return web.Response(status=404)
-    etag = '"{}"'.format(
-        hashlib.sha1(f"{path}:{st.st_mtime_ns}:{st.st_size}".encode()).hexdigest()
-    )
+    etag = thumb_cache.etag_for(path, st)
     cache_headers = {
         "ETag": etag,
         "Last-Modified": formatdate(st.st_mtime, usegmt=True),
-        "Cache-Control": "private, max-age=300",
+        "Cache-Control": "private, max-age=604800, immutable",
     }
     if request.headers.get("If-None-Match") == etag:
         return web.Response(status=304, headers=cache_headers)
 
-    # Cap thumb encode size to keep big PNGs cheap.
-    try:
-        with Image.open(path) as im:
-            im.thumbnail((512, 512))
-            im = im.convert("RGB") if im.mode not in ("RGB", "RGBA") else im
-            buf = BytesIO()
-            im.save(buf, format="webp", quality=80)
-            buf.seek(0)
-            return web.Response(body=buf.read(), content_type="image/webp", headers=cache_headers)
-    except Exception as exc:
-        log.warning("thumb failed for %s: %s", path, exc)
+    data = thumb_cache.get_thumb(path, st, _thumb_cache_dir())
+    if data is None:
         return web.Response(status=500)
+    return web.Response(body=data, content_type="image/webp", headers=cache_headers)
 
 
 @PromptServer.instance.routes.post("/gallery_loader/rating")

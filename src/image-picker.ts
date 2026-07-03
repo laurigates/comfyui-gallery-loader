@@ -478,19 +478,27 @@ function joinAbs(dir: string, name: string): string {
 // Thumbnail URL dispatch
 // ============================================================
 
-function imageThumbURL(type: string, subfolder: string, name: string): string {
-  const p = new URLSearchParams({
-    filename: name,
-    type,
-    subfolder: subfolder || "",
-    preview: "webp;75",
-  });
-  return `/api/view?${p.toString()}`;
+// All image thumbnails go through the pack's own /thumb endpoint (never core
+// /api/view, which re-encodes on every request with no cache headers). The
+// ?v= cache key (mtime + size from /list) pairs with the backend's long
+// max-age: a changed file keys a new URL, an unchanged one never re-fetches.
+function thumbVersion(f: ListingFile): string {
+  return `${f.mtime}-${f.size ?? 0}`;
 }
 
-function imageThumbURLAbs(absDir: string, name: string): string {
-  const full = joinAbs(absDir, name);
-  return `/gallery_loader/thumb?path=${encodeURIComponent(full)}`;
+function imageThumbURL(type: string, subfolder: string, f: ListingFile): string {
+  const p = new URLSearchParams({
+    type,
+    subfolder: subfolder || "",
+    name: f.name,
+    v: thumbVersion(f),
+  });
+  return `/gallery_loader/thumb?${p.toString()}`;
+}
+
+function imageThumbURLAbs(absDir: string, f: ListingFile): string {
+  const full = joinAbs(absDir, f.name);
+  return `/gallery_loader/thumb?path=${encodeURIComponent(full)}&v=${encodeURIComponent(thumbVersion(f))}`;
 }
 
 function videoSrcURL(type: string, subfolder: string, name: string, absDir?: string): string {
@@ -892,7 +900,7 @@ async function openImagePicker(
     const ext = (f.ext || "").toLowerCase();
     if (state.type === "path") {
       if (IMG_EXTS.has(ext)) {
-        return { kind: "img", src: imageThumbURLAbs(state.absPath, f.name) };
+        return { kind: "img", src: imageThumbURLAbs(state.absPath, f) };
       }
       if (VIDEO_EXTS.has(ext)) {
         return { kind: "video", src: videoSrcURL("path", "", f.name, state.absPath) };
@@ -900,7 +908,7 @@ async function openImagePicker(
       return { kind: "icon", text: "📄" };
     }
     if (IMG_EXTS.has(ext)) {
-      return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f.name) };
+      return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
       return { kind: "video", src: videoSrcURL(state.type, state.subfolder, f.name) };

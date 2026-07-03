@@ -509,18 +509,19 @@ function buildAnnotated(type, subfolder, name) {
   const rel = sub ? `${sub}/${name}` : name;
   return `${rel} [${type}]`;
 }
-function thumbURL(type, subfolder, name, absDir) {
+function thumbURL(type, subfolder, f, absDir) {
+  const v = `${f.mtime}-${f.size ?? 0}`;
   if (type === "path") {
-    const full = `${(absDir || "").replace(/\/$/, "")}/${name}`;
-    return `/gallery_loader/thumb?path=${encodeURIComponent(full)}`;
+    const full = `${(absDir || "").replace(/\/$/, "")}/${f.name}`;
+    return `/gallery_loader/thumb?path=${encodeURIComponent(full)}&v=${encodeURIComponent(v)}`;
   }
   const params = new URLSearchParams({
-    filename: name,
     type,
     subfolder: subfolder || "",
-    preview: "webp;75"
+    name: f.name,
+    v
   });
-  return `/api/view?${params.toString()}`;
+  return `/gallery_loader/thumb?${params.toString()}`;
 }
 function attachGallery(node) {
   const found = node.widgets?.find((w) => w.name === "image");
@@ -825,7 +826,7 @@ function attachGallery(node) {
       if (f.name === state.selectedName && currentSelectionDirMatches()) {
         c.classList.add("is-selected");
       }
-      const url = thumbURL(state.type, state.subfolder, f.name, state.absDir);
+      const url = thumbURL(state.type, state.subfolder, f, state.absDir);
       const stamp = new Date(f.mtime * 1000).toLocaleString();
       const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
       const titleText = dims ? `${f.name}
@@ -1216,18 +1217,21 @@ function joinAbs(dir, name) {
   const d = (dir || "/").replace(/\/+$/, "");
   return d === "" ? `/${name}` : `${d}/${name}`;
 }
-function imageThumbURL(type, subfolder, name) {
+function thumbVersion(f) {
+  return `${f.mtime}-${f.size ?? 0}`;
+}
+function imageThumbURL(type, subfolder, f) {
   const p = new URLSearchParams({
-    filename: name,
     type,
     subfolder: subfolder || "",
-    preview: "webp;75"
+    name: f.name,
+    v: thumbVersion(f)
   });
-  return `/api/view?${p.toString()}`;
+  return `/gallery_loader/thumb?${p.toString()}`;
 }
-function imageThumbURLAbs(absDir, name) {
-  const full = joinAbs(absDir, name);
-  return `/gallery_loader/thumb?path=${encodeURIComponent(full)}`;
+function imageThumbURLAbs(absDir, f) {
+  const full = joinAbs(absDir, f.name);
+  return `/gallery_loader/thumb?path=${encodeURIComponent(full)}&v=${encodeURIComponent(thumbVersion(f))}`;
 }
 function videoSrcURL(type, subfolder, name, absDir) {
   if (type === "path") {
@@ -1542,7 +1546,7 @@ async function openImagePicker(widget, node, opts) {
     const ext = (f.ext || "").toLowerCase();
     if (state.type === "path") {
       if (IMG_EXTS.has(ext)) {
-        return { kind: "img", src: imageThumbURLAbs(state.absPath, f.name) };
+        return { kind: "img", src: imageThumbURLAbs(state.absPath, f) };
       }
       if (VIDEO_EXTS.has(ext)) {
         return { kind: "video", src: videoSrcURL("path", "", f.name, state.absPath) };
@@ -1550,7 +1554,7 @@ async function openImagePicker(widget, node, opts) {
       return { kind: "icon", text: "\uD83D\uDCC4" };
     }
     if (IMG_EXTS.has(ext)) {
-      return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f.name) };
+      return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
       return { kind: "video", src: videoSrcURL(state.type, state.subfolder, f.name) };
