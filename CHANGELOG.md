@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.14...comfyui-gallery-loader-v0.1.15) (2026-07-03)
+
+
+### Features
+
+* **thumb:** shared on-disk thumbnail cache + sandboxed /thumb addressing ([#61](https://github.com/laurigates/comfyui-gallery-loader/issues/61)) ([eeb89a1](https://github.com/laurigates/comfyui-gallery-loader/commit/eeb89a127ba1e1af853d7764478831b90701bfbe))
+
 ## [0.1.14](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.13...comfyui-gallery-loader-v0.1.14) (2026-07-01)
 
 
