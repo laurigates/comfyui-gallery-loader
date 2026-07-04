@@ -20,12 +20,11 @@
 // The inline-grid `GalleryLoadImage` node (gallery_loader.ts) is
 // unchanged — workflows that use it keep working.
 
-console.warn("[comfyui-gallery-loader] image-picker.js: module loading");
-
 import {
   applyStars,
   fuzzyScore,
   nextRating,
+  notify,
   openModalShell,
   postRating,
   type RatingAddress,
@@ -35,14 +34,28 @@ import {
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 
-console.warn("[comfyui-gallery-loader] image-picker.js: imports resolved");
-
 const EXT_NAME = "comfyui-gallery-loader";
 const LIST_URL = "/gallery_loader/list";
 const FILE_URL = "/gallery_loader/file";
 const BASE_URL = "/gallery_loader/base";
 const RATING_URL = "/gallery_loader/rating";
 const STYLE_ID = "ip-style";
+
+// Trace logging is opt-in. Enable in devtools with
+//   localStorage.setItem("comfyui-gallery-loader:debug", "1")
+// to see lifecycle / enhance traces (via console.debug). Failures always log
+// through console.warn/console.error regardless of this flag.
+const DEBUG = (() => {
+  try {
+    return localStorage.getItem(`${EXT_NAME}:debug`) === "1";
+  } catch {
+    return false;
+  }
+})();
+
+function debug(...args: unknown[]): void {
+  if (DEBUG) console.debug(`[${EXT_NAME}]`, ...args);
+}
 
 const IMG_EXTS = new Set([
   ".png",
@@ -255,7 +268,7 @@ function defangNodeData(nodeData: NodeData | null | undefined): boolean {
         (entry as Record<string, unknown>)._origImageUpload = true;
       }
       touched = true;
-      console.warn(`[${EXT_NAME}] defanged image_upload on ${nodeData?.name}.${name}`);
+      debug(`defanged image_upload on ${nodeData?.name}.${name}`);
     }
   }
   return touched;
@@ -297,7 +310,7 @@ function enhanceLoadImageNode(node: PickerNode): void {
     if (Array.isArray(values) && !values.includes(v)) values.push(v);
   }
 
-  console.warn(`[${EXT_NAME}] enhancing ${node.comfyClass || node.type}:`, {
+  debug(`enhancing ${node.comfyClass || node.type}:`, {
     widgetName: w.name,
     widgetType: w.type,
   });
@@ -357,7 +370,7 @@ function enhanceVHSPathNode(node: PickerNode): void {
 
   const exts = w.options?.vhs_path_extensions as unknown[] | undefined;
   const isDirectoryMode = Array.isArray(exts) && exts.length === 0;
-  console.warn(`[${EXT_NAME}] enhancing VHS ${node.comfyClass}:`, {
+  debug(`enhancing VHS ${node.comfyClass}:`, {
     widgetName: w.name,
     mode: isDirectoryMode ? "directory" : "file",
     exts,
@@ -790,6 +803,11 @@ async function openImagePicker(
       })
       .catch((e) => {
         warnRating(EXT_NAME, e);
+        notify({
+          severity: "warn",
+          summary: "Rating not saved",
+          detail: String((e as Error)?.message ?? e),
+        });
         applyStars(row, prev);
         if (f) f.rating = prev;
       });
@@ -1371,7 +1389,7 @@ try {
     },
     setup() {
       ensureStyle();
-      console.warn(`[${EXT_NAME}] image-picker setup running`);
+      debug("image-picker setup running");
       const nodes = (app?.graph as { _nodes?: unknown[] } | undefined)?._nodes;
       if (Array.isArray(nodes)) {
         for (const n of nodes) {
@@ -1389,7 +1407,6 @@ try {
       enhanceVHSPathNode(node as unknown as PickerNode);
     },
   });
-  console.warn(`[${EXT_NAME}] image-picker.js: registerExtension returned`);
 } catch (e) {
   console.error(`[${EXT_NAME}] image-picker.js: registerExtension threw`, e);
 }

@@ -326,11 +326,12 @@ async def gallery_list(request: web.Request) -> web.Response:
                                 # read until pixel access, so .size is cheap.
                                 with Image.open(entry.path) as im:
                                     width, height = im.size
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                log.debug("size probe failed for %s: %s", entry.path, exc)
                         try:
                             rating = xmp_meta.read_rating_cached(entry.path, st)
-                        except Exception:
+                        except Exception as exc:
+                            log.debug("rating read failed for %s: %s", entry.path, exc)
                             rating = 0
                         files.append(
                             {

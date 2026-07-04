@@ -25,7 +25,7 @@ from io import BytesIO
 
 from PIL import Image
 
-log = logging.getLogger("comfy-thumb-cache")
+log = logging.getLogger("comfyui-thumb-cache")
 
 THUMB_SIZE = (512, 512)
 WEBP_QUALITY = 80

@@ -11,6 +11,7 @@
 import {
   applyStars,
   nextRating,
+  notify,
   postRating,
   type RatingAddress,
   ratingOf,
@@ -610,6 +611,11 @@ function attachGallery(node: GalleryNode): void {
       })
       .catch((e) => {
         warnRating(EXT_NAME, e);
+        notify({
+          severity: "warn",
+          summary: "Rating not saved",
+          detail: String((e as Error)?.message ?? e),
+        });
         applyStars(row, prev);
         if (f) f.rating = prev;
       });
