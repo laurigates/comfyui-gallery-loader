@@ -29,11 +29,14 @@ are honoured), then the sidecar.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import tempfile
 import zlib
 from collections.abc import Iterator
 from xml.etree import ElementTree as ET
+
+log = logging.getLogger("comfyui-xmp")
 
 # --- XMP namespaces ---------------------------------------------------
 NS_XMP = "http://ns.adobe.com/xap/1.0/"
@@ -397,7 +400,10 @@ def read_rating(path: str, *, head_only: bool = True) -> int:
                 return r
         sc = sidecar_get_rating(path)
         return sc if sc is not None else 0
-    except Exception:
+    except Exception as exc:
+        # Best-effort read: any failure degrades to "unrated" (0), but log
+        # so a corrupt file or XMP packet is diagnosable.
+        log.debug("read_rating failed for %s: %s", path, exc)
         return 0
 
 
@@ -426,11 +432,13 @@ def write_rating(path: str, rating: int) -> tuple[bool, str]:
         _cache_invalidate(path)
         return True, "sidecar"
     except (OSError, ValueError) as exc:
+        log.warning("in-file XMP write failed for %s; wrote sidecar instead: %s", path, exc)
         try:
             sidecar_set_rating(path, r)
             _cache_invalidate(path)
             return True, "sidecar"
         except OSError:
+            log.warning("sidecar XMP write also failed for %s", path, exc_info=True)
             return False, str(exc)
 
 

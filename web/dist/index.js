@@ -94,6 +94,219 @@ function fuzzyScore(query, target) {
   score -= target.length * 0.01;
   return { score, matches };
 }
+var STYLE_ID = "cmn-notify-style";
+var CONTAINER_ID = "cmn-notify-container";
+function defaultLife(severity) {
+  switch (severity) {
+    case "error":
+      return 0;
+    case "warn":
+      return 8000;
+    default:
+      return 4000;
+  }
+}
+function defaultCopyable(severity) {
+  return severity === "error" || severity === "warn";
+}
+function notifyClipboardText(summary, detail) {
+  return detail ? `${summary}
+${detail}` : summary;
+}
+async function copyTextToClipboard(text) {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  try {
+    if (typeof document === "undefined")
+      return false;
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+var CSS = `
+.cmn-container {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(380px, calc(100vw - 24px));
+    pointer-events: none;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.cmn-toast {
+    pointer-events: auto;
+    background: #1a1a1f;
+    color: #e8e8ea;
+    border: 1px solid #3a3a44;
+    border-left-width: 4px;
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 13px;
+    line-height: 1.4;
+    animation: cmn-in 0.16s ease-out;
+}
+@keyframes cmn-in {
+    from { transform: translateY(-8px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+}
+.cmn-toast.cmn-success { border-left-color: #4caf50; }
+.cmn-toast.cmn-info    { border-left-color: #6ba6ff; }
+.cmn-toast.cmn-warn    { border-left-color: #e0a83a; }
+.cmn-toast.cmn-error   { border-left-color: #e0533a; }
+.cmn-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+.cmn-text {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+}
+.cmn-summary { font-weight: 600; }
+.cmn-detail  { color: #b8b8c0; margin-top: 2px; white-space: pre-wrap; }
+.cmn-close {
+    background: transparent;
+    color: #aaa;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0;
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+}
+.cmn-close:hover { color: #fff; }
+.cmn-actions { display: flex; gap: 8px; }
+.cmn-copy {
+    background: #2a2a36;
+    color: #d8d8e0;
+    border: 1px solid #3a3a44;
+    border-radius: 5px;
+    /* Touch-first: comfortable tap target, 13px text. */
+    min-height: 32px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.cmn-copy:hover  { background: #34343f; color: #fff; }
+.cmn-copy.cmn-copied { background: #2f4a30; border-color: #4caf50; color: #cfe8d0; }
+`;
+function ensureStyle() {
+  if (typeof document === "undefined")
+    return;
+  if (document.getElementById(STYLE_ID))
+    return;
+  const s = document.createElement("style");
+  s.id = STYLE_ID;
+  s.textContent = CSS;
+  document.head.appendChild(s);
+}
+function ensureContainer() {
+  let c = document.getElementById(CONTAINER_ID);
+  if (!c) {
+    c = document.createElement("div");
+    c.id = CONTAINER_ID;
+    c.className = "cmn-container";
+    document.body.appendChild(c);
+  }
+  return c;
+}
+function notify(opts) {
+  const { severity, summary, detail } = opts;
+  if (typeof document === "undefined" || !document.body) {
+    console.info(`[notify] ${severity}: ${summary}${detail ? ` — ${detail}` : ""}`);
+    return null;
+  }
+  ensureStyle();
+  const container = ensureContainer();
+  const life = opts.life ?? defaultLife(severity);
+  const copyable = opts.copyable ?? defaultCopyable(severity);
+  const toast = document.createElement("div");
+  toast.className = `cmn-toast cmn-${severity}`;
+  toast.setAttribute("role", severity === "error" ? "alert" : "status");
+  let timer;
+  const close = () => {
+    if (timer)
+      clearTimeout(timer);
+    toast.remove();
+    if (container.childElementCount === 0)
+      container.remove();
+  };
+  const row = document.createElement("div");
+  row.className = "cmn-row";
+  const text = document.createElement("div");
+  text.className = "cmn-text";
+  const summaryEl = document.createElement("div");
+  summaryEl.className = "cmn-summary";
+  summaryEl.textContent = summary;
+  text.appendChild(summaryEl);
+  if (detail) {
+    const detailEl = document.createElement("div");
+    detailEl.className = "cmn-detail";
+    detailEl.textContent = detail;
+    text.appendChild(detailEl);
+  }
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "cmn-close";
+  closeBtn.type = "button";
+  closeBtn.textContent = "×";
+  closeBtn.title = "Dismiss";
+  closeBtn.addEventListener("click", close);
+  row.append(text, closeBtn);
+  toast.appendChild(row);
+  if (copyable) {
+    const actions = document.createElement("div");
+    actions.className = "cmn-actions";
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "cmn-copy";
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy";
+    copyBtn.addEventListener("click", async () => {
+      const ok = await copyTextToClipboard(notifyClipboardText(summary, detail));
+      copyBtn.textContent = ok ? "Copied ✓" : "Copy failed";
+      copyBtn.classList.toggle("cmn-copied", ok);
+      setTimeout(() => {
+        copyBtn.textContent = "Copy";
+        copyBtn.classList.remove("cmn-copied");
+      }, 1500);
+    });
+    actions.appendChild(copyBtn);
+    toast.appendChild(actions);
+  }
+  container.appendChild(toast);
+  if (life > 0) {
+    timer = setTimeout(close, life);
+  }
+  return { close, el: toast };
+}
 var MAX_RATING = 5;
 function ratingOf(f) {
   const r = f.rating;
@@ -882,6 +1095,11 @@ ${stamp}`;
       }
     }).catch((e) => {
       warnRating(EXT_NAME, e);
+      notify({
+        severity: "warn",
+        summary: "Rating not saved",
+        detail: String(e?.message ?? e)
+      });
       applyStars(row, prev);
       if (f)
         f.rating = prev;
@@ -941,14 +1159,23 @@ function escapeHTML(s) {
 
 // src/image-picker.ts
 import { app as app2 } from "/scripts/app.js";
-console.warn("[comfyui-gallery-loader] image-picker.js: module loading");
-console.warn("[comfyui-gallery-loader] image-picker.js: imports resolved");
 var EXT_NAME2 = "comfyui-gallery-loader";
 var LIST_URL2 = "/gallery_loader/list";
 var FILE_URL = "/gallery_loader/file";
 var BASE_URL = "/gallery_loader/base";
 var RATING_URL2 = "/gallery_loader/rating";
-var STYLE_ID = "ip-style";
+var STYLE_ID3 = "ip-style";
+var DEBUG = (() => {
+  try {
+    return localStorage.getItem(`${EXT_NAME2}:debug`) === "1";
+  } catch {
+    return false;
+  }
+})();
+function debug(...args) {
+  if (DEBUG)
+    console.debug(`[${EXT_NAME2}]`, ...args);
+}
 var IMG_EXTS = new Set([
   ".png",
   ".jpg",
@@ -1047,7 +1274,7 @@ function defangNodeData(nodeData) {
         entry._origImageUpload = true;
       }
       touched = true;
-      console.warn(`[${EXT_NAME2}] defanged image_upload on ${nodeData?.name}.${name}`);
+      debug(`defanged image_upload on ${nodeData?.name}.${name}`);
     }
   }
   return touched;
@@ -1083,7 +1310,7 @@ function enhanceLoadImageNode(node) {
     if (Array.isArray(values) && !values.includes(v))
       values.push(v);
   }
-  console.warn(`[${EXT_NAME2}] enhancing ${node.comfyClass || node.type}:`, {
+  debug(`enhancing ${node.comfyClass || node.type}:`, {
     widgetName: w.name,
     widgetType: w.type
   });
@@ -1135,7 +1362,7 @@ function enhanceVHSPathNode(node) {
   node._vhsGalleryEnhanced = true;
   const exts = w.options?.vhs_path_extensions;
   const isDirectoryMode = Array.isArray(exts) && exts.length === 0;
-  console.warn(`[${EXT_NAME2}] enhancing VHS ${node.comfyClass}:`, {
+  debug(`enhancing VHS ${node.comfyClass}:`, {
     widgetName: w.name,
     mode: isDirectoryMode ? "directory" : "file",
     exts
@@ -1242,7 +1469,7 @@ function videoSrcURL(type, subfolder, name, absDir) {
   return `/api/view?${p.toString()}`;
 }
 async function openImagePicker(widget, node, opts) {
-  ensureStyle();
+  ensureStyle3();
   const kind = opts.kind;
   const mode = opts.mode || "file";
   const extensions = Array.isArray(opts.extensions) ? opts.extensions : null;
@@ -1441,6 +1668,11 @@ async function openImagePicker(widget, node, opts) {
       }
     }).catch((e) => {
       warnRating(EXT_NAME2, e);
+      notify({
+        severity: "warn",
+        summary: "Rating not saved",
+        detail: String(e?.message ?? e)
+      });
       applyStars(row, prev);
       if (f)
         f.rating = prev;
@@ -1937,11 +2169,11 @@ var PICKER_CSS = `
     font-weight: 700;
 }
 `;
-function ensureStyle() {
-  if (document.getElementById(STYLE_ID))
+function ensureStyle3() {
+  if (document.getElementById(STYLE_ID3))
     return;
   const s = document.createElement("style");
-  s.id = STYLE_ID;
+  s.id = STYLE_ID3;
   s.textContent = PICKER_CSS;
   document.head.appendChild(s);
 }
@@ -1959,8 +2191,8 @@ try {
       }
     },
     setup() {
-      ensureStyle();
-      console.warn(`[${EXT_NAME2}] image-picker setup running`);
+      ensureStyle3();
+      debug("image-picker setup running");
       const nodes = app2?.graph?._nodes;
       if (Array.isArray(nodes)) {
         for (const n of nodes) {
@@ -1978,7 +2210,6 @@ try {
       enhanceVHSPathNode(node);
     }
   });
-  console.warn(`[${EXT_NAME2}] image-picker.js: registerExtension returned`);
 } catch (e) {
   console.error(`[${EXT_NAME2}] image-picker.js: registerExtension threw`, e);
 }
