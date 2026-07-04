@@ -401,6 +401,8 @@ def read_rating(path: str, *, head_only: bool = True) -> int:
         sc = sidecar_get_rating(path)
         return sc if sc is not None else 0
     except Exception as exc:
+        # Best-effort read: any failure degrades to "unrated" (0), but log
+        # so a corrupt file or XMP packet is diagnosable.
         log.debug("read_rating failed for %s: %s", path, exc)
         return 0
 
@@ -436,6 +438,7 @@ def write_rating(path: str, rating: int) -> tuple[bool, str]:
             _cache_invalidate(path)
             return True, "sidecar"
         except OSError:
+            log.warning("sidecar XMP write also failed for %s", path, exc_info=True)
             return False, str(exc)
 
 
