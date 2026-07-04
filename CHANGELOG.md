@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.16](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.15...comfyui-gallery-loader-v0.1.16) (2026-07-04)
+
+
+### Bug Fixes
+
+* **instrumentation:** converge logging/notify to fleet standard ([#63](https://github.com/laurigates/comfyui-gallery-loader/issues/63)) ([42f8ac0](https://github.com/laurigates/comfyui-gallery-loader/commit/42f8ac0e61b9d76a7d0ce13e16fec02edbf18558))
+
 ## [0.1.15](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.14...comfyui-gallery-loader-v0.1.15) (2026-07-03)
 
 
