@@ -108,7 +108,7 @@ interface ParsedValue {
 }
 
 app.registerExtension({
-  name: "comfyui.gallery_loader",
+  name: "comfy.gallery-loader",
   async beforeRegisterNodeDef(nodeType, nodeData) {
     const data = nodeData as unknown as NodeData;
     if (data.name !== NODE) return;

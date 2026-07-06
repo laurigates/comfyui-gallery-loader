@@ -9,90 +9,15 @@ function getKit() {
   }
   return kit;
 }
-var guardInstalled = false;
-function setActiveModal(handle) {
-  installPointerGuard();
-  dismissActiveModal();
-  getKit().activeModal = handle;
-}
-function dismissActiveModal() {
-  const kit = getKit();
-  const active = kit.activeModal;
-  if (!active)
+function ensureStyleOnce(id, css) {
+  if (typeof document === "undefined")
     return;
-  kit.activeModal = null;
-  try {
-    active.close();
-  } catch (e) {
-    console.warn("[comfy-modal-kit] active modal close() threw", e);
-  }
-}
-function getActiveModal() {
-  return getKit().activeModal;
-}
-function installPointerGuard() {
-  if (guardInstalled)
+  if (document.getElementById(id))
     return;
-  if (typeof window === "undefined")
-    return;
-  guardInstalled = true;
-  window.addEventListener("pointerdown", pointerGuard, true);
-}
-function pointerGuard(e) {
-  const active = getKit().activeModal;
-  if (!active)
-    return;
-  const target = e.target;
-  if (active.element && target && active.element.contains(target)) {
-    return;
-  }
-  e.stopImmediatePropagation();
-  dismissActiveModal();
-}
-function fuzzyScore(query, target) {
-  if (!query)
-    return { score: 0, matches: [] };
-  if (!target)
-    return null;
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  const matches = [];
-  let qi = 0;
-  let score = 0;
-  let consecutive = 0;
-  let prevMatchIdx = -1;
-  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
-    if (t[ti] !== q[qi]) {
-      consecutive = 0;
-      continue;
-    }
-    let charScore = 1;
-    if (ti === 0) {
-      charScore += 5;
-    } else {
-      const prev = t[ti - 1];
-      const orig = target[ti];
-      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
-        charScore += 4;
-      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
-        charScore += 3;
-      }
-    }
-    if (ti === prevMatchIdx + 1) {
-      consecutive++;
-      charScore += consecutive * 2;
-    } else {
-      consecutive = 0;
-    }
-    score += charScore;
-    matches.push(ti);
-    prevMatchIdx = ti;
-    qi++;
-  }
-  if (qi < q.length)
-    return null;
-  score -= target.length * 0.01;
-  return { score, matches };
+  const s = document.createElement("style");
+  s.id = id;
+  s.textContent = css;
+  document.head.appendChild(s);
 }
 var STYLE_ID = "cmn-notify-style";
 var CONTAINER_ID = "cmn-notify-container";
@@ -219,16 +144,6 @@ var CSS = `
 .cmn-copy:hover  { background: #34343f; color: #fff; }
 .cmn-copy.cmn-copied { background: #2f4a30; border-color: #4caf50; color: #cfe8d0; }
 `;
-function ensureStyle() {
-  if (typeof document === "undefined")
-    return;
-  if (document.getElementById(STYLE_ID))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID;
-  s.textContent = CSS;
-  document.head.appendChild(s);
-}
 function ensureContainer() {
   let c = document.getElementById(CONTAINER_ID);
   if (!c) {
@@ -245,7 +160,7 @@ function notify(opts) {
     console.info(`[notify] ${severity}: ${summary}${detail ? ` — ${detail}` : ""}`);
     return null;
   }
-  ensureStyle();
+  ensureStyleOnce(STYLE_ID, CSS);
   const container = ensureContainer();
   const life = opts.life ?? defaultLife(severity);
   const copyable = opts.copyable ?? defaultCopyable(severity);
@@ -306,6 +221,113 @@ function notify(opts) {
     timer = setTimeout(close, life);
   }
   return { close, el: toast };
+}
+var guardInstalled = false;
+function setActiveModal(handle) {
+  installPointerGuard();
+  dismissActiveModal();
+  getKit().activeModal = handle;
+}
+function dismissActiveModal() {
+  const kit = getKit();
+  const active = kit.activeModal;
+  if (!active)
+    return;
+  kit.activeModal = null;
+  try {
+    active.close();
+  } catch (e) {
+    console.warn("[comfy-modal-kit] active modal close() threw", e);
+  }
+}
+function getActiveModal() {
+  return getKit().activeModal;
+}
+function patchWidgetPointer(widget, opener) {
+  const original = widget.onPointerDown;
+  function patched(pointer, node, canvas) {
+    try {
+      if (typeof original === "function") {
+        const consumed = original.call(this, pointer, node, canvas);
+        if (consumed)
+          return consumed;
+      }
+      return opener(pointer, node, canvas);
+    } catch (e) {
+      console.warn("[comfy-modal-kit] patched onPointerDown threw", e);
+      return false;
+    }
+  }
+  widget.onPointerDown = patched;
+  return {
+    restore() {
+      widget.onPointerDown = original;
+    }
+  };
+}
+function installPointerGuard() {
+  if (guardInstalled)
+    return;
+  if (typeof window === "undefined")
+    return;
+  guardInstalled = true;
+  window.addEventListener("pointerdown", pointerGuard, true);
+}
+function pointerGuard(e) {
+  const active = getKit().activeModal;
+  if (!active)
+    return;
+  const target = e.target;
+  if (active.element && target && active.element.contains(target)) {
+    return;
+  }
+  e.stopImmediatePropagation();
+  dismissActiveModal();
+}
+function fuzzyScore(query, target) {
+  if (!query)
+    return { score: 0, matches: [] };
+  if (!target)
+    return null;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  const matches = [];
+  let qi = 0;
+  let score = 0;
+  let consecutive = 0;
+  let prevMatchIdx = -1;
+  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) {
+      consecutive = 0;
+      continue;
+    }
+    let charScore = 1;
+    if (ti === 0) {
+      charScore += 5;
+    } else {
+      const prev = t[ti - 1];
+      const orig = target[ti];
+      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
+        charScore += 4;
+      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
+        charScore += 3;
+      }
+    }
+    if (ti === prevMatchIdx + 1) {
+      consecutive++;
+      charScore += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+    score += charScore;
+    matches.push(ti);
+    prevMatchIdx = ti;
+    qi++;
+  }
+  if (qi < q.length)
+    return null;
+  score -= target.length * 0.01;
+  return { score, matches };
 }
 var MAX_RATING = 5;
 function ratingOf(f) {
@@ -503,16 +525,8 @@ var CSS2 = `
     color: #b8b8c0;
 }
 `;
-function ensureStyle2() {
-  if (document.getElementById(STYLE_ID2))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID2;
-  s.textContent = CSS2;
-  document.head.appendChild(s);
-}
 function openModalShell(opts = {}) {
-  ensureStyle2();
+  ensureStyleOnce(STYLE_ID2, CSS2);
   const backdrop = document.createElement("div");
   backdrop.className = "cmp-backdrop";
   const dialog = document.createElement("div");
@@ -643,6 +657,30 @@ function openModalShell(opts = {}) {
   }
   return controller;
 }
+function appendButtonWidget(node, label, onClick, opts = {}) {
+  const prefix = opts.logPrefix ? `[${opts.logPrefix}]` : "[comfy-modal-kit]";
+  try {
+    const btn = node.addWidget?.("button", label, null, () => {
+      try {
+        onClick();
+      } catch (e) {
+        console.warn(`${prefix} open from button failed`, e);
+      }
+    }, { serialize: false });
+    if (btn)
+      btn.serialize = false;
+    if (btn && node.widgets) {
+      const idx = node.widgets.indexOf(btn);
+      if (idx !== -1 && idx !== node.widgets.length - 1) {
+        node.widgets.splice(idx, 1);
+        node.widgets.push(btn);
+      }
+    }
+    node.setDirtyCanvas?.(true, true);
+  } catch (e) {
+    console.warn(`${prefix} addWidget(button) failed`, e);
+  }
+}
 
 // src/gallery_loader.ts
 import { app } from "/scripts/app.js";
@@ -661,7 +699,7 @@ var TYPES = ["input", "output", "temp", "path"];
 var MIN_NODE_W = 360;
 var MIN_NODE_H = 460;
 app.registerExtension({
-  name: "comfyui.gallery_loader",
+  name: "comfy.gallery-loader",
   async beforeRegisterNodeDef(nodeType, nodeData) {
     const data = nodeData;
     if (data.name !== NODE)
@@ -1321,24 +1359,13 @@ function enhanceLoadImageNode(node) {
 
 ${hint}` : hint;
   }
-  const origDown = w.onPointerDown;
-  w.onPointerDown = function(pointer, ownerNode, canvas) {
-    if (typeof origDown === "function") {
-      const consumed = origDown.call(this, pointer, ownerNode, canvas);
-      if (consumed)
-        return consumed;
-    }
-    try {
-      openImagePicker(w, ownerNode || node, { kind: "loadimage" });
-    } catch (e) {
-      console.warn(`[${EXT_NAME2}] image-picker open failed`, e);
-      return false;
-    }
+  patchWidgetPointer(w, (_pointer, ownerNode) => {
+    openImagePicker(w, ownerNode || node, { kind: "loadimage" });
     return true;
-  };
-  addBrowseButton(node, "\uD83D\uDCC1 Browse gallery", () => {
-    openImagePicker(w, node, { kind: "loadimage" });
   });
+  appendButtonWidget(node, "\uD83D\uDCC1 Browse gallery", () => {
+    openImagePicker(w, node, { kind: "loadimage" });
+  }, { logPrefix: EXT_NAME2 });
 }
 function findVHSPathWidget(node) {
   if (!node?.widgets)
@@ -1368,36 +1395,13 @@ function enhanceVHSPathNode(node) {
     exts
   });
   const label = isDirectoryMode ? "\uD83D\uDCC1 Browse folder" : "\uD83D\uDCC1 Browse files";
-  addBrowseButton(node, label, () => {
+  appendButtonWidget(node, label, () => {
     openImagePicker(w, node, {
       kind: "vhs-path",
       mode: isDirectoryMode ? "directory" : "file",
       extensions: exts
     });
-  });
-}
-function addBrowseButton(node, label, onClick) {
-  try {
-    const btn = node.addWidget("button", label, null, () => {
-      try {
-        onClick();
-      } catch (e) {
-        console.warn(`[${EXT_NAME2}] open from button failed`, e);
-      }
-    }, { serialize: false });
-    if (btn)
-      btn.serialize = false;
-    if (btn && node.widgets) {
-      const idx = node.widgets.indexOf(btn);
-      if (idx !== -1 && idx !== node.widgets.length - 1) {
-        node.widgets.splice(idx, 1);
-        node.widgets.push(btn);
-      }
-    }
-    node.setDirtyCanvas?.(true, true);
-  } catch (e) {
-    console.warn(`[${EXT_NAME2}] addWidget(button) failed`, e);
-  }
+  }, { logPrefix: EXT_NAME2 });
 }
 function isAbsPath(v) {
   return v.startsWith("/") || /^[A-Za-z]:[\\/]/.test(v);
@@ -1469,7 +1473,7 @@ function videoSrcURL(type, subfolder, name, absDir) {
   return `/api/view?${p.toString()}`;
 }
 async function openImagePicker(widget, node, opts) {
-  ensureStyle3();
+  ensureStyleOnce(STYLE_ID3, PICKER_CSS);
   const kind = opts.kind;
   const mode = opts.mode || "file";
   const extensions = Array.isArray(opts.extensions) ? opts.extensions : null;
@@ -2169,20 +2173,12 @@ var PICKER_CSS = `
     font-weight: 700;
 }
 `;
-function ensureStyle3() {
-  if (document.getElementById(STYLE_ID3))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID3;
-  s.textContent = PICKER_CSS;
-  document.head.appendChild(s);
-}
 function escHTML(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 try {
   app2.registerExtension({
-    name: "comfyui.gallery-loader.image-picker",
+    name: "comfy.gallery-loader.image-picker",
     async beforeRegisterNodeDef(_nodeType, nodeData) {
       try {
         defangNodeData(nodeData);
@@ -2191,7 +2187,7 @@ try {
       }
     },
     setup() {
-      ensureStyle3();
+      ensureStyleOnce(STYLE_ID3, PICKER_CSS);
       debug("image-picker setup running");
       const nodes = app2?.graph?._nodes;
       if (Array.isArray(nodes)) {
