@@ -21,11 +21,16 @@
 // unchanged — workflows that use it keep working.
 
 import {
+  appendButtonWidget,
   applyStars,
+  type ButtonWidgetHost,
+  ensureStyleOnce,
   fuzzyScore,
   nextRating,
   notify,
   openModalShell,
+  type PointerPatchableWidget,
+  patchWidgetPointer,
   postRating,
   type RatingAddress,
   ratingOf,
@@ -321,31 +326,22 @@ function enhanceLoadImageNode(node: PickerNode): void {
     w.options.tooltip = existing ? `${existing}\n\n${hint}` : hint;
   }
 
-  // Strategy A — patch widget.onPointerDown (plain canvas combo).
-  const origDown = w.onPointerDown;
-  w.onPointerDown = function (
-    this: PickerWidget,
-    pointer: unknown,
-    ownerNode: PickerNode,
-    canvas: unknown,
-  ): boolean | undefined {
-    if (typeof origDown === "function") {
-      const consumed = origDown.call(this, pointer, ownerNode, canvas);
-      if (consumed) return consumed;
-    }
-    try {
-      openImagePicker(w, ownerNode || node, { kind: "loadimage" });
-    } catch (e) {
-      console.warn(`[${EXT_NAME}] image-picker open failed`, e);
-      return false;
-    }
+  // Strategy A — patch widget.onPointerDown via the kit's uniform
+  // chain-then-consume wrapper (falls back to the native control on error).
+  patchWidgetPointer(w as unknown as PointerPatchableWidget, (_pointer, ownerNode) => {
+    openImagePicker(w, (ownerNode as PickerNode) || node, { kind: "loadimage" });
     return true;
-  };
+  });
 
   // Strategy B — guaranteed click path via a button widget.
-  addBrowseButton(node, "📁 Browse gallery", () => {
-    openImagePicker(w, node, { kind: "loadimage" });
-  });
+  appendButtonWidget(
+    node as ButtonWidgetHost,
+    "📁 Browse gallery",
+    () => {
+      openImagePicker(w, node, { kind: "loadimage" });
+    },
+    { logPrefix: EXT_NAME },
+  );
 }
 
 // ============================================================
@@ -377,46 +373,20 @@ function enhanceVHSPathNode(node: PickerNode): void {
   });
 
   const label = isDirectoryMode ? "📁 Browse folder" : "📁 Browse files";
-  addBrowseButton(node, label, () => {
-    openImagePicker(w, node, {
-      kind: "vhs-path",
-      mode: isDirectoryMode ? "directory" : "file",
-      extensions: exts as string[],
-    });
-  });
-}
-
-function addBrowseButton(node: PickerNode, label: string, onClick: () => void): void {
-  try {
-    const btn = node.addWidget(
-      "button",
-      label,
-      null,
-      () => {
-        try {
-          onClick();
-        } catch (e) {
-          console.warn(`[${EXT_NAME}] open from button failed`, e);
-        }
-      },
-      { serialize: false },
-    );
-    // The addWidget option only sets widget.options.serialize; the frontend's
-    // widgets_values loops check widget.serialize. Set it directly so the button
-    // never occupies a widgets_values slot (harmless here since it's appended to
-    // the end, but keeps saved workflows free of a trailing null).
-    if (btn) (btn as PickerWidget).serialize = false;
-    if (btn && node.widgets) {
-      const idx = node.widgets.indexOf(btn as PickerWidget);
-      if (idx !== -1 && idx !== node.widgets.length - 1) {
-        node.widgets.splice(idx, 1);
-        node.widgets.push(btn as PickerWidget);
-      }
-    }
-    node.setDirtyCanvas?.(true, true);
-  } catch (e) {
-    console.warn(`[${EXT_NAME}] addWidget(button) failed`, e);
-  }
+  // Strategy B via the kit helper (serialize:false on the widget, kept last —
+  // the widgets_values corruption guards live in the kit's appendButtonWidget).
+  appendButtonWidget(
+    node as ButtonWidgetHost,
+    label,
+    () => {
+      openImagePicker(w, node, {
+        kind: "vhs-path",
+        mode: isDirectoryMode ? "directory" : "file",
+        extensions: exts as string[],
+      });
+    },
+    { logPrefix: EXT_NAME },
+  );
 }
 
 // ============================================================
@@ -560,7 +530,7 @@ async function openImagePicker(
   node: PickerNode,
   opts: OpenOpts,
 ): Promise<void> {
-  ensureStyle();
+  ensureStyleOnce(STYLE_ID, PICKER_CSS);
 
   // Resolve opts → initial state
   const kind = opts.kind; // "loadimage" | "vhs-path"
@@ -1352,14 +1322,6 @@ const PICKER_CSS = `
 }
 `;
 
-function ensureStyle(): void {
-  if (document.getElementById(STYLE_ID)) return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID;
-  s.textContent = PICKER_CSS;
-  document.head.appendChild(s);
-}
-
 function escHTML(s: unknown): string {
   return String(s).replace(
     /[&<>"']/g,
@@ -1379,7 +1341,7 @@ function escHTML(s: unknown): string {
 
 try {
   app.registerExtension({
-    name: "comfyui.gallery-loader.image-picker",
+    name: "comfy.gallery-loader.image-picker",
     async beforeRegisterNodeDef(_nodeType, nodeData) {
       try {
         defangNodeData(nodeData as unknown as NodeData);
@@ -1388,7 +1350,7 @@ try {
       }
     },
     setup() {
-      ensureStyle();
+      ensureStyleOnce(STYLE_ID, PICKER_CSS);
       debug("image-picker setup running");
       const nodes = (app?.graph as { _nodes?: unknown[] } | undefined)?._nodes;
       if (Array.isArray(nodes)) {
