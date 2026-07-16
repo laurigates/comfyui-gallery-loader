@@ -39,7 +39,11 @@ jobs:
           [ -n "$node_id" ] && [ -n "$ver" ] || { echo "::error::cannot read name/version from pyproject.toml"; exit 1; }
           echo "Node: $node_id  declared version: $ver"
 
-          curl -fsS "https://api.comfy.org/nodes/${node_id}/versions" -o versions.json
+          # include_status_reason=true returns the security-scan findings JSON
+          # (issue_type/file_path/description) — the closed feedback loop for
+          # Flagged versions (scanner notifications otherwise land only in the
+          # Comfy Org Discord #security-review-council channel).
+          curl -fsS "https://api.comfy.org/nodes/${node_id}/versions?include_status_reason=true" -o versions.json
 
           status=$(jq -r --arg v "$ver" '.[] | select(.version==$v) | .status' versions.json)
           created=$(jq -r --arg v "$ver" '.[] | select(.version==$v) | .createdAt' versions.json)
@@ -57,12 +61,19 @@ jobs:
               "Check the publish workflow and ${dash}." > "$body"
           elif [ "$status" = "NodeVersionStatusFlagged" ]; then
             problem="flagged"
+            findings=$(jq -r --arg v "$ver" '.[] | select(.version==$v) | .status_reason // ""
+              | (fromjson? // .)
+              | if type=="array" then
+                  map("  - `\(.issue_type // .error_type // .type // "?")` (\(.scanner // "?")) in `\(.file_path // .path // "?")`: \(.description // "" | tostring | .[0:200])")
+                  | join("\n")
+                else "  - \(tostring | .[0:400])" end' versions.json)
             printf '%s\n' \
               "Declared version **\`${ver}\`** is **Flagged** by Comfy-Org registry moderation." \
               "" \
               "- Clean installs resolve to an older version until this clears." \
-              "- Reason (authoritative): ${dash}" \
-              "- If a false positive, request re-review via Comfy-Org; a new publish re-runs the scan." > "$body"
+              "- Scan findings (\`include_status_reason=true\`):" \
+              "${findings:-  - (none reported)}" \
+              "- If a false positive, request re-review via Comfy-Org (registry-backend#180); a new publish re-runs the scan." > "$body"
           elif [ "$status" = "NodeVersionStatusPending" ]; then
             age_h=$(( ( $(date -u +%s) - $(date -u -d "$created" +%s) ) / 3600 ))
             if [ "$age_h" -ge "${PENDING_GRACE_HOURS}" ]; then
