@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Touch-friendly gallery picker for ComfyUI image and path widgets. TypeScript source in src/, built to web/dist/ via bun build (the @laurigates/comfy-modal-kit primitives are inlined). See ADR-0010.",
   "scripts": {
-    "build": "bun build ./src/index.ts --target browser --format esm --outdir web/dist --external '/scripts/*' && rm -rf web/dist/css && cp -R web/css web/dist/css",
+    "build": "bun build ./src/index.ts --target browser --format esm --banner '/* web/dist bundle built by bun from src/ in this repository (see package.json). Inlines @laurigates/comfy-modal-kit (MIT) - a first-party library by the same publisher, published to npm with provenance attestation: https://www.npmjs.com/package/@laurigates/comfy-modal-kit */' --outdir web/dist --external '/scripts/*' && rm -rf web/dist/css && cp -R web/css web/dist/css",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
