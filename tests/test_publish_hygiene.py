@@ -5,7 +5,7 @@ even info severity — and a Flagged version is not served to installers
 (see Comfy-Org/registry-backend#180, Comfy-Org/ComfyUI-Manager#2927).
 Every shipped file is scan surface.
 
-comfy-cli builds node.zip as: git-tracked files − .comfyignore matches,
+comfy-cli builds node.zip as: git-tracked files - .comfyignore matches,
 with [tool.comfy] includes force-kept (see comfy_cli/file_utils.py
 zip_files). These tests recreate that file set and pin it:
 
@@ -93,8 +93,7 @@ def _ignore_spec() -> pathspec.PathSpec | None:
 
 def _force_included(rel_path: str, include_prefixes: list[str]) -> bool:
     return any(
-        rel_path == prefix or rel_path.startswith(prefix + "/")
-        for prefix in include_prefixes
+        rel_path == prefix or rel_path.startswith(prefix + "/") for prefix in include_prefixes
     )
 
 
