@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.18](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.17...comfyui-gallery-loader-v0.1.18) (2026-07-17)
+
+
+### Bug Fixes
+
+* **registry:** shrink registry tarball scan surface + hygiene guard ([#69](https://github.com/laurigates/comfyui-gallery-loader/issues/69)) ([807caf7](https://github.com/laurigates/comfyui-gallery-loader/commit/807caf7b88af3f3f82ab7daf2ac6a445365a4ce1))
+
 ## [0.1.17](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.16...comfyui-gallery-loader-v0.1.17) (2026-07-06)
 
 
