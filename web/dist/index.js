@@ -1,3 +1,5 @@
+/* web/dist bundle built by bun from src/ in this repository (see package.json). Inlines @laurigates/comfy-modal-kit (MIT) - a first-party library by the same publisher, published to npm with provenance attestation: https://www.npmjs.com/package/@laurigates/comfy-modal-kit */
+
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
 var KEY = Symbol.for("laurigates.comfyModalKit");
 function getKit() {
