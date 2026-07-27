@@ -1900,8 +1900,13 @@ ${when}`;
       return p;
     return `…${p.slice(-46)}`;
   }
-  function installLazyThumbs(root) {
-    const els = root.querySelectorAll("img[data-src], video[data-src]");
+  let thumbObserver = null;
+  function installLazyThumbs(container) {
+    thumbObserver?.disconnect();
+    thumbObserver = null;
+    if (typeof IntersectionObserver === "undefined")
+      return;
+    const els = container.querySelectorAll("img[data-src], video[data-src]");
     if (!els.length)
       return;
     const io = new IntersectionObserver((entries) => {
@@ -1919,9 +1924,10 @@ ${when}`;
         }
         io.unobserve(el);
       }
-    }, { root, rootMargin: "300px" });
+    }, { root: modal.bodyEl, rootMargin: "300px" });
     for (const el of els)
       io.observe(el);
+    thumbObserver = io;
   }
   function commitFile(name, _ext) {
     let value;
