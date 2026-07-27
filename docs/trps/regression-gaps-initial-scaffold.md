@@ -45,7 +45,11 @@ ADR-0007 documents the testing strategy: pytest for backend pure helpers + Vites
 
 **Cost to cover**: high — needs Playwright against a running ComfyUI. Out of scope for the scaffold.
 
-**Recommendation**: defer indefinitely. The smoke matrix is the right tier for this code.
+**Recommendation**: defer indefinitely for the *integration* surface. The smoke matrix is the right tier for widget detection, tab switching, and value commit.
+
+**Partially promoted (2026-07)** — `tests/js/image-picker.test.js`. Trigger conditions 1 and 3 both fired: the lazy-thumb `IntersectionObserver` was rooted on `.ip-grid`, which has no overflow clip, so every card reported as intersecting and the entire listing's thumbnails loaded at once. It reached `main` and surfaced only when a user hit the identical bug in the sibling `comfyui-image-browser` pack, which then needed the same assertion. `openImagePicker` is now exported as a test seam and the file runs under a `// @vitest-environment jsdom` pragma (`jsdom` is a devDependency).
+
+Scope of the promotion is deliberately narrow — the observer's **root** and the parked-`data-src` consequence, i.e. the properties that are invisible in review and fatal at scale. Widget detection, tab switching, and value commit stay on the smoke matrix.
 
 ### Gap 4 — `gallery_loader.js` inline-grid logic
 

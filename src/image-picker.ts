@@ -525,7 +525,11 @@ interface ThumbDescriptor {
   text?: string;
 }
 
-async function openImagePicker(
+// Exported as a test seam only — production callers reach it through the
+// widget hooks below. The picker is otherwise pure side-effect registration
+// with nothing importable, which is what left its DOM uncovered (see
+// docs/trps/regression-gaps-initial-scaffold.md).
+export async function openImagePicker(
   widget: PickerWidget,
   node: PickerNode,
   opts: OpenOpts,
@@ -1024,9 +1028,31 @@ async function openImagePicker(
     return `…${p.slice(-46)}`;
   }
 
-  function installLazyThumbs(root: HTMLElement): void {
-    const els = root.querySelectorAll("img[data-src], video[data-src]");
+  // Observer for the current render, kept so the next one can disconnect it
+  // instead of leaking an observer (still referencing every detached card) per
+  // navigation / sort / search keystroke.
+  let thumbObserver: IntersectionObserver | null = null;
+
+  function installLazyThumbs(container: HTMLElement): void {
+    thumbObserver?.disconnect();
+    thumbObserver = null;
+    // Without the guard a browser lacking IntersectionObserver throws here and
+    // takes the whole grid render down with it — thumbnails degrading to
+    // never-loaded is survivable, an exception out of renderGrid is not.
+    if (typeof IntersectionObserver === "undefined") return;
+    const els = container.querySelectorAll("img[data-src], video[data-src]");
     if (!els.length) return;
+    // The root MUST be the scrolling ancestor (modal.bodyEl / .cmp-body), NOT
+    // the grid. `.ip-grid` has no overflow clip, so with the grid as root the
+    // root rectangle is the grid's whole bounding box and EVERY card reports as
+    // intersecting on the first callback — the "lazy" load fires for the entire
+    // listing at once (measured 400/400 off-screen cards vs 20/400 with the
+    // real scroller). A big output dir then issues one /thumb request per file
+    // and gives every video a src + preload=metadata simultaneously.
+    //
+    // Note this differs from gallery_loader.ts, where `.gl-grid` IS the scroll
+    // container and passing the grid is correct. The picker's grid lives inside
+    // the modal shell's body, so the scroller moved and the root had to follow.
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
@@ -1046,9 +1072,10 @@ async function openImagePicker(
           io.unobserve(el);
         }
       },
-      { root, rootMargin: "300px" },
+      { root: modal.bodyEl, rootMargin: "300px" },
     );
     for (const el of els) io.observe(el);
+    thumbObserver = io;
   }
 
   function commitFile(name: string, _ext: string): void {

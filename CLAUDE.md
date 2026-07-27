@@ -103,6 +103,26 @@ When committing from the modal:
 Don't switch the Input source to annotated form — existing workflows
 serialize bare relative paths and would churn on save/reload.
 
+### The lazy-thumb observer root differs between the two surfaces
+
+`installLazyThumbs`'s `IntersectionObserver` must be rooted on **whatever
+element actually scrolls**, and that element is *not* the same in both
+frontends:
+
+| Surface | Grid | Scroller | Correct `root` |
+|---|---|---|---|
+| `gallery_loader.ts` (inline node grid) | `.gl-grid` | `.gl-grid` (`overflow-y: auto`) | the grid |
+| `image-picker.ts` (modal) | `.ip-grid` (no overflow clip) | `modal.bodyEl` / `.cmp-body` | **the modal body** |
+
+Rooting on an element with no overflow clip makes the root rectangle that
+element's *whole bounding box*, so every card reports as intersecting on the
+first callback and the "lazy" load fires for the entire listing at once — one
+`/thumb` request per file plus a `src` + `preload=metadata` on every `<video>`.
+Measured 400/400 off-screen cards intersecting with the grid as root vs 20/400
+with the real scroller; at scale it OOMs the tab. There is a regression test
+(`tests/js/image-picker.test.js`) asserting the picker's root. If you move
+either grid into or out of a scrolling container, move its `root` with it.
+
 ### Frontend hook is version-sensitive
 
 The modal opens via two strategies:
