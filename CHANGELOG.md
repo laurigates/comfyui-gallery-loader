@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.19](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.18...comfyui-gallery-loader-v0.1.19) (2026-07-27)
+
+
+### Bug Fixes
+
+* root the picker's lazy-thumb observer on the scroll container ([#72](https://github.com/laurigates/comfyui-gallery-loader/issues/72)) ([ab28c5e](https://github.com/laurigates/comfyui-gallery-loader/commit/ab28c5eeae0a06b002f7aa269f8dd8d51e25b2bb))
+
 ## [0.1.18](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.17...comfyui-gallery-loader-v0.1.18) (2026-07-17)
 
 
