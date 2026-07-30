@@ -29,8 +29,6 @@ import re
 import subprocess
 from pathlib import Path
 
-import pathspec
-
 REPO = Path(__file__).resolve().parents[1]
 
 # Top-level entries that are allowed to ship (directories end with "/").
@@ -78,8 +76,24 @@ def _includes() -> list[str]:
     return re.findall(r'"([^"]+)"', match.group(1)) if match else []
 
 
-def _ignore_spec() -> pathspec.PathSpec | None:
-    # Mirrors comfy-cli's _load_comfyignore_spec.
+def _comfy_display_assets() -> dict[str, str]:
+    """[tool.comfy] Icon/Banner -> the repo-root filename each URL resolves to."""
+    text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    found = {}
+    for key in ("Icon", "Banner"):
+        match = re.search(rf'^{key}\s*=\s*"([^"]+)"', text, re.M)
+        if match and match.group(1).strip():
+            found[key] = match.group(1).rstrip("/").rsplit("/", 1)[-1]
+    return found
+
+
+def _ignore_spec():
+    # Mirrors comfy-cli's _load_comfyignore_spec. pathspec is imported lazily so
+    # the module stays importable without it — test_registry_display_assets_present
+    # needs only git + a regex, and the scaffold's own regression test executes it
+    # standalone in an environment that has no dev group installed.
+    import pathspec
+
     path = REPO / ".comfyignore"
     if not path.exists():
         return None
@@ -114,6 +128,61 @@ def test_web_dist_is_force_included():
     assert "web/dist" in _includes(), (
         "[tool.comfy] includes must force-ship web/dist — without it a "
         "checkout-wiped build publishes an empty frontend"
+    )
+
+
+def test_registry_display_assets_present():
+    """The PNGs [tool.comfy] points at must exist and be bespoke, not placeholders.
+
+    Icon/Banner are raw-GitHub URLs that registry.comfy.org resolves at display
+    time, so a pack that never ran `just assets` publishes a 404 icon — and no
+    other gate notices: lint, typecheck, build, both test suites and the registry
+    security scan all stay green. EXPECTED_RUNTIME above allowlists icon.png and
+    banner.png as *permitted to ship*; nothing asserted they *exist*.
+
+    icon.png/banner.png are derived from icon.svg/banner.svg exactly as web/dist
+    is derived from src/, and web/dist already has a freshness gate in CI. This
+    is that gate for the display assets.
+
+    Observed: comfyui-touch-manager published with `Icon = ""` and no Banner key
+    for weeks; comfyui-output-swap seeded with Icon/Banner pointing at PNGs that
+    were not rasterized until 31 hours later, both caught only by a human.
+
+    BOTH keys are required, not "at least one". An earlier revision asserted only
+    that the assets dict was non-empty, which let a pack declaring `Icon` and no
+    `Banner` pass here while `scaffold.py --verify` graded the same pack ERROR —
+    two gates disagreeing about whether one pack is publish-ready. The registry
+    listing renders an undeclared banner as blank, so the strict reading is the
+    correct one and this test now matches the audit.
+    """
+    assets = _comfy_display_assets()
+    problems = [
+        f"[tool.comfy] {key} is unset, so the registry listing renders without "
+        f"artwork. Point it at https://raw.githubusercontent.com/<publisher>/"
+        f"<name>/main/{key.lower()}.png, then run 'just assets'."
+        for key in ("Icon", "Banner")
+        if key not in assets
+    ]
+
+    tracked = set(_tracked_files())
+    for key, filename in sorted(assets.items()):
+        if filename not in tracked:
+            problems.append(
+                f"[tool.comfy] {key} points at {filename}, which is not a tracked "
+                "file — run 'just assets' and commit icon.png + banner.png"
+            )
+            continue
+        source = REPO / (Path(filename).stem + ".svg")
+        if source.exists() and "PLACEHOLDER-GLYPH" in source.read_text(
+            encoding="utf-8", errors="replace"
+        ):
+            problems.append(
+                f"{source.name} still carries the PLACEHOLDER-GLYPH marker, so "
+                f"{filename} is the generic letter tile — draw the bespoke "
+                "pictogram, delete the marker comment, re-run 'just assets'"
+            )
+    assert not problems, "Registry display assets are not publish-ready:\n  " + "\n  ".join(
+        problems
     )
 
 
