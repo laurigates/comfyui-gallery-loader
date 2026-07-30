@@ -21,7 +21,7 @@ ARG COMFYUI_REF=v0.22.0
 # Pinning the Playwright image version pins the Chromium revision too,
 # which is the single largest source of cross-host font-rendering drift.
 # Keep this in sync with the playwright version in package.json.
-FROM mcr.microsoft.com/playwright:v1.49.1-noble
+FROM mcr.microsoft.com/playwright:v1.62.1-noble
 
 ARG COMFYUI_REF
 
