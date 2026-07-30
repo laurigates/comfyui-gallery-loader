@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1344" height="576" viewBox="0 0 1344 576">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f1f2a"/>
+      <stop offset="1" stop-color="#12121a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="52%" cy="42%" r="55%">
+      <stop offset="0" stop-color="#ff8a00" stop-opacity="0.42"/>
+      <stop offset="0.45" stop-color="#b85e00" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff9a1f" stop-opacity="0"/>
+      <stop offset="0.55" stop-color="#ff9a1f" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ff9a1f" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1344" height="576" fill="#000000"/>
+  <rect width="1344" height="576" fill="url(#glow)"/>
+
+  <!-- faint constellation network -->
+  <g stroke="#ffb86b" stroke-opacity="0.13" stroke-width="1.5" fill="none">
+    <path d="M470 120 L640 250 L560 400 L760 470 L900 300 L1080 180"/>
+    <path d="M640 250 L900 300 M560 400 L900 300 M470 120 L560 400 M760 470 L1080 380 M900 300 L1180 250"/>
+    <path d="M430 470 L560 400 M1080 180 L1180 250 L1080 380"/>
+  </g>
+  <g fill="#ffce8a" fill-opacity="0.55">
+    <circle cx="470" cy="120" r="3"/><circle cx="640" cy="250" r="3.5"/>
+    <circle cx="560" cy="400" r="3"/><circle cx="760" cy="470" r="3"/>
+    <circle cx="900" cy="300" r="4"/><circle cx="1080" cy="180" r="3"/>
+    <circle cx="1180" cy="250" r="3"/><circle cx="1080" cy="380" r="3"/>
+    <circle cx="430" cy="470" r="2.5"/>
+  </g>
+  <g fill="#ff9a1f" fill-opacity="0.5">
+    <circle cx="1210" cy="430" r="2"/><circle cx="980" cy="150" r="2"/>
+    <circle cx="700" cy="180" r="2"/><circle cx="520" cy="300" r="2"/>
+    <circle cx="1140" cy="470" r="2"/><circle cx="840" cy="430" r="2"/>
+  </g>
+
+  <!-- warm sweeping arc, lower third -->
+  <path d="M0 520 C 360 420, 900 540, 1344 360" stroke="url(#sweep)" stroke-width="6" fill="none"/>
+
+  <!-- icon tile (the icon motif, scaled into the left of the banner) -->
+  <g transform="translate(96,188) scale(0.5)">
+    <rect x="28" y="28" width="344" height="344" rx="76" fill="url(#tile)" stroke="#2a2a36" stroke-width="2"/>
+    <rect x="150" y="138" width="150" height="132" rx="16" fill="none" stroke="#6ba6ff" stroke-width="14" opacity="0.55"/>
+    <rect x="104" y="170" width="150" height="124" rx="16" fill="#14141d" stroke="#6ba6ff" stroke-width="16"/>
+    <circle cx="146" cy="206" r="13" fill="#6ba6ff"/>
+    <path d="M118,272 L156,228 L184,256 L208,232 L240,272" fill="none" stroke="#6ba6ff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+    <polygon points="280,120 289,147 318,147 295,164 303,191 280,175 257,191 265,164 242,147 271,147" fill="#ffd866"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="334" y="300" font-family="Helvetica, Arial, sans-serif" font-weight="bold"
+        font-size="120" fill="#f5f5f7" letter-spacing="-2">Gallery Loader</text>
+  <text x="340" y="372" font-family="Helvetica, Arial, sans-serif" font-weight="500"
+        font-size="46" fill="#ffb02e">Touch-friendly image gallery</text>
+</svg>
