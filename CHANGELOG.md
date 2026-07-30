@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.21](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.20...comfyui-gallery-loader-v0.1.21) (2026-07-30)
+
+
+### Bug Fixes
+
+* **assets:** restore the blue sub-family accent on the banner ([#81](https://github.com/laurigates/comfyui-gallery-loader/issues/81)) ([82f473b](https://github.com/laurigates/comfyui-gallery-loader/commit/82f473b1007e7ea892670326ecc2cf0d795066ae))
+
 ## [0.1.20](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.19...comfyui-gallery-loader-v0.1.20) (2026-07-30)
 
 
