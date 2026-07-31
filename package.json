@@ -12,7 +12,7 @@
     "knip": "knip"
   },
   "dependencies": {
-    "@laurigates/comfy-modal-kit": "^0.6.0"
+    "@laurigates/comfy-modal-kit": "^0.8.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
