@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-ComfyUI custom-node pack with a small Python backend (one node + five
+ComfyUI custom-node pack with a small Python backend (one node + six
 HTTP endpoints) and a TypeScript frontend (`src/`) built to `web/dist/`
 via `bun build`. The modal shell + fuzzy matcher come from the shared
 `@laurigates/comfy-modal-kit` (inlined into the bundle). Both halves
@@ -43,7 +43,8 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | Path | Purpose |
 |------|---------|
 | `__init__.py` | Loader stub. Exports `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY="./web/dist"`. |
-| `gallery_loader.py` | `GalleryLoadImage` node + five HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating}`). |
+| `gallery_loader.py` | `GalleryLoadImage` node + six HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating,metadata}`). `/list` takes **`recursive=1`** (sandboxed roots only) for the flat view: every descendant, `dirs:[]`, each file tagged with a forward-slashed `subpath`. Both listing paths are capped and report `truncated`. |
+| `image_meta.py` | **Vendored verbatim** from its canonical home `comfyui-image-browser/image_meta.py` — do not edit here. Re-sync with `just sync-image-meta`; CI fails on drift. Pure-stdlib reader behind `/metadata`. The direction is the REVERSE of `xmp_meta.py` / `thumb_cache.py`, which this pack is canonical for: that pack owns the `/metadata` feature and the parser's attacker-shaped-input suite. Each file still has exactly one home. |
 | `xmp_meta.py` | Pure, stdlib-only XMP star-rating read/write (in-file PNG/JPEG surgery + `.xmp` sidecar fallback). No ComfyUI imports. See ADR-0011. |
 | `src/index.ts` | Lone `bun build` entry. Imports both extension modules for their `app.registerExtension` side-effects. |
 | `src/gallery_loader.ts` | Inline-grid frontend for the `GalleryLoadImage` node (TS port of the former `web/js/gallery_loader.js`). |
@@ -122,6 +123,28 @@ Measured 400/400 off-screen cards intersecting with the grid as root vs 20/400
 with the real scroller; at scale it OOMs the tab. There is a regression test
 (`tests/js/image-picker.test.js`) asserting the picker's root. If you move
 either grid into or out of a scrolling container, move its `root` with it.
+
+### Listing caps and the extensions clamp
+
+Both `/list` paths are capped and report `truncated`. The cap is applied **after**
+an mtime sort, never during the walk — truncating in directory order silently
+omits the newest render, which is the one thing the flat view exists to surface.
+There is a test that fails against a during-walk cap.
+
+`extensions` is clamped to `IMG_EXTS|VIDEO_EXTS` **in the handler**, not inside
+`_parse_extensions`. That helper falls back to `IMG_EXTS` on an empty result, so
+moving the clamp into it would re-expand an empty intersection and break
+directory mode's `.__none__` sentinel into listing every image. There is a test
+named for that trap; the "cleaner" refactor is the wrong one.
+
+### Flat view: never address a file by bare name
+
+In flat view two subfolders can each hold a `ComfyUI_00001_.png`, so a bare
+filename is not an identity. Cards carry `data-idx` into the rendered listing and
+handlers resolve the file OBJECT; every per-file address (thumbnail, rating,
+committed value, metadata, subpath-label target) goes through `fileSub()`, which
+joins the file's own `subpath` onto `state.subfolder`. `dataset.name` is
+display/debug only. Reverting either handler to a name lookup fails two tests.
 
 ### Frontend hook is version-sensitive
 
@@ -251,10 +274,14 @@ After non-trivial frontend changes, verify in browser:
 | Node | Expected |
 |---|---|
 | `LoadImage` | Tabs (Input/Output/Temp); selecting from Output commits `foo.png [output]`. |
-| `GalleryLoadImage` | Inline grid renders on the node; switching source chips still works. |
+| `GalleryLoadImage` | Inline grid renders on the node; switching source chips still works. Sort choice persists and matches the modal's (shared `:sort` key, same ten options). |
 | `VHS_LoadImagePath` | 📁 button opens path-mode modal at base dir; selecting a file commits absolute path. |
 | `VHS_LoadImagesPath` | 📁 button opens modal in directory mode; footer "Use this folder" commits the absolute dir. |
 | `VHS_LoadVideoPath` | Same as image path, with video poster thumbs. |
+| Flat view (`≣`) | On a sandboxed tab, folds the current folder's subtree into one newest-first grid; each card labelled with its subpath. Tapping a label drops to folder view there. Picking a nested file commits `sub/dir/foo.png [output]`. Hidden on the path tab and in directory mode. Preference persists; a huge tree toasts "truncated". |
+| Flat view — same-named files | Two subfolders each holding `ComfyUI_00001_.png`: clicking each card commits ITS OWN path, and starring one rates only that one. |
+| Metadata (`ⓘ`) | On an image card (including on a path picker) → in-dialog overlay, painted immediately with "Reading metadata…", then a source line, one row per recognised field with its own Copy, Copy all, and a collapsed raw disclosure. No `ⓘ` on video cards. A read failure closes the overlay FIRST, then toasts. |
+| Pins (`📌`) | Pins the current folder; chips render on their own toolbar row — tap to navigate, ✕ to unpin. Persist across reloads. Hidden on a path picker. |
 
 ## Releases
 
