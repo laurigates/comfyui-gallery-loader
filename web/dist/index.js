@@ -1302,6 +1302,37 @@ var VALID_SORTS = new Set([
   "rating:desc",
   "rating:asc"
 ]);
+var SANDBOXED_TYPES = ["input", "output", "temp"];
+var VIEW_STORAGE_KEY = "comfyui-gallery-loader:view";
+var VIEW_PENDING_KEY = "comfyui-gallery-loader:view-pending";
+function loadSavedView() {
+  try {
+    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
+      localStorage.removeItem(VIEW_PENDING_KEY);
+      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
+      return { mode: "folder", recovered: true };
+    }
+    return {
+      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
+      recovered: false
+    };
+  } catch {
+    return { mode: "folder", recovered: false };
+  }
+}
+function saveView(mode) {
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, mode);
+  } catch {}
+}
+function markFlatPending(pending) {
+  try {
+    if (pending)
+      localStorage.setItem(VIEW_PENDING_KEY, "1");
+    else
+      localStorage.removeItem(VIEW_PENDING_KEY);
+  } catch {}
+}
 function loadSavedSort() {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
@@ -1555,12 +1586,25 @@ async function openImagePicker(widget, node, opts) {
     sortDir: "desc",
     query: "",
     didInitialScroll: false,
-    extensionsParam: null
+    extensionsParam: null,
+    viewMode: "folder"
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
     state.sortKey = savedSort.key;
     state.sortDir = savedSort.dir;
+  }
+  const savedView = loadSavedView();
+  state.viewMode = savedView.mode;
+  function isFlat() {
+    return state.viewMode === "flat" && mode !== "directory" && SANDBOXED_TYPES.includes(state.type);
+  }
+  function fileSub(f) {
+    const sp = f.subpath || "";
+    if (!sp)
+      return state.subfolder;
+    const base = state.subfolder.replace(/\/+$/, "");
+    return base ? `${base}/${sp}` : sp;
   }
   let initialSnapshot;
   if (kind === "loadimage") {
@@ -1628,10 +1672,31 @@ async function openImagePicker(widget, node, opts) {
   refreshEl.className = "ip-control ip-icon";
   refreshEl.title = "Refresh";
   refreshEl.textContent = "⟳";
-  modal.toolbarEl.append(crumbsEl, sortEl, refreshEl);
+  let viewToggleEl = null;
+  if (kind === "loadimage" && mode !== "directory") {
+    viewToggleEl = document.createElement("button");
+    viewToggleEl.type = "button";
+    viewToggleEl.className = "ip-control ip-icon ip-view-toggle";
+    viewToggleEl.title = "Flat view (all subfolders)";
+    viewToggleEl.textContent = "≣";
+  }
+  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], sortEl, refreshEl);
+  function renderViewToggle() {
+    if (!viewToggleEl)
+      return;
+    const ok = SANDBOXED_TYPES.includes(state.type);
+    viewToggleEl.style.display = ok ? "" : "none";
+    viewToggleEl.classList.toggle("is-active", isFlat());
+    viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
+  }
   const gridEl = document.createElement("div");
   gridEl.className = "ip-grid";
   modal.bodyEl.appendChild(gridEl);
+  let renderedFiles = [];
+  function fileOfCard(card) {
+    const idx = Number(card.dataset.idx);
+    return Number.isInteger(idx) ? renderedFiles[idx] ?? null : null;
+  }
   const countEl = modal.footerEl.querySelector(".ip-count");
   function setCount(visible, total) {
     if (!countEl)
@@ -1662,6 +1727,13 @@ async function openImagePicker(widget, node, opts) {
     renderGrid();
   });
   refreshEl.addEventListener("click", () => loadAndRender());
+  viewToggleEl?.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
+    saveView(state.viewMode);
+    loadAndRender();
+  });
   if (tabsEl) {
     tabsEl.addEventListener("click", (e) => {
       const b = e.target.closest("[data-type]");
@@ -1694,13 +1766,17 @@ async function openImagePicker(widget, node, opts) {
     const row = star.parentElement;
     if (!card || !row)
       return;
+    const f = fileOfCard(card);
+    if (!f)
+      return;
     const cur = Number(row.dataset.rating || "0");
-    setStarRating(card.dataset.name, row, nextRating(cur, Number(star.dataset.val)));
+    setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
   });
   gridEl.addEventListener("click", (e) => {
-    if (e.target.closest(".ip-star"))
+    const target = e.target;
+    if (target.closest(".ip-star"))
       return;
-    const card = e.target.closest(".ip-card");
+    const card = target.closest(".ip-card");
     if (!card)
       return;
     if (card.classList.contains("is-up")) {
@@ -1714,26 +1790,34 @@ async function openImagePicker(widget, node, opts) {
     if (card.classList.contains("is-file")) {
       if (mode === "directory")
         return;
-      commitFile(card.dataset.name, card.dataset.ext || "");
+      const subEl = target.closest(".ip-subpath");
+      if (subEl?.dataset.sub !== undefined) {
+        e.stopPropagation();
+        state.viewMode = "folder";
+        saveView("folder");
+        state.subfolder = subEl.dataset.sub || "";
+        loadAndRender();
+        return;
+      }
+      const f = fileOfCard(card);
+      if (f)
+        commitFile(f);
     }
   });
-  function setStarRating(name, row, next) {
+  function setStarRating(f, row, next) {
     const prev = Number(row.dataset.rating || "0");
     applyStars(row, next);
-    const f = state.files.find((x) => x.name === name);
-    if (f)
-      f.rating = next;
+    f.rating = next;
     const addr = {
       type: state.type,
-      subfolder: state.subfolder,
+      subfolder: fileSub(f),
       absDir: state.absPath,
-      name
+      name: f.name
     };
     postRating(RATING_URL2, addr, next).then((confirmed) => {
       if (confirmed !== next) {
         applyStars(row, confirmed);
-        if (f)
-          f.rating = confirmed;
+        f.rating = confirmed;
       }
     }).catch((e) => {
       warnRating(EXT_NAME2, e);
@@ -1743,8 +1827,7 @@ async function openImagePicker(widget, node, opts) {
         detail: String(e?.message ?? e)
       });
       applyStars(row, prev);
-      if (f)
-        f.rating = prev;
+      f.rating = prev;
     });
   }
   function navigateUp() {
@@ -1813,6 +1896,8 @@ async function openImagePicker(widget, node, opts) {
     } else {
       p.set("type", state.type);
       p.set("subfolder", state.subfolder);
+      if (isFlat())
+        p.set("recursive", "1");
     }
     if (state.extensionsParam?.length) {
       p.set("extensions", state.extensionsParam.join(","));
@@ -1822,8 +1907,10 @@ async function openImagePicker(widget, node, opts) {
   async function loadAndRender() {
     renderTabs();
     renderCrumbs();
+    renderViewToggle();
     modal.setBusy(true);
     modal.setStatus("Loading…");
+    markFlatPending(isFlat());
     try {
       const r = await fetch(buildListingURL());
       if (!r.ok)
@@ -1834,6 +1921,13 @@ async function openImagePicker(widget, node, opts) {
       state.dirs = data.dirs || [];
       state.files = data.files || [];
       modal.setStatus(data.exists ? "" : "Directory not found.");
+      if (data.truncated) {
+        notify({
+          severity: "warn",
+          summary: `Showing the newest ${state.files.length}`,
+          detail: "This folder has more files than the listing returns; older ones are not shown."
+        });
+      }
     } catch (e) {
       console.error(`[${EXT_NAME2}] list failed:`, e);
       modal.setStatus(`Error: ${e.message}`);
@@ -1842,6 +1936,7 @@ async function openImagePicker(widget, node, opts) {
     }
     modal.setBusy(false);
     renderGrid();
+    markFlatPending(false);
   }
   function thumbForFile(f) {
     const ext = (f.ext || "").toLowerCase();
@@ -1854,18 +1949,20 @@ async function openImagePicker(widget, node, opts) {
       }
       return { kind: "icon", text: "\uD83D\uDCC4" };
     }
+    const sub = fileSub(f);
     if (IMG_EXTS.has(ext)) {
-      return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f) };
+      return { kind: "img", src: imageThumbURL(state.type, sub, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
-      return { kind: "video", src: videoSrcURL(state.type, state.subfolder, f.name) };
+      return { kind: "video", src: videoSrcURL(state.type, sub, f.name) };
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
   function renderGrid() {
     const q = state.query;
     gridEl.innerHTML = "";
-    const showUp = state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder;
+    const flat = isFlat();
+    const showUp = !flat && (state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder);
     if (showUp) {
       const up = document.createElement("div");
       up.className = "ip-card is-up";
@@ -1875,7 +1972,7 @@ async function openImagePicker(widget, node, opts) {
             `;
       gridEl.appendChild(up);
     }
-    for (const d of state.dirs) {
+    for (const d of flat ? [] : state.dirs) {
       if (q && !d.name.toLowerCase().includes(q))
         continue;
       const c = document.createElement("div");
@@ -1891,7 +1988,8 @@ async function openImagePicker(widget, node, opts) {
     if (q) {
       const scored = [];
       for (const f of files) {
-        const r = fuzzyScore(q, f.name);
+        const hay = flat && f.subpath ? `${f.subpath}/${f.name}` : f.name;
+        const r = fuzzyScore(q, hay);
         if (r)
           scored.push({ f, score: r.score });
       }
@@ -1900,15 +1998,21 @@ async function openImagePicker(widget, node, opts) {
     } else {
       files = sortFiles2(files, state.sortKey, state.sortDir);
     }
+    renderedFiles = files;
     let visible = 0;
     const inSameLocation = state.type === "path" ? state.absPath === initialSnapshot.subfolder : state.type === initialSnapshot.type && state.subfolder === initialSnapshot.subfolder;
-    for (const f of files) {
+    for (const [i, f] of files.entries()) {
       const c = document.createElement("div");
       c.className = "ip-card is-file";
+      c.dataset.idx = String(i);
       c.dataset.name = f.name;
       c.dataset.ext = (f.ext || "").toLowerCase();
-      if (inSameLocation && f.name === initialSnapshot.name) {
+      const selected = flat ? state.type === initialSnapshot.type && fileSub(f) === initialSnapshot.subfolder && f.name === initialSnapshot.name : inSameLocation && f.name === initialSnapshot.name;
+      if (selected) {
         c.classList.add("is-selected");
+      }
+      if (flat) {
+        c.classList.add("is-flat");
       }
       if (mode === "directory") {
         c.classList.add("is-inert");
@@ -1922,7 +2026,9 @@ ${when}` : `${f.name}
 ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ip-thumb-icon">${t.text}</div>`;
       const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
+      const subLabel = flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
+                ${subLabel}
                 <div class="ip-thumb">${thumbInner}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
@@ -1943,7 +2049,7 @@ ${when}`;
     }
     setCount(visible, state.files.length);
     installLazyThumbs(gridEl);
-    if (!state.didInitialScroll) {
+    if (!state.didInitialScroll && !isFlat()) {
       state.didInitialScroll = true;
       scrollToSelected();
     }
@@ -1992,12 +2098,12 @@ ${when}`;
       io.observe(el);
     thumbObserver = io;
   }
-  function commitFile(name, _ext) {
+  function commitFile(f) {
     let value;
     if (state.type === "path") {
-      value = joinAbs(state.absPath, name);
+      value = joinAbs(state.absPath, f.name);
     } else {
-      value = buildLoadImageValue(state.type, state.subfolder, name);
+      value = buildLoadImageValue(state.type, fileSub(f), f.name);
       const values = widget.options?.values;
       if (Array.isArray(values) && !values.includes(value)) {
         values.push(value);
@@ -2052,6 +2158,13 @@ ${when}`;
     return [...files].sort((a, b) => mul * cmp(a, b));
   }
   loadAndRender();
+  if (savedView.recovered) {
+    notify({
+      severity: "warn",
+      summary: "Reopened in folder view",
+      detail: "The last flat-view load didn't finish, so the picker fell back to folder view."
+    });
+  }
 }
 var PICKER_CSS = `
 .ip-tabs {
@@ -2082,6 +2195,25 @@ var PICKER_CSS = `
     background: #2f3a52;
     color: #9ec6ff;
 }
+/* Shared active state for toolbar controls (the flat-view toggle). */
+.ip-control.is-active {
+    background: #2f3a52;
+    color: #9ec6ff;
+}
+/* Flat view: the file's folder, above the thumbnail. Tapping it drops back to
+   folder view there. Fixed min-height so rows stay aligned when a top-level
+   file shows the inert "/" instead. */
+.ip-subpath {
+    display: block; width: 100%; text-align: left; box-sizing: border-box;
+    padding: 5px 8px; font-size: 10px; line-height: 1.3; min-height: 26px;
+    color: #8a9bb5; background: transparent; border: 0;
+    border-bottom: 1px solid #2a2a32;
+    white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; cursor: pointer;
+}
+.ip-subpath:hover { color: #9ec6ff; background: #23232e; }
+.ip-subpath.is-root { color: #555; cursor: default; }
+.ip-subpath.is-root:hover { background: transparent; color: #555; }
 .ip-crumbs {
     display: flex;
     flex-wrap: wrap;

@@ -78,6 +78,10 @@ const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".m
 // Persisted sort preference. One shared key across every picker flavour so a
 // user's "Name A→Z" choice sticks regardless of which node opened the modal.
 const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
+// NOTE: the inline node grid offers two orders this list lacks (size:asc,
+// pixels:asc) while sharing the key above, so a preference set there is
+// silently dropped here. Converging both surfaces on the kit's SORT_OPTIONS is
+// the fix; it lands with the kit adoption, not with flat view.
 const VALID_SORTS = new Set([
   "mtime:desc",
   "mtime:asc",
@@ -88,6 +92,57 @@ const VALID_SORTS = new Set([
   "rating:desc",
   "rating:asc",
 ]);
+
+const SANDBOXED_TYPES = ["input", "output", "temp"];
+
+// Flat ("all subfolders") view preference.
+type ViewMode = "folder" | "flat";
+const VIEW_STORAGE_KEY = "comfyui-gallery-loader:view";
+// Breadcrumb set while a flat load is in flight and cleared once the grid has
+// painted. If it is STILL set at open time, the previous flat attempt never
+// finished — the tab died under it — so the persisted preference would reopen
+// straight into the same failure with no way to reach the toggle. Falling back
+// to folder view is the only self-service escape.
+const VIEW_PENDING_KEY = "comfyui-gallery-loader:view-pending";
+
+interface SavedView {
+  mode: ViewMode;
+  recovered: boolean;
+}
+
+function loadSavedView(): SavedView {
+  try {
+    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
+      localStorage.removeItem(VIEW_PENDING_KEY);
+      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
+      return { mode: "folder", recovered: true };
+    }
+    return {
+      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
+      recovered: false,
+    };
+  } catch {
+    // Private mode / disabled storage — non-fatal.
+    return { mode: "folder", recovered: false };
+  }
+}
+
+function saveView(mode: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, mode);
+  } catch {
+    // Non-fatal.
+  }
+}
+
+function markFlatPending(pending: boolean): void {
+  try {
+    if (pending) localStorage.setItem(VIEW_PENDING_KEY, "1");
+    else localStorage.removeItem(VIEW_PENDING_KEY);
+  } catch {
+    // Non-fatal.
+  }
+}
 
 // ============================================================
 // Types
@@ -162,6 +217,11 @@ interface ListingFile {
   width?: number;
   height?: number;
   rating?: number;
+  // Present only in a recursive ("flat") listing: the file's directory relative
+  // to the requested subfolder, forward-slashed, "" for a top-level file. A
+  // folder listing omits the key entirely. Never address a file with this
+  // directly — go through fileSub(), which joins it onto state.subfolder.
+  subpath?: string;
 }
 
 type PickerKind = "loadimage" | "vhs-path";
@@ -511,6 +571,7 @@ interface PickerState {
   query: string;
   didInitialScroll: boolean;
   extensionsParam: string[] | null;
+  viewMode: ViewMode;
 }
 
 interface InitialSnapshot {
@@ -562,6 +623,7 @@ export async function openImagePicker(
     // The set of extension strings (".mp4", ".png", …) we'll send to the
     // backend. null → backend's default (images).
     extensionsParam: null,
+    viewMode: "folder",
   };
 
   // Restore the user's last-used sort so it persists across modal opens.
@@ -569,6 +631,30 @@ export async function openImagePicker(
   if (savedSort) {
     state.sortKey = savedSort.key;
     state.sortDir = savedSort.dir;
+  }
+
+  const savedView = loadSavedView();
+  state.viewMode = savedView.mode;
+
+  // Flat view is only in effect on a sandboxed root — the toggle is hidden on
+  // the path tab and the backend ignores `recursive` there, so guard both.
+  // Directory mode never lists files at all.
+  function isFlat(): boolean {
+    return (
+      state.viewMode === "flat" && mode !== "directory" && SANDBOXED_TYPES.includes(state.type)
+    );
+  }
+
+  // A file's effective subfolder: in folder view every file lives in
+  // state.subfolder; in flat view each carries its own subpath, joined onto the
+  // request subfolder. EVERY per-file address (thumbnail, rating, committed
+  // value, subpath-label target) routes through this so both views share one
+  // code path.
+  function fileSub(f: ListingFile): string {
+    const sp = f.subpath || "";
+    if (!sp) return state.subfolder;
+    const base = state.subfolder.replace(/\/+$/, "");
+    return base ? `${base}/${sp}` : sp;
   }
 
   let initialSnapshot: InitialSnapshot;
@@ -659,12 +745,44 @@ export async function openImagePicker(
   refreshEl.title = "Refresh";
   refreshEl.textContent = "⟳";
 
-  modal.toolbarEl.append(crumbsEl, sortEl, refreshEl);
+  // Flat view toggle: fold the current folder's whole subtree into one grid.
+  // Sandboxed roots only, and meaningless in directory mode — so it is not
+  // CREATED at all for those flavours rather than created-then-hidden, which is
+  // how a dead control ships.
+  let viewToggleEl: HTMLButtonElement | null = null;
+  if (kind === "loadimage" && mode !== "directory") {
+    viewToggleEl = document.createElement("button");
+    viewToggleEl.type = "button";
+    viewToggleEl.className = "ip-control ip-icon ip-view-toggle";
+    viewToggleEl.title = "Flat view (all subfolders)";
+    viewToggleEl.textContent = "≣";
+  }
+
+  modal.toolbarEl.append(crumbsEl, ...(viewToggleEl ? [viewToggleEl] : []), sortEl, refreshEl);
+
+  // The toggle's visibility follows the active tab, so it re-syncs per load.
+  function renderViewToggle(): void {
+    if (!viewToggleEl) return;
+    const ok = SANDBOXED_TYPES.includes(state.type);
+    viewToggleEl.style.display = ok ? "" : "none";
+    viewToggleEl.classList.toggle("is-active", isFlat());
+    viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
+  }
 
   // ---- Body: grid -------------------------------------------------
   const gridEl = document.createElement("div");
   gridEl.className = "ip-grid";
   modal.bodyEl.appendChild(gridEl);
+
+  // The files currently painted, in render order. Cards carry their index into
+  // this, which is the only safe identity once flat view can show two files
+  // with the same name from different subfolders.
+  let renderedFiles: ListingFile[] = [];
+
+  function fileOfCard(card: HTMLElement): ListingFile | null {
+    const idx = Number(card.dataset.idx);
+    return Number.isInteger(idx) ? (renderedFiles[idx] ?? null) : null;
+  }
 
   const countEl = modal.footerEl.querySelector(".ip-count") as HTMLElement | null;
   function setCount(visible: number, total: number): void {
@@ -704,6 +822,14 @@ export async function openImagePicker(
 
   refreshEl.addEventListener("click", () => loadAndRender());
 
+  viewToggleEl?.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
+    saveView(state.viewMode);
+    // Flat needs a recursive re-fetch, so this is a reload, not a re-render.
+    loadAndRender();
+  });
+
   if (tabsEl) {
     tabsEl.addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest("[data-type]") as HTMLElement | null;
@@ -735,13 +861,16 @@ export async function openImagePicker(
     const card = star.closest(".ip-card") as HTMLElement | null;
     const row = star.parentElement as HTMLElement | null;
     if (!card || !row) return;
+    const f = fileOfCard(card);
+    if (!f) return;
     const cur = Number(row.dataset.rating || "0");
-    setStarRating(card.dataset.name as string, row, nextRating(cur, Number(star.dataset.val)));
+    setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
   });
 
   gridEl.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).closest(".ip-star")) return;
-    const card = (e.target as HTMLElement).closest(".ip-card") as HTMLElement | null;
+    const target = e.target as HTMLElement;
+    if (target.closest(".ip-star")) return;
+    const card = target.closest(".ip-card") as HTMLElement | null;
     if (!card) return;
     if (card.classList.contains("is-up")) {
       navigateUp();
@@ -753,26 +882,40 @@ export async function openImagePicker(
     }
     if (card.classList.contains("is-file")) {
       if (mode === "directory") return; // files are inert in dir mode
-      commitFile(card.dataset.name as string, card.dataset.ext || "");
+      // Flat view: the subpath label jumps to that folder in folder view.
+      const subEl = target.closest(".ip-subpath") as HTMLElement | null;
+      if (subEl?.dataset.sub !== undefined) {
+        e.stopPropagation();
+        state.viewMode = "folder";
+        saveView("folder");
+        state.subfolder = subEl.dataset.sub || "";
+        loadAndRender();
+        return;
+      }
+      const f = fileOfCard(card);
+      if (f) commitFile(f);
     }
   });
 
-  function setStarRating(name: string, row: HTMLElement, next: number): void {
+  // Takes the file OBJECT, not its name: `state.files.find(byName)` rated the
+  // first same-named file in the listing, which in flat view is routinely a
+  // different file in a different folder — and the optimistic repaint made the
+  // wrong write look like it had worked.
+  function setStarRating(f: ListingFile, row: HTMLElement, next: number): void {
     const prev = Number(row.dataset.rating || "0");
     applyStars(row, next);
-    const f = state.files.find((x) => x.name === name);
-    if (f) f.rating = next;
+    f.rating = next;
     const addr: RatingAddress = {
       type: state.type,
-      subfolder: state.subfolder,
+      subfolder: fileSub(f),
       absDir: state.absPath,
-      name,
+      name: f.name,
     };
     postRating(RATING_URL, addr, next)
       .then((confirmed) => {
         if (confirmed !== next) {
           applyStars(row, confirmed);
-          if (f) f.rating = confirmed;
+          f.rating = confirmed;
         }
       })
       .catch((e) => {
@@ -783,7 +926,7 @@ export async function openImagePicker(
           detail: String((e as Error)?.message ?? e),
         });
         applyStars(row, prev);
-        if (f) f.rating = prev;
+        f.rating = prev;
       });
   }
 
@@ -858,6 +1001,9 @@ export async function openImagePicker(
     } else {
       p.set("type", state.type);
       p.set("subfolder", state.subfolder);
+      // Only ever on a sandboxed root. The backend ignores it for type=path
+      // anyway; not sending it keeps that from being load-bearing.
+      if (isFlat()) p.set("recursive", "1");
     }
     if (state.extensionsParam?.length) {
       p.set("extensions", state.extensionsParam.join(","));
@@ -868,8 +1014,10 @@ export async function openImagePicker(
   async function loadAndRender(): Promise<void> {
     renderTabs();
     renderCrumbs();
+    renderViewToggle();
     modal.setBusy(true);
     modal.setStatus("Loading…");
+    markFlatPending(isFlat());
     try {
       const r = await fetch(buildListingURL());
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -878,6 +1026,13 @@ export async function openImagePicker(
       state.dirs = data.dirs || [];
       state.files = data.files || [];
       modal.setStatus(data.exists ? "" : "Directory not found.");
+      if (data.truncated) {
+        notify({
+          severity: "warn",
+          summary: `Showing the newest ${state.files.length}`,
+          detail: "This folder has more files than the listing returns; older ones are not shown.",
+        });
+      }
     } catch (e) {
       console.error(`[${EXT_NAME}] list failed:`, e);
       modal.setStatus(`Error: ${(e as Error).message}`);
@@ -886,6 +1041,9 @@ export async function openImagePicker(
     }
     modal.setBusy(false);
     renderGrid();
+    // Cleared only once the grid has actually painted — that is what makes a
+    // still-set flag at open time mean "the last flat load never finished".
+    markFlatPending(false);
   }
 
   function thumbForFile(f: ListingFile): ThumbDescriptor {
@@ -899,11 +1057,12 @@ export async function openImagePicker(
       }
       return { kind: "icon", text: "📄" };
     }
+    const sub = fileSub(f);
     if (IMG_EXTS.has(ext)) {
-      return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f) };
+      return { kind: "img", src: imageThumbURL(state.type, sub, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
-      return { kind: "video", src: videoSrcURL(state.type, state.subfolder, f.name) };
+      return { kind: "video", src: videoSrcURL(state.type, sub, f.name) };
     }
     return { kind: "icon", text: "📄" };
   }
@@ -912,8 +1071,12 @@ export async function openImagePicker(
     const q = state.query;
     gridEl.innerHTML = "";
 
+    // Flat view collapses the subtree into files only — no ".." card and no
+    // folder cards (the backend returns dirs:[] recursively anyway). A ".."
+    // here would silently drop out of flat view.
+    const flat = isFlat();
     const showUp =
-      state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder;
+      !flat && (state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder);
     if (showUp) {
       const up = document.createElement("div");
       up.className = "ip-card is-up";
@@ -924,7 +1087,7 @@ export async function openImagePicker(
       gridEl.appendChild(up);
     }
 
-    for (const d of state.dirs) {
+    for (const d of flat ? [] : state.dirs) {
       if (q && !d.name.toLowerCase().includes(q)) continue;
       const c = document.createElement("div");
       c.className = "ip-card is-dir";
@@ -940,7 +1103,10 @@ export async function openImagePicker(
     if (q) {
       const scored: { f: ListingFile; score: number }[] = [];
       for (const f of files) {
-        const r = fuzzyScore(q, f.name);
+        // In flat view the query matches "subpath/name" so you can filter by
+        // folder too; folder view matches the bare filename as before.
+        const hay = flat && f.subpath ? `${f.subpath}/${f.name}` : f.name;
+        const r = fuzzyScore(q, hay);
         if (r) scored.push({ f, score: r.score });
       }
       scored.sort((a, b) => b.score - a.score);
@@ -949,18 +1115,33 @@ export async function openImagePicker(
       files = sortFiles(files, state.sortKey, state.sortDir);
     }
 
+    // The rendered order IS the identity map: cards address their file by
+    // index, never by name. In flat view a bare filename is not unique across
+    // subfolders, so a name-keyed lookup silently commits (and rates) the wrong
+    // ComfyUI_00001_.png.
+    renderedFiles = files;
+
     let visible = 0;
     const inSameLocation =
       state.type === "path"
         ? state.absPath === initialSnapshot.subfolder
         : state.type === initialSnapshot.type && state.subfolder === initialSnapshot.subfolder;
-    for (const f of files) {
+    for (const [i, f] of files.entries()) {
       const c = document.createElement("div");
       c.className = "ip-card is-file";
-      c.dataset.name = f.name;
+      c.dataset.idx = String(i);
+      c.dataset.name = f.name; // display/debug only — never an identity
       c.dataset.ext = (f.ext || "").toLowerCase();
-      if (inSameLocation && f.name === initialSnapshot.name) {
+      const selected = flat
+        ? state.type === initialSnapshot.type &&
+          fileSub(f) === initialSnapshot.subfolder &&
+          f.name === initialSnapshot.name
+        : inSameLocation && f.name === initialSnapshot.name;
+      if (selected) {
         c.classList.add("is-selected");
+      }
+      if (flat) {
+        c.classList.add("is-flat");
       }
       if (mode === "directory") {
         c.classList.add("is-inert");
@@ -976,7 +1157,19 @@ export async function openImagePicker(
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
             : `<div class="ip-thumb-icon">${t.text}</div>`;
       const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
+      // Flat view: show the file's folder above the thumbnail. It's a button —
+      // tapping it drops back to folder view at that directory. The LABEL is
+      // the relative subpath (what the user reads) while data-sub is the joined
+      // one (where the tap goes); they differ whenever flat view is entered
+      // from a non-root subfolder, so a root-only test cannot see a mix-up.
+      // Top-level files get a muted "/" so the row height stays consistent.
+      const subLabel = flat
+        ? f.subpath
+          ? `<button type="button" class="ip-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>`
+          : `<div class="ip-subpath is-root" title="Top level">/</div>`
+        : "";
       c.innerHTML = `
+                ${subLabel}
                 <div class="ip-thumb">${thumbInner}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
@@ -1008,7 +1201,13 @@ export async function openImagePicker(
     // On first paint, scroll the currently loaded image into the middle of the
     // viewport so the user lands where they left off — neighbours visible above
     // and below make picking the next image quick. Only once per modal open.
-    if (!state.didInitialScroll) {
+    // Not in flat view: the target may be thousands of cards down a grid whose
+    // thumbnails are all still data-src placeholders, so the single bare write
+    // below lands against a shorter-than-final layout and gets CLAMPED at the
+    // instant of assignment — leaving the view somewhere arbitrary once the
+    // real heights arrive. Doing better needs a re-assert loop, which needs a
+    // browser test suite this pack does not have; not scrolling is honest.
+    if (!state.didInitialScroll && !isFlat()) {
       state.didInitialScroll = true;
       scrollToSelected();
     }
@@ -1078,12 +1277,16 @@ export async function openImagePicker(
     thumbObserver = io;
   }
 
-  function commitFile(name: string, _ext: string): void {
+  // Takes the file object so flat view commits the file's OWN folder. The
+  // value contract is unchanged: buildLoadImageValue already normalises a
+  // nested subfolder, so a flat pick of a/b/x.png yields exactly what folder
+  // navigation would have produced.
+  function commitFile(f: ListingFile): void {
     let value: string;
     if (state.type === "path") {
-      value = joinAbs(state.absPath, name);
+      value = joinAbs(state.absPath, f.name);
     } else {
-      value = buildLoadImageValue(state.type, state.subfolder, name);
+      value = buildLoadImageValue(state.type, fileSub(f), f.name);
       // The native LiteGraph combo validates against options.values;
       // append so re-renders treat the new value as valid.
       const values = widget.options?.values;
@@ -1151,6 +1354,13 @@ export async function openImagePicker(
 
   // First paint.
   loadAndRender();
+  if (savedView.recovered) {
+    notify({
+      severity: "warn",
+      summary: "Reopened in folder view",
+      detail: "The last flat-view load didn't finish, so the picker fell back to folder view.",
+    });
+  }
 }
 
 // ============================================================
@@ -1186,6 +1396,25 @@ const PICKER_CSS = `
     background: #2f3a52;
     color: #9ec6ff;
 }
+/* Shared active state for toolbar controls (the flat-view toggle). */
+.ip-control.is-active {
+    background: #2f3a52;
+    color: #9ec6ff;
+}
+/* Flat view: the file's folder, above the thumbnail. Tapping it drops back to
+   folder view there. Fixed min-height so rows stay aligned when a top-level
+   file shows the inert "/" instead. */
+.ip-subpath {
+    display: block; width: 100%; text-align: left; box-sizing: border-box;
+    padding: 5px 8px; font-size: 10px; line-height: 1.3; min-height: 26px;
+    color: #8a9bb5; background: transparent; border: 0;
+    border-bottom: 1px solid #2a2a32;
+    white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; cursor: pointer;
+}
+.ip-subpath:hover { color: #9ec6ff; background: #23232e; }
+.ip-subpath.is-root { color: #555; cursor: default; }
+.ip-subpath.is-root:hover { background: transparent; color: #555; }
 .ip-crumbs {
     display: flex;
     flex-wrap: wrap;
