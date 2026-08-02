@@ -875,6 +875,35 @@ if (!document.querySelector(`link[href="${CSS_URL}"]`)) {
   document.head.appendChild(link);
 }
 var TYPES = ["input", "output", "temp", "path"];
+var SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
+var VALID_SORTS = new Set([
+  "mtime:desc",
+  "mtime:asc",
+  "name:asc",
+  "name:desc",
+  "size:desc",
+  "size:asc",
+  "pixels:desc",
+  "pixels:asc",
+  "rating:desc",
+  "rating:asc"
+]);
+function loadSavedSort() {
+  try {
+    const raw = localStorage.getItem(SORT_STORAGE_KEY);
+    if (!raw || !VALID_SORTS.has(raw))
+      return null;
+    const [key, dir] = raw.split(":");
+    return key && dir ? { key, dir } : null;
+  } catch {
+    return null;
+  }
+}
+function saveSort(key, dir) {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+  } catch {}
+}
 var MIN_NODE_W = 360;
 var MIN_NODE_H = 460;
 app.registerExtension({
@@ -1016,6 +1045,11 @@ function attachGallery(node) {
     files: [],
     selectedName: initial.name
   };
+  const savedSort = loadSavedSort();
+  if (savedSort) {
+    state.sortKey = savedSort.key;
+    state.sortDir = savedSort.dir;
+  }
   const refs = {
     grid: root.querySelector(".gl-grid"),
     status: root.querySelector(".gl-status"),
@@ -1032,6 +1066,7 @@ function attachGallery(node) {
     const [key, dir] = e.target.value.split(":");
     state.sortKey = key;
     state.sortDir = dir;
+    saveSort(key, dir);
     renderGrid();
   });
   chipsEl.addEventListener("click", (e) => {
@@ -1246,10 +1281,20 @@ function attachGallery(node) {
       c.innerHTML = `<div class="gl-thumb gl-folder">\uD83D\uDCC1</div><div class="gl-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>`;
       grid.appendChild(c);
     }
-    const sortedFiles = sortFiles(state.files, state.sortKey, state.sortDir);
+    let sortedFiles;
+    if (q) {
+      const scored = [];
+      for (const f of state.files) {
+        const r = fuzzyScore(q, f.name);
+        if (r)
+          scored.push({ f, score: r.score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      sortedFiles = scored.map((x) => x.f);
+    } else {
+      sortedFiles = sortFiles(state.files, state.sortKey, state.sortDir);
+    }
     for (const f of sortedFiles) {
-      if (q && !f.name.toLowerCase().includes(q))
-        continue;
       const c = document.createElement("div");
       c.className = "gl-card is-file";
       c.dataset.name = f.name;
@@ -1322,25 +1367,33 @@ ${stamp}`;
         f.rating = prev;
     });
   }
+  let thumbObserver = null;
   function installLazyThumbs(grid) {
-    const imgs = grid.querySelectorAll("img[data-src]");
-    if (!imgs.length)
+    thumbObserver?.disconnect();
+    thumbObserver = null;
+    if (typeof IntersectionObserver === "undefined")
+      return;
+    const els = grid.querySelectorAll("img[data-src], video[data-src]");
+    if (!els.length)
       return;
     const io = new IntersectionObserver((entries) => {
       for (const e of entries) {
         if (!e.isIntersecting)
           continue;
-        const im = e.target;
-        const src = im.dataset.src;
+        const el = e.target;
+        const src = el.dataset.src;
         if (src) {
-          im.src = src;
-          im.removeAttribute("data-src");
+          if (el.tagName === "VIDEO")
+            el.preload = "metadata";
+          el.src = src;
+          el.removeAttribute("data-src");
         }
-        io.unobserve(im);
+        io.unobserve(el);
       }
     }, { root: grid, rootMargin: "200px" });
-    for (const im of imgs)
-      io.observe(im);
+    for (const el of els)
+      io.observe(el);
+    thumbObserver = io;
   }
   renderControls();
   loadAndRender();
@@ -1406,14 +1459,16 @@ var IMG_EXTS = new Set([
   ".avif"
 ]);
 var VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"]);
-var SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
-var VALID_SORTS = new Set([
+var SORT_STORAGE_KEY2 = "comfyui-gallery-loader:sort";
+var VALID_SORTS2 = new Set([
   "mtime:desc",
   "mtime:asc",
   "name:asc",
   "name:desc",
   "size:desc",
+  "size:asc",
   "pixels:desc",
+  "pixels:asc",
   "rating:desc",
   "rating:asc"
 ]);
@@ -1473,10 +1528,10 @@ function savePins(pins) {
     localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
   } catch {}
 }
-function loadSavedSort() {
+function loadSavedSort2() {
   try {
-    const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS.has(raw))
+    const raw = localStorage.getItem(SORT_STORAGE_KEY2);
+    if (!raw || !VALID_SORTS2.has(raw))
       return null;
     const [key, dir] = raw.split(":");
     return { key, dir };
@@ -1485,9 +1540,9 @@ function loadSavedSort() {
     return null;
   }
 }
-function saveSort(key, dir) {
+function saveSort2(key, dir) {
   try {
-    localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+    localStorage.setItem(SORT_STORAGE_KEY2, `${key}:${dir}`);
   } catch (e) {
     console.warn(`[${EXT_NAME2}] could not save sort`, e);
   }
@@ -1784,7 +1839,7 @@ async function openImagePicker(widget, node, opts) {
     extensionsParam: null,
     viewMode: "folder"
   };
-  const savedSort = loadSavedSort();
+  const savedSort = loadSavedSort2();
   if (savedSort) {
     state.sortKey = savedSort.key;
     state.sortDir = savedSort.dir;
@@ -1857,7 +1912,9 @@ async function openImagePicker(widget, node, opts) {
         <option value="name:asc">Name A→Z</option>
         <option value="name:desc">Name Z→A</option>
         <option value="size:desc">Largest file</option>
-        <option value="pixels:desc">Highest resolution</option>
+        <option value="size:asc">Smallest file</option>
+        <option value="pixels:desc">Largest resolution</option>
+        <option value="pixels:asc">Smallest resolution</option>
         <option value="rating:desc">Highest rating</option>
         <option value="rating:asc">Lowest rating</option>
     `;
@@ -1962,7 +2019,7 @@ async function openImagePicker(widget, node, opts) {
     const [k, d] = sortEl.value.split(":");
     state.sortKey = k;
     state.sortDir = d;
-    saveSort(k, d);
+    saveSort2(k, d);
     renderGrid();
   });
   refreshEl.addEventListener("click", () => loadAndRender());

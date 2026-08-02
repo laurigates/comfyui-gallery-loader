@@ -82,17 +82,18 @@ const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".m
 // Persisted sort preference. One shared key across every picker flavour so a
 // user's "Name A→Z" choice sticks regardless of which node opened the modal.
 const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
-// NOTE: the inline node grid offers two orders this list lacks (size:asc,
-// pixels:asc) while sharing the key above, so a preference set there is
-// silently dropped here. Converging both surfaces on the kit's SORT_OPTIONS is
-// the fix; it lands with the kit adoption, not with flat view.
+// Both surfaces share this key, so both must accept the same values: the node
+// grid offered size:asc / pixels:asc that this validator used to reject, and a
+// preference set there was silently dropped here with nothing to explain it.
 const VALID_SORTS = new Set([
   "mtime:desc",
   "mtime:asc",
   "name:asc",
   "name:desc",
   "size:desc",
+  "size:asc",
   "pixels:desc",
+  "pixels:asc",
   "rating:desc",
   "rating:asc",
 ]);
@@ -874,7 +875,9 @@ export async function openImagePicker(
         <option value="name:asc">Name A→Z</option>
         <option value="name:desc">Name Z→A</option>
         <option value="size:desc">Largest file</option>
-        <option value="pixels:desc">Highest resolution</option>
+        <option value="size:asc">Smallest file</option>
+        <option value="pixels:desc">Largest resolution</option>
+        <option value="pixels:asc">Smallest resolution</option>
         <option value="rating:desc">Highest rating</option>
         <option value="rating:asc">Lowest rating</option>
     `;

@@ -10,6 +10,7 @@
 
 import {
   applyStars,
+  fuzzyScore,
   nextRating,
   notify,
   postRating,
@@ -38,6 +39,44 @@ const TYPES = ["input", "output", "temp", "path"] as const;
 
 // Some sensible mins. The grid is internally scrollable, so the user can
 // keep the node compact and still see thumbnails.
+// Persisted sort preference. Deliberately the SAME key the modal picker uses —
+// one choice across every surface. The option lists had to be converged first:
+// this grid offered size:asc / pixels:asc that the picker's validator rejected,
+// so a preference set here was silently dropped there with nothing to explain
+// it to the user.
+const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
+const VALID_SORTS = new Set([
+  "mtime:desc",
+  "mtime:asc",
+  "name:asc",
+  "name:desc",
+  "size:desc",
+  "size:asc",
+  "pixels:desc",
+  "pixels:asc",
+  "rating:desc",
+  "rating:asc",
+]);
+
+function loadSavedSort(): { key: string; dir: string } | null {
+  try {
+    const raw = localStorage.getItem(SORT_STORAGE_KEY);
+    if (!raw || !VALID_SORTS.has(raw)) return null;
+    const [key, dir] = raw.split(":");
+    return key && dir ? { key, dir } : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSort(key: string, dir: string): void {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+  } catch {
+    // Private mode / disabled storage — non-fatal.
+  }
+}
+
 const MIN_NODE_W = 360;
 const MIN_NODE_H = 460;
 
@@ -202,7 +241,11 @@ interface GalleryState {
   selectedName: string;
 }
 
-function attachGallery(node: GalleryNode): void {
+// Exported as a test seam only — production reaches it through onNodeCreated
+// below. Mirrors image-picker.ts's openImagePicker, which exists for the same
+// reason: this module is otherwise pure side-effect registration with nothing
+// importable, and that is what left the inline grid with no JS coverage.
+export function attachGallery(node: GalleryNode): void {
   const found = node.widgets?.find((w) => w.name === "image");
   if (!found) return;
   // Bind a non-undefined alias so the nested render closures below see the
@@ -281,6 +324,14 @@ function attachGallery(node: GalleryNode): void {
     selectedName: initial.name,
   };
 
+  // Restore the user's last-used sort so it persists across node creations,
+  // and matches whatever they picked in the modal picker.
+  const savedSort = loadSavedSort();
+  if (savedSort) {
+    state.sortKey = savedSort.key;
+    state.sortDir = savedSort.dir;
+  }
+
   const refs = {
     grid: root.querySelector(".gl-grid") as HTMLElement,
     status: root.querySelector(".gl-status") as HTMLElement,
@@ -297,6 +348,7 @@ function attachGallery(node: GalleryNode): void {
     const [key, dir] = (e.target as HTMLSelectElement).value.split(":");
     state.sortKey = key as string;
     state.sortDir = dir as string;
+    saveSort(key as string, dir as string);
     renderGrid();
   });
 
@@ -541,9 +593,22 @@ function attachGallery(node: GalleryNode): void {
       grid.appendChild(c);
     }
 
-    const sortedFiles = sortFiles(state.files, state.sortKey, state.sortDir);
+    // Fuzzy-rank while filtering (score order wins over the sort selection),
+    // matching the modal picker. A plain substring test made "clp" miss
+    // clip.mp4 here while finding it there.
+    let sortedFiles: ListingFile[];
+    if (q) {
+      const scored: { f: ListingFile; score: number }[] = [];
+      for (const f of state.files) {
+        const r = fuzzyScore(q, f.name);
+        if (r) scored.push({ f, score: r.score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      sortedFiles = scored.map((x) => x.f);
+    } else {
+      sortedFiles = sortFiles(state.files, state.sortKey, state.sortDir);
+    }
     for (const f of sortedFiles) {
-      if (q && !f.name.toLowerCase().includes(q)) continue;
       const c = document.createElement("div");
       c.className = "gl-card is-file";
       c.dataset.name = f.name;
@@ -623,25 +688,42 @@ function attachGallery(node: GalleryNode): void {
 
   // Use IntersectionObserver to defer thumbnail loading until visible.
   // Cheap and self-contained per re-render.
+  // Observer for the current render. Kept so the next render can disconnect it
+  // instead of leaking one observer — each still referencing every detached
+  // card — per render. renderGrid() runs on every search keystroke, so this
+  // accumulated fast.
+  let thumbObserver: IntersectionObserver | null = null;
+
   function installLazyThumbs(grid: HTMLElement): void {
-    const imgs = grid.querySelectorAll("img[data-src]");
-    if (!imgs.length) return;
+    thumbObserver?.disconnect();
+    thumbObserver = null;
+    if (typeof IntersectionObserver === "undefined") return;
+    // This grid renders <img> only; the video branch below is parity with the
+    // modal picker's copy so the two stay swappable for a shared helper.
+    const els = grid.querySelectorAll("img[data-src], video[data-src]");
+    if (!els.length) return;
+    // `root: grid` is correct HERE and only here: `.gl-grid` has
+    // `overflow-y: auto`, so it IS the scroller. The modal picker's `.ip-grid`
+    // has no overflow clip and must root on the shell body instead — see the
+    // regression test in tests/js/image-picker.test.js.
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           if (!e.isIntersecting) continue;
-          const im = e.target as HTMLImageElement;
-          const src = im.dataset.src;
+          const el = e.target as HTMLImageElement | HTMLVideoElement;
+          const src = (el as HTMLElement).dataset.src;
           if (src) {
-            im.src = src;
-            im.removeAttribute("data-src");
+            if (el.tagName === "VIDEO") (el as HTMLVideoElement).preload = "metadata";
+            el.src = src;
+            el.removeAttribute("data-src");
           }
-          io.unobserve(im);
+          io.unobserve(el);
         }
       },
       { root: grid, rootMargin: "200px" },
     );
-    for (const im of imgs) io.observe(im);
+    for (const el of els) io.observe(el);
+    thumbObserver = io;
   }
 
   // First paint.
