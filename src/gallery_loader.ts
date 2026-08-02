@@ -10,12 +10,17 @@
 
 import {
   applyStars,
+  escapeHTML,
   fuzzyScore,
+  installLazyMedia,
+  isValidSort,
   nextRating,
   notify,
   postRating,
   type RatingAddress,
   ratingOf,
+  SORT_OPTIONS,
+  sortFiles,
   starsHTML,
   warnRating,
 } from "@laurigates/comfy-modal-kit";
@@ -45,23 +50,11 @@ const TYPES = ["input", "output", "temp", "path"] as const;
 // so a preference set here was silently dropped there with nothing to explain
 // it to the user.
 const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
-const VALID_SORTS = new Set([
-  "mtime:desc",
-  "mtime:asc",
-  "name:asc",
-  "name:desc",
-  "size:desc",
-  "size:asc",
-  "pixels:desc",
-  "pixels:asc",
-  "rating:desc",
-  "rating:asc",
-]);
 
 function loadSavedSort(): { key: string; dir: string } | null {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS.has(raw)) return null;
+    if (!raw || !isValidSort(raw)) return null;
     const [key, dir] = raw.split(":");
     return key && dir ? { key, dir } : null;
   } catch {
@@ -275,16 +268,7 @@ export function attachGallery(node: GalleryNode): void {
         <div class="gl-bar">
             <div class="gl-chips"></div>
             <select class="gl-sort" title="Sort">
-                <option value="mtime:desc">Newest</option>
-                <option value="mtime:asc">Oldest</option>
-                <option value="name:asc">Name A→Z</option>
-                <option value="name:desc">Name Z→A</option>
-                <option value="size:desc">Largest file</option>
-                <option value="size:asc">Smallest file</option>
-                <option value="pixels:desc">Largest resolution</option>
-                <option value="pixels:asc">Smallest resolution</option>
-                <option value="rating:desc">Highest rating</option>
-                <option value="rating:asc">Lowest rating</option>
+                <!-- options injected from the kit's SORT_OPTIONS below -->
             </select>
             <button class="gl-icon gl-refresh" title="Refresh">⟳</button>
         </div>
@@ -343,6 +327,11 @@ export function attachGallery(node: GalleryNode): void {
     refresh: root.querySelector(".gl-refresh") as HTMLElement,
     sort: root.querySelector(".gl-sort") as HTMLSelectElement,
   };
+  // Options come from the kit so both surfaces offer — and accept — the same
+  // ten, which is what makes sharing the :sort key safe.
+  refs.sort.innerHTML = SORT_OPTIONS.map(
+    (o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`,
+  ).join("");
   refs.sort.value = `${state.sortKey}:${state.sortDir}`;
   refs.sort.addEventListener("change", (e) => {
     const [key, dir] = (e.target as HTMLSelectElement).value.split(":");
@@ -688,88 +677,20 @@ export function attachGallery(node: GalleryNode): void {
 
   // Use IntersectionObserver to defer thumbnail loading until visible.
   // Cheap and self-contained per re-render.
-  // Observer for the current render. Kept so the next render can disconnect it
-  // instead of leaking one observer — each still referencing every detached
-  // card — per render. renderGrid() runs on every search keystroke, so this
-  // accumulated fast.
-  let thumbObserver: IntersectionObserver | null = null;
+  // `root: grid` is correct HERE and only here: `.gl-grid` has
+  // overflow-y:auto, so it IS the scroller. The modal picker's `.ip-grid` has
+  // no overflow clip and roots on the shell body instead. The kit takes the
+  // root as a required parameter so neither call site can drift into the
+  // other's answer.
+  let disposeLazyThumbs: (() => void) | null = null;
 
   function installLazyThumbs(grid: HTMLElement): void {
-    thumbObserver?.disconnect();
-    thumbObserver = null;
-    if (typeof IntersectionObserver === "undefined") return;
-    // This grid renders <img> only; the video branch below is parity with the
-    // modal picker's copy so the two stay swappable for a shared helper.
-    const els = grid.querySelectorAll("img[data-src], video[data-src]");
-    if (!els.length) return;
-    // `root: grid` is correct HERE and only here: `.gl-grid` has
-    // `overflow-y: auto`, so it IS the scroller. The modal picker's `.ip-grid`
-    // has no overflow clip and must root on the shell body instead — see the
-    // regression test in tests/js/image-picker.test.js.
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          if (!e.isIntersecting) continue;
-          const el = e.target as HTMLImageElement | HTMLVideoElement;
-          const src = (el as HTMLElement).dataset.src;
-          if (src) {
-            if (el.tagName === "VIDEO") (el as HTMLVideoElement).preload = "metadata";
-            el.src = src;
-            el.removeAttribute("data-src");
-          }
-          io.unobserve(el);
-        }
-      },
-      { root: grid, rootMargin: "200px" },
-    );
-    for (const el of els) io.observe(el);
-    thumbObserver = io;
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(grid, { root: grid, rootMargin: "200px" });
   }
 
   // First paint.
   renderControls();
   loadAndRender();
   updateSelectedFooter();
-}
-
-function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[] {
-  const mul = dir === "asc" ? 1 : -1;
-  const nameCmp = (a: ListingFile, b: ListingFile) =>
-    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-  const numCmp =
-    (extract: (f: ListingFile) => number | undefined) => (a: ListingFile, b: ListingFile) =>
-      (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
-  let cmp: (a: ListingFile, b: ListingFile) => number;
-  switch (key) {
-    case "name":
-      cmp = nameCmp;
-      break;
-    case "size":
-      cmp = numCmp((f) => f.size);
-      break;
-    case "pixels":
-      cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
-      break;
-    case "rating":
-      cmp = numCmp((f) => f.rating);
-      break;
-    default:
-      cmp = numCmp((f) => f.mtime);
-      break;
-  }
-  // Copy so we don't mutate the cached listing.
-  return [...files].sort((a, b) => mul * cmp(a, b));
-}
-
-function escapeHTML(s: unknown): string {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) =>
-      (
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }) as Record<
-          string,
-          string
-        >
-      )[c] as string,
-  );
 }
