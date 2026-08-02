@@ -766,3 +766,72 @@ describe("image picker metadata overlay", () => {
     expect(widget.value).toBe(before);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Android / gesture back
+// ---------------------------------------------------------------------------
+
+const popBack = () => window.dispatchEvent(new PopStateEvent("popstate"));
+
+describe("image picker back button", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it("ascends one directory instead of leaving ComfyUI", async () => {
+    stubInertObserver();
+    const calls = stubFetchRecording();
+    await openWith({ value: "run/deep/a.png" });
+
+    // Compare the parsed param, not a substring: "subfolder=run" is a prefix
+    // of "subfolder=run%2Fdeep", so a substring test passes before the ascend.
+    const subOf = (u) => new URL(u, "http://localhost").searchParams.get("subfolder");
+    expect(subOf(calls.list.at(-1))).toBe("run/deep");
+    popBack();
+    await vi.waitFor(() => {
+      if (subOf(calls.list.at(-1)) !== "run") throw new Error("did not ascend");
+    });
+    // Still open — back acted on the picker, not on history.
+    expect(document.querySelector(".ip-grid")).not.toBeNull();
+  });
+
+  it("closes the picker at a root", async () => {
+    stubInertObserver();
+    stubFetchRecording();
+    await openWith({ value: "a.png" }); // no subfolder — already at the root
+
+    popBack();
+    await vi.waitFor(() => {
+      if (document.querySelector(".ip-grid")) throw new Error("still open");
+    });
+  });
+
+  it("dismisses an open overlay first, leaving the picker up", async () => {
+    stubInertObserver();
+    stubFetchWithMeta(FULL_META);
+    await openWith({ value: "a.png" });
+    await openInfo();
+    expect(document.querySelector(".ip-meta-card")).not.toBeNull();
+
+    popBack();
+    await vi.waitFor(() => {
+      if (document.querySelector(".ip-meta-card")) throw new Error("overlay still up");
+    });
+    // One back = one dismissal: the picker itself survives.
+    expect(document.querySelector(".ip-grid")).not.toBeNull();
+  });
+
+  it("does not commit a value on back", async () => {
+    stubInertObserver();
+    stubFetchRecording();
+    const widget = await openWith({ value: "a.png" });
+    const before = widget.value;
+    popBack();
+    await vi.waitFor(() => {
+      if (document.querySelector(".ip-grid")) throw new Error("still open");
+    });
+    expect(widget.value).toBe(before);
+  });
+});

@@ -26,8 +26,12 @@ import {
   type ButtonWidgetHost,
   copyTextToClipboard,
   ensureStyleOnce,
+  escapeHTML as escHTML,
   fuzzyScore,
   highlightMatches,
+  installBackGuard,
+  installLazyMedia,
+  isValidSort,
   nextRating,
   notify,
   openModalShell,
@@ -37,6 +41,8 @@ import {
   postRating,
   type RatingAddress,
   ratingOf,
+  SORT_OPTIONS,
+  sortFiles,
   starsHTML,
   warnRating,
 } from "@laurigates/comfy-modal-kit";
@@ -82,21 +88,6 @@ const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".m
 // Persisted sort preference. One shared key across every picker flavour so a
 // user's "Name A→Z" choice sticks regardless of which node opened the modal.
 const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
-// Both surfaces share this key, so both must accept the same values: the node
-// grid offered size:asc / pixels:asc that this validator used to reject, and a
-// preference set there was silently dropped here with nothing to explain it.
-const VALID_SORTS = new Set([
-  "mtime:desc",
-  "mtime:asc",
-  "name:asc",
-  "name:desc",
-  "size:desc",
-  "size:asc",
-  "pixels:desc",
-  "pixels:asc",
-  "rating:desc",
-  "rating:asc",
-]);
 
 const SANDBOXED_TYPES = ["input", "output", "temp"];
 
@@ -289,7 +280,7 @@ interface SavedSort {
 function loadSavedSort(): SavedSort | null {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS.has(raw)) return null;
+    if (!raw || !isValidSort(raw)) return null;
     const [key, dir] = raw.split(":");
     return { key: key as string, dir: dir as string };
   } catch (e) {
@@ -845,6 +836,39 @@ export async function openImagePicker(
     height: "min(88vh, 820px)",
     footerLeftHTML,
     footerRightHTML: '<span class="ip-count"></span>',
+    onClose: () => {
+      disposeBackGuard?.();
+      disposeBackGuard = null;
+    },
+  });
+
+  // ---- Android / gesture back ------------------------------------
+  // A sentinel history entry keeps the hardware back button acting on the
+  // picker instead of navigating away from ComfyUI. The kit owns the history
+  // bookkeeping; what "back" MEANS here is this callback: dismiss an open
+  // overlay (the metadata card), else ascend one directory, and only close at
+  // a root. Assigned after the shell exists because onClose above closes over
+  // it, and the guard needs `modal` to hit-test the overlay.
+  let disposeBackGuard: (() => void) | null = null;
+
+  function canGoUp(): boolean {
+    return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
+  }
+
+  disposeBackGuard = installBackGuard(() => {
+    if (modal.dialog.querySelector(".cmp-ov-backdrop")) {
+      // Route through the overlay's own ESC path so its onDismiss fires and
+      // the shell's key handler is restored — closing it by hand would leave
+      // the overlay's suspended ESC listener unrestored.
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      return true;
+    }
+    if (canGoUp()) {
+      navigateUp();
+      return true;
+    }
+    modal.close();
+    return false;
   });
 
   // ---- Toolbar: tabs (loadimage only) + breadcrumbs + sort + refresh -
@@ -869,18 +893,11 @@ export async function openImagePicker(
   const sortEl = document.createElement("select");
   sortEl.className = "ip-control";
   sortEl.title = "Sort";
-  sortEl.innerHTML = `
-        <option value="mtime:desc">Newest</option>
-        <option value="mtime:asc">Oldest</option>
-        <option value="name:asc">Name A→Z</option>
-        <option value="name:desc">Name Z→A</option>
-        <option value="size:desc">Largest file</option>
-        <option value="size:asc">Smallest file</option>
-        <option value="pixels:desc">Largest resolution</option>
-        <option value="pixels:asc">Smallest resolution</option>
-        <option value="rating:desc">Highest rating</option>
-        <option value="rating:asc">Lowest rating</option>
-    `;
+  // Options come from the kit so both surfaces offer — and accept — the same
+  // ten, which is what makes sharing the :sort key safe.
+  sortEl.innerHTML = SORT_OPTIONS.map(
+    (o) => `<option value="${o.value}">${escHTML(o.label)}</option>`,
+  ).join("");
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
 
   const refreshEl = document.createElement("button");
@@ -1644,54 +1661,15 @@ export async function openImagePicker(
     return `…${p.slice(-46)}`;
   }
 
-  // Observer for the current render, kept so the next one can disconnect it
-  // instead of leaking an observer (still referencing every detached card) per
-  // navigation / sort / search keystroke.
-  let thumbObserver: IntersectionObserver | null = null;
+  // The root MUST be the shell body: `.ip-grid` has no overflow clip, so
+  // rooting on it makes every card intersect on the first callback and the
+  // "lazy" load fires for the whole listing at once. The kit takes the root as
+  // a required parameter for exactly this reason.
+  let disposeLazyThumbs: (() => void) | null = null;
 
-  function installLazyThumbs(container: HTMLElement): void {
-    thumbObserver?.disconnect();
-    thumbObserver = null;
-    // Without the guard a browser lacking IntersectionObserver throws here and
-    // takes the whole grid render down with it — thumbnails degrading to
-    // never-loaded is survivable, an exception out of renderGrid is not.
-    if (typeof IntersectionObserver === "undefined") return;
-    const els = container.querySelectorAll("img[data-src], video[data-src]");
-    if (!els.length) return;
-    // The root MUST be the scrolling ancestor (modal.bodyEl / .cmp-body), NOT
-    // the grid. `.ip-grid` has no overflow clip, so with the grid as root the
-    // root rectangle is the grid's whole bounding box and EVERY card reports as
-    // intersecting on the first callback — the "lazy" load fires for the entire
-    // listing at once (measured 400/400 off-screen cards vs 20/400 with the
-    // real scroller). A big output dir then issues one /thumb request per file
-    // and gives every video a src + preload=metadata simultaneously.
-    //
-    // Note this differs from gallery_loader.ts, where `.gl-grid` IS the scroll
-    // container and passing the grid is correct. The picker's grid lives inside
-    // the modal shell's body, so the scroller moved and the root had to follow.
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          if (!e.isIntersecting) continue;
-          const el = e.target as HTMLImageElement | HTMLVideoElement;
-          const src = (el as HTMLElement).dataset.src;
-          if (src) {
-            if (el.tagName === "VIDEO") {
-              // Switch to preload=metadata only when in view, so
-              // the browser only fetches video headers for thumbs
-              // the user actually scrolled to.
-              (el as HTMLVideoElement).preload = "metadata";
-            }
-            el.src = src;
-            el.removeAttribute("data-src");
-          }
-          io.unobserve(el);
-        }
-      },
-      { root: modal.bodyEl, rootMargin: "300px" },
-    );
-    for (const el of els) io.observe(el);
-    thumbObserver = io;
+  function installLazyThumbs(rootEl: HTMLElement): void {
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(rootEl, { root: modal.bodyEl, rootMargin: "300px" });
   }
 
   // Takes the file object so flat view commits the file's OWN folder. The
@@ -1736,37 +1714,6 @@ export async function openImagePicker(
     }
     node?.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas?.(true, true);
-  }
-
-  function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[] {
-    const mul = dir === "asc" ? 1 : -1;
-    const nameCmp = (a: ListingFile, b: ListingFile) =>
-      a.name.localeCompare(b.name, undefined, {
-        numeric: true,
-        sensitivity: "base",
-      });
-    const numCmp =
-      (getter: (f: ListingFile) => number | undefined) => (a: ListingFile, b: ListingFile) =>
-        (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
-    let cmp: (a: ListingFile, b: ListingFile) => number;
-    switch (key) {
-      case "name":
-        cmp = nameCmp;
-        break;
-      case "size":
-        cmp = numCmp((f) => f.size);
-        break;
-      case "pixels":
-        cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
-        break;
-      case "rating":
-        cmp = numCmp((f) => f.rating);
-        break;
-      default:
-        cmp = numCmp((f) => f.mtime);
-        break;
-    }
-    return [...files].sort((a, b) => mul * cmp(a, b));
   }
 
   // First paint.
@@ -2072,19 +2019,6 @@ const PICKER_CSS = `
     font-weight: 700;
 }
 `;
-
-function escHTML(s: unknown): string {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) =>
-      (
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }) as Record<
-          string,
-          string
-        >
-      )[c] as string,
-  );
-}
 
 // ============================================================
 // Extension registration

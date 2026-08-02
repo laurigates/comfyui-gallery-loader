@@ -1,6 +1,53 @@
 /* web/dist bundle built by bun from src/ in this repository (see package.json). Inlines @laurigates/comfy-modal-kit (MIT) - a first-party library by the same publisher, published to npm with provenance attestation: https://www.npmjs.com/package/@laurigates/comfy-modal-kit */
 
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
+function installBackGuard(onBack) {
+  if (typeof window === "undefined" || typeof history === "undefined")
+    return () => {};
+  let armed = false;
+  let disposed = false;
+  const arm = () => {
+    history.pushState({ cmpBackGuard: true }, "");
+    armed = true;
+  };
+  const dispose = () => {
+    if (disposed)
+      return;
+    disposed = true;
+    window.removeEventListener("popstate", onPop);
+    if (armed) {
+      armed = false;
+      history.back();
+    }
+  };
+  function onPop() {
+    armed = false;
+    let handled = false;
+    try {
+      handled = onBack();
+    } catch (e) {
+      console.error("[comfy-modal-kit] back handler threw", e);
+    }
+    if (handled && !disposed) {
+      arm();
+      return;
+    }
+    dispose();
+  }
+  arm();
+  window.addEventListener("popstate", onPop);
+  return dispose;
+}
+var ENTITIES = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;"
+};
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ENTITIES[c]);
+}
 var KEY = Symbol.for("laurigates.comfyModalKit");
 function getKit() {
   const g = globalThis;
@@ -23,6 +70,46 @@ function getKit() {
   if (!kit.modalChrome)
     kit.modalChrome = [];
   return kit;
+}
+var SORT_OPTIONS = [
+  { value: "mtime:desc", label: "Newest" },
+  { value: "mtime:asc", label: "Oldest" },
+  { value: "name:asc", label: "Name A→Z" },
+  { value: "name:desc", label: "Name Z→A" },
+  { value: "size:desc", label: "Largest file" },
+  { value: "size:asc", label: "Smallest file" },
+  { value: "pixels:desc", label: "Largest resolution" },
+  { value: "pixels:asc", label: "Smallest resolution" },
+  { value: "rating:desc", label: "Highest rating" },
+  { value: "rating:asc", label: "Lowest rating" }
+];
+var VALID_SORTS = new Set(SORT_OPTIONS.map((o) => o.value));
+function isValidSort(value) {
+  return VALID_SORTS.has(value);
+}
+function sortFiles(files, key, dir) {
+  const mul = dir === "asc" ? 1 : -1;
+  const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  const numCmp = (extract) => (a, b) => (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
+  let cmp;
+  switch (key) {
+    case "name":
+      cmp = nameCmp;
+      break;
+    case "size":
+      cmp = numCmp((f) => f.size);
+      break;
+    case "pixels":
+      cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
+      break;
+    case "rating":
+      cmp = numCmp((f) => f.rating);
+      break;
+    default:
+      cmp = numCmp((f) => f.mtime);
+      break;
+  }
+  return [...files].sort((a, b) => mul * cmp(a, b));
 }
 var CHROME_ATTR = "data-cmp-chrome";
 function setActiveModal(handle) {
@@ -348,6 +435,33 @@ function notify(opts) {
     timer = setTimeout(close, life);
   }
   return { close, el: toast };
+}
+var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
+function installLazyMedia(container, opts) {
+  const noop = () => {};
+  if (typeof IntersectionObserver === "undefined")
+    return noop;
+  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
+  if (!els.length)
+    return noop;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting)
+        continue;
+      const el = e.target;
+      const src = el.dataset.src;
+      if (src) {
+        if (el.tagName === "VIDEO")
+          el.preload = "metadata";
+        el.src = src;
+        el.removeAttribute("data-src");
+      }
+      io.unobserve(el);
+    }
+  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
+  for (const el of els)
+    io.observe(el);
+  return () => io.disconnect();
 }
 function fuzzyScore(query, target) {
   if (!query)
@@ -876,22 +990,10 @@ if (!document.querySelector(`link[href="${CSS_URL}"]`)) {
 }
 var TYPES = ["input", "output", "temp", "path"];
 var SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
-var VALID_SORTS = new Set([
-  "mtime:desc",
-  "mtime:asc",
-  "name:asc",
-  "name:desc",
-  "size:desc",
-  "size:asc",
-  "pixels:desc",
-  "pixels:asc",
-  "rating:desc",
-  "rating:asc"
-]);
 function loadSavedSort() {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS.has(raw))
+    if (!raw || !isValidSort(raw))
       return null;
     const [key, dir] = raw.split(":");
     return key && dir ? { key, dir } : null;
@@ -1002,16 +1104,7 @@ function attachGallery(node) {
         <div class="gl-bar">
             <div class="gl-chips"></div>
             <select class="gl-sort" title="Sort">
-                <option value="mtime:desc">Newest</option>
-                <option value="mtime:asc">Oldest</option>
-                <option value="name:asc">Name A→Z</option>
-                <option value="name:desc">Name Z→A</option>
-                <option value="size:desc">Largest file</option>
-                <option value="size:asc">Smallest file</option>
-                <option value="pixels:desc">Largest resolution</option>
-                <option value="pixels:asc">Smallest resolution</option>
-                <option value="rating:desc">Highest rating</option>
-                <option value="rating:asc">Lowest rating</option>
+                <!-- options injected from the kit's SORT_OPTIONS below -->
             </select>
             <button class="gl-icon gl-refresh" title="Refresh">⟳</button>
         </div>
@@ -1061,6 +1154,7 @@ function attachGallery(node) {
     refresh: root.querySelector(".gl-refresh"),
     sort: root.querySelector(".gl-sort")
   };
+  refs.sort.innerHTML = SORT_OPTIONS.map((o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`).join("");
   refs.sort.value = `${state.sortKey}:${state.sortDir}`;
   refs.sort.addEventListener("change", (e) => {
     const [key, dir] = e.target.value.split(":");
@@ -1367,64 +1461,14 @@ ${stamp}`;
         f.rating = prev;
     });
   }
-  let thumbObserver = null;
+  let disposeLazyThumbs = null;
   function installLazyThumbs(grid) {
-    thumbObserver?.disconnect();
-    thumbObserver = null;
-    if (typeof IntersectionObserver === "undefined")
-      return;
-    const els = grid.querySelectorAll("img[data-src], video[data-src]");
-    if (!els.length)
-      return;
-    const io = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (!e.isIntersecting)
-          continue;
-        const el = e.target;
-        const src = el.dataset.src;
-        if (src) {
-          if (el.tagName === "VIDEO")
-            el.preload = "metadata";
-          el.src = src;
-          el.removeAttribute("data-src");
-        }
-        io.unobserve(el);
-      }
-    }, { root: grid, rootMargin: "200px" });
-    for (const el of els)
-      io.observe(el);
-    thumbObserver = io;
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(grid, { root: grid, rootMargin: "200px" });
   }
   renderControls();
   loadAndRender();
   updateSelectedFooter();
-}
-function sortFiles(files, key, dir) {
-  const mul = dir === "asc" ? 1 : -1;
-  const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-  const numCmp = (extract) => (a, b) => (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
-  let cmp;
-  switch (key) {
-    case "name":
-      cmp = nameCmp;
-      break;
-    case "size":
-      cmp = numCmp((f) => f.size);
-      break;
-    case "pixels":
-      cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
-      break;
-    case "rating":
-      cmp = numCmp((f) => f.rating);
-      break;
-    default:
-      cmp = numCmp((f) => f.mtime);
-      break;
-  }
-  return [...files].sort((a, b) => mul * cmp(a, b));
-}
-function escapeHTML(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 // src/image-picker.ts
@@ -1460,18 +1504,6 @@ var IMG_EXTS = new Set([
 ]);
 var VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"]);
 var SORT_STORAGE_KEY2 = "comfyui-gallery-loader:sort";
-var VALID_SORTS2 = new Set([
-  "mtime:desc",
-  "mtime:asc",
-  "name:asc",
-  "name:desc",
-  "size:desc",
-  "size:asc",
-  "pixels:desc",
-  "pixels:asc",
-  "rating:desc",
-  "rating:asc"
-]);
 var SANDBOXED_TYPES = ["input", "output", "temp"];
 var VIEW_STORAGE_KEY = "comfyui-gallery-loader:view";
 var VIEW_PENDING_KEY = "comfyui-gallery-loader:view-pending";
@@ -1531,7 +1563,7 @@ function savePins(pins) {
 function loadSavedSort2() {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY2);
-    if (!raw || !VALID_SORTS2.has(raw))
+    if (!raw || !isValidSort(raw))
       return null;
     const [key, dir] = raw.split(":");
     return { key, dir };
@@ -1885,7 +1917,27 @@ async function openImagePicker(widget, node, opts) {
     width: "min(1100px, calc(100vw - 16px))",
     height: "min(88vh, 820px)",
     footerLeftHTML,
-    footerRightHTML: '<span class="ip-count"></span>'
+    footerRightHTML: '<span class="ip-count"></span>',
+    onClose: () => {
+      disposeBackGuard?.();
+      disposeBackGuard = null;
+    }
+  });
+  let disposeBackGuard = null;
+  function canGoUp() {
+    return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
+  }
+  disposeBackGuard = installBackGuard(() => {
+    if (modal.dialog.querySelector(".cmp-ov-backdrop")) {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      return true;
+    }
+    if (canGoUp()) {
+      navigateUp();
+      return true;
+    }
+    modal.close();
+    return false;
   });
   let tabsEl = null;
   if (kind === "loadimage") {
@@ -1906,18 +1958,7 @@ async function openImagePicker(widget, node, opts) {
   const sortEl = document.createElement("select");
   sortEl.className = "ip-control";
   sortEl.title = "Sort";
-  sortEl.innerHTML = `
-        <option value="mtime:desc">Newest</option>
-        <option value="mtime:asc">Oldest</option>
-        <option value="name:asc">Name A→Z</option>
-        <option value="name:desc">Name Z→A</option>
-        <option value="size:desc">Largest file</option>
-        <option value="size:asc">Smallest file</option>
-        <option value="pixels:desc">Largest resolution</option>
-        <option value="pixels:asc">Smallest resolution</option>
-        <option value="rating:desc">Highest rating</option>
-        <option value="rating:asc">Lowest rating</option>
-    `;
+  sortEl.innerHTML = SORT_OPTIONS.map((o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`).join("");
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
   const refreshEl = document.createElement("button");
   refreshEl.type = "button";
@@ -2175,7 +2216,7 @@ async function openImagePicker(widget, node, opts) {
       live = false;
       ov.close();
     };
-    const title = `Metadata — ${escHTML(f.name)}`;
+    const title = `Metadata — ${escapeHTML(f.name)}`;
     ov.card.innerHTML = `
       <div class="cmp-ov-title">${title}</div>
       <div class="ip-meta-body"><div class="ip-meta-status">Reading metadata…</div></div>
@@ -2203,8 +2244,8 @@ async function openImagePicker(widget, node, opts) {
     const srcLabel = data.source === "comfyui" ? "ComfyUI" : data.source === "a1111" ? "A1111" : "no generation data";
     const rowsHTML = rows.map((r, i) => `
         <div class="ip-meta-row">
-          <div class="ip-meta-k">${escHTML(r.label)}</div>
-          <div class="ip-meta-v">${escHTML(r.value)}</div>
+          <div class="ip-meta-k">${escapeHTML(r.label)}</div>
+          <div class="ip-meta-v">${escapeHTML(r.value)}</div>
           <button type="button" class="ip-meta-copy" data-copy-row="${i}">Copy</button>
         </div>`).join("");
     const emptyHTML = rows.length ? "" : `<div class="ip-meta-empty">${rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."}</div>`;
@@ -2212,7 +2253,7 @@ async function openImagePicker(widget, node, opts) {
     const rawHTML = rawKeys.length ? `
         <details class="ip-meta-raw">
           <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
-          <pre>${escHTML(rawJSON)}</pre>
+          <pre>${escapeHTML(rawJSON)}</pre>
           <button type="button" class="ip-meta-copy" data-copy-raw>Copy JSON</button>
         </details>` : "";
     const noteHTML = data.truncated ? `<div class="ip-meta-note">Some values were truncated by the server.</div>` : "";
@@ -2220,7 +2261,7 @@ async function openImagePicker(widget, node, opts) {
     ov.card.innerHTML = `
       <div class="cmp-ov-title">${title}</div>
       <div class="ip-meta-body">
-        <div class="ip-meta-src">${escHTML(srcLabel)}${data.format ? `<span class="ip-meta-fmt">${escHTML(data.format)}</span>` : ""}</div>
+        <div class="ip-meta-src">${escapeHTML(srcLabel)}${data.format ? `<span class="ip-meta-fmt">${escapeHTML(data.format)}</span>` : ""}</div>
         ${emptyHTML}
         ${rowsHTML}
         ${noteHTML}
@@ -2421,7 +2462,7 @@ async function openImagePicker(widget, node, opts) {
       c.dataset.name = d.name;
       c.innerHTML = `
                 <div class="ip-thumb ip-thumb-icon">\uD83D\uDCC1</div>
-                <div class="ip-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>
+                <div class="ip-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>
             `;
       gridEl.appendChild(c);
     }
@@ -2441,7 +2482,7 @@ async function openImagePicker(widget, node, opts) {
       scored.sort((a, b) => b.score - a.score);
       files = scored.map((x) => x.f);
     } else {
-      files = sortFiles2(files, state.sortKey, state.sortDir);
+      files = sortFiles(files, state.sortKey, state.sortDir);
     }
     renderedFiles = files;
     let visible = 0;
@@ -2472,11 +2513,11 @@ ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ip-thumb-icon">${t.text}</div>`;
       const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
       const infoBtn = mode !== "directory" && IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>` : "";
-      const subLabel = flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
+      const subLabel = flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
                 ${subLabel}
                 <div class="ip-thumb">${thumbInner}${infoBtn}</div>
-                <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
+                <div class="ip-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
             `;
@@ -2523,34 +2564,10 @@ ${when}`;
       return p;
     return `…${p.slice(-46)}`;
   }
-  let thumbObserver = null;
-  function installLazyThumbs(container) {
-    thumbObserver?.disconnect();
-    thumbObserver = null;
-    if (typeof IntersectionObserver === "undefined")
-      return;
-    const els = container.querySelectorAll("img[data-src], video[data-src]");
-    if (!els.length)
-      return;
-    const io = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (!e.isIntersecting)
-          continue;
-        const el = e.target;
-        const src = el.dataset.src;
-        if (src) {
-          if (el.tagName === "VIDEO") {
-            el.preload = "metadata";
-          }
-          el.src = src;
-          el.removeAttribute("data-src");
-        }
-        io.unobserve(el);
-      }
-    }, { root: modal.bodyEl, rootMargin: "300px" });
-    for (const el of els)
-      io.observe(el);
-    thumbObserver = io;
+  let disposeLazyThumbs = null;
+  function installLazyThumbs(rootEl) {
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(rootEl, { root: modal.bodyEl, rootMargin: "300px" });
   }
   function commitFile(f) {
     let value;
@@ -2583,33 +2600,6 @@ ${when}`;
     }
     node?.setDirtyCanvas?.(true, true);
     app2.graph?.setDirtyCanvas?.(true, true);
-  }
-  function sortFiles2(files, key, dir) {
-    const mul = dir === "asc" ? 1 : -1;
-    const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, {
-      numeric: true,
-      sensitivity: "base"
-    });
-    const numCmp = (getter) => (a, b) => (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
-    let cmp;
-    switch (key) {
-      case "name":
-        cmp = nameCmp;
-        break;
-      case "size":
-        cmp = numCmp((f) => f.size);
-        break;
-      case "pixels":
-        cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
-        break;
-      case "rating":
-        cmp = numCmp((f) => f.rating);
-        break;
-      default:
-        cmp = numCmp((f) => f.mtime);
-        break;
-    }
-    return [...files].sort((a, b) => mul * cmp(a, b));
   }
   loadAndRender();
   if (savedView.recovered) {
@@ -2908,9 +2898,6 @@ var PICKER_CSS = `
     font-weight: 700;
 }
 `;
-function escHTML(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-}
 try {
   app2.registerExtension({
     name: "comfy.gallery-loader.image-picker",
