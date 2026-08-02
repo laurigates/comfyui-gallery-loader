@@ -415,3 +415,149 @@ describe("image picker flat (recursive) view", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Pinned folders + match highlighting
+// ---------------------------------------------------------------------------
+
+const PINS_KEY = "comfyui-gallery-loader:pins";
+
+describe("image picker pinned folders", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it("pins the current folder and reflects it on the toggle", async () => {
+    stubInertObserver();
+    stubFetchRecording();
+    await openWith({ value: "run/a.png" });
+
+    document.querySelector(".ip-pin-toggle").click();
+    expect(JSON.parse(localStorage.getItem(PINS_KEY))).toEqual([
+      { type: "input", subfolder: "run" },
+    ]);
+    expect(document.querySelector(".ip-pin-toggle").classList.contains("is-active")).toBe(true);
+    expect(document.querySelector(".ip-pin-go").textContent).toBe("📌 input/run");
+  });
+
+  it("toggling again unpins", async () => {
+    stubInertObserver();
+    stubFetchRecording();
+    await openWith({ value: "run/a.png" });
+
+    const toggle = document.querySelector(".ip-pin-toggle");
+    toggle.click();
+    toggle.click();
+    expect(JSON.parse(localStorage.getItem(PINS_KEY))).toEqual([]);
+    expect(document.querySelectorAll(".ip-pin-chip")).toHaveLength(0);
+  });
+
+  it("tapping a chip navigates there", async () => {
+    localStorage.setItem(PINS_KEY, JSON.stringify([{ type: "output", subfolder: "keep" }]));
+    stubInertObserver();
+    const calls = stubFetchRecording();
+    await openWith();
+
+    document.querySelector(".ip-pin-go").click();
+    await vi.waitFor(() => {
+      if (!calls.list.at(-1).includes("subfolder=keep")) throw new Error("not navigated");
+    });
+    expect(calls.list.at(-1)).toContain("type=output");
+  });
+
+  it("the ✕ unpins without navigating", async () => {
+    localStorage.setItem(PINS_KEY, JSON.stringify([{ type: "output", subfolder: "keep" }]));
+    stubInertObserver();
+    const calls = stubFetchRecording();
+    await openWith();
+    const before = calls.list.length;
+
+    document.querySelector(".ip-pin-x").click();
+    expect(JSON.parse(localStorage.getItem(PINS_KEY))).toEqual([]);
+    expect(calls.list.length).toBe(before);
+  });
+
+  it("drops persisted pins that name a non-sandboxed root", async () => {
+    // Pins address write-ish targets; a `path` pin has no stable meaning and
+    // would send type=path with a subfolder the backend cannot resolve.
+    localStorage.setItem(
+      PINS_KEY,
+      JSON.stringify([
+        { type: "path", subfolder: "/etc" },
+        { type: "temp", subfolder: "" },
+      ]),
+    );
+    stubInertObserver();
+    stubFetchRecording();
+    await openWith();
+
+    const labels = [...document.querySelectorAll(".ip-pin-go")].map((b) => b.textContent);
+    expect(labels).toEqual(["📌 temp"]);
+  });
+
+  it("survives corrupt stored pins", async () => {
+    localStorage.setItem(PINS_KEY, "{not json");
+    stubInertObserver();
+    stubFetchRecording();
+    await expect(openWith()).resolves.toBeTruthy();
+    expect(document.querySelectorAll(".ip-pin-chip")).toHaveLength(0);
+  });
+
+  it("omits the pin control for a path picker", async () => {
+    stubInertObserver();
+    stubFetchRecording();
+    await openWith({ kind: "vhs-path", value: "/abs/dir/f.png" });
+    expect(document.querySelector(".ip-pin-toggle")).toBeNull();
+  });
+});
+
+describe("image picker match highlighting", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  async function typeQuery(q) {
+    const input = document.querySelector(".cmp-search, input");
+    input.value = q;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => {
+      if (!document.querySelector(".ip-card.is-file")) throw new Error("no cards");
+    });
+  }
+
+  it("wraps the matched characters of a filename", async () => {
+    stubInertObserver();
+    stubFetchRecording();
+    await openWith();
+    await typeQuery("clip");
+
+    const marks = document.querySelectorAll(".ip-name .cmp-match");
+    expect(marks.length).toBeGreaterThan(0);
+    expect([...marks].map((m) => m.textContent).join("")).toBe("clip");
+    // The full filename is still readable, not replaced by the match.
+    expect(document.querySelector(".ip-card.is-file .ip-name").textContent).toBe("clip.mp4");
+  });
+
+  it("offsets indices so a subpath match never highlights the wrong characters", async () => {
+    // In flat view the haystack is "subpath/name" but the highlight is painted
+    // on the name element alone. Query "a" matches only via the a/b subpath —
+    // "x.png" has no "a" at all — so the name must carry NO marks. With
+    // unshifted indices, index 0 (the subpath's "a") marks the name's first
+    // character instead, highlighting an "x" the user never searched for.
+    stubInertObserver();
+    stubFetchRecording();
+    await openWith();
+    await goFlat();
+    await typeQuery("a");
+
+    const cards = document.querySelectorAll(".ip-card.is-file");
+    expect(cards).toHaveLength(1); // only a/b/x.png matches
+    const name = cards[0].querySelector(".ip-name");
+    expect(name.textContent).toBe("x.png");
+    expect(name.querySelectorAll(".cmp-match")).toHaveLength(0);
+  });
+});

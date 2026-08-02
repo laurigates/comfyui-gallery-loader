@@ -394,6 +394,28 @@ function fuzzyScore(query, target) {
   score -= target.length * 0.01;
   return { score, matches };
 }
+function highlightMatches(target, matchIndices) {
+  const frag = document.createDocumentFragment();
+  if (!target)
+    return frag;
+  const set = new Set(matchIndices || []);
+  if (!set.size) {
+    frag.appendChild(document.createTextNode(target));
+    return frag;
+  }
+  for (let i = 0;i < target.length; i++) {
+    const ch = target[i];
+    if (set.has(i)) {
+      const m = document.createElement("span");
+      m.className = "cmp-match";
+      m.textContent = ch;
+      frag.appendChild(m);
+    } else {
+      frag.appendChild(document.createTextNode(ch));
+    }
+  }
+  return frag;
+}
 var MAX_RATING = 5;
 function ratingOf(f) {
   const r = f.rating;
@@ -1333,6 +1355,31 @@ function markFlatPending(pending) {
       localStorage.removeItem(VIEW_PENDING_KEY);
   } catch {}
 }
+var PINS_STORAGE_KEY = "comfyui-gallery-loader:pins";
+function pinKey(p) {
+  return `${p.type}:${p.subfolder}`;
+}
+function pinLabel(p) {
+  return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
+}
+function loadPins() {
+  try {
+    const raw = localStorage.getItem(PINS_STORAGE_KEY);
+    if (!raw)
+      return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr))
+      return [];
+    return arr.filter((p) => !!p && typeof p.subfolder === "string" && SANDBOXED_TYPES.includes(p.type));
+  } catch {
+    return [];
+  }
+}
+function savePins(pins) {
+  try {
+    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+  } catch {}
+}
 function loadSavedSort() {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
@@ -1680,7 +1727,51 @@ async function openImagePicker(widget, node, opts) {
     viewToggleEl.title = "Flat view (all subfolders)";
     viewToggleEl.textContent = "≣";
   }
-  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], sortEl, refreshEl);
+  let pinToggleEl = null;
+  let pinsEl = null;
+  if (kind === "loadimage") {
+    pinToggleEl = document.createElement("button");
+    pinToggleEl.type = "button";
+    pinToggleEl.className = "ip-control ip-icon ip-pin-toggle";
+    pinToggleEl.title = "Pin this folder";
+    pinToggleEl.textContent = "\uD83D\uDCCC";
+    pinsEl = document.createElement("div");
+    pinsEl.className = "ip-pins";
+  }
+  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], ...pinToggleEl ? [pinToggleEl] : [], sortEl, refreshEl, ...pinsEl ? [pinsEl] : []);
+  function renderPins() {
+    if (!pinToggleEl || !pinsEl)
+      return;
+    const pins = loadPins();
+    const canPin = SANDBOXED_TYPES.includes(state.type);
+    pinToggleEl.style.display = canPin ? "" : "none";
+    const herePinned = canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+    pinToggleEl.classList.toggle("is-active", herePinned);
+    pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    pinsEl.innerHTML = "";
+    pinsEl.style.display = pins.length ? "" : "none";
+    for (const p of pins) {
+      const chip = document.createElement("span");
+      chip.className = "ip-pin-chip";
+      chip.dataset.pinType = p.type;
+      chip.dataset.pinSub = p.subfolder;
+      if (p.type === state.type && p.subfolder === state.subfolder) {
+        chip.classList.add("is-current");
+      }
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "ip-pin-go";
+      go.title = `Go to ${pinLabel(p)}`;
+      go.textContent = `\uD83D\uDCCC ${pinLabel(p)}`;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "ip-pin-x";
+      x.title = `Unpin ${pinLabel(p)}`;
+      x.textContent = "✕";
+      chip.append(go, x);
+      pinsEl.appendChild(chip);
+    }
+  }
   function renderViewToggle() {
     if (!viewToggleEl)
       return;
@@ -1727,6 +1818,37 @@ async function openImagePicker(widget, node, opts) {
     renderGrid();
   });
   refreshEl.addEventListener("click", () => loadAndRender());
+  pinToggleEl?.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const cur = { type: state.type, subfolder: state.subfolder };
+    const pins = loadPins();
+    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
+    if (next.length === pins.length)
+      next.push(cur);
+    savePins(next);
+    renderPins();
+  });
+  pinsEl?.addEventListener("click", (e) => {
+    const t = e.target;
+    const chip = t.closest("[data-pin-type]");
+    if (!chip)
+      return;
+    const type = chip.dataset.pinType;
+    if (!SANDBOXED_TYPES.includes(type))
+      return;
+    const pin = { type, subfolder: chip.dataset.pinSub || "" };
+    if (t.closest(".ip-pin-x")) {
+      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
+      renderPins();
+      return;
+    }
+    if (pin.type === state.type && pin.subfolder === state.subfolder)
+      return;
+    state.type = pin.type;
+    state.subfolder = pin.subfolder;
+    loadAndRender();
+  });
   viewToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type))
       return;
@@ -1908,6 +2030,7 @@ async function openImagePicker(widget, node, opts) {
     renderTabs();
     renderCrumbs();
     renderViewToggle();
+    renderPins();
     modal.setBusy(true);
     modal.setStatus("Loading…");
     markFlatPending(isFlat());
@@ -1985,13 +2108,17 @@ async function openImagePicker(widget, node, opts) {
       gridEl.appendChild(c);
     }
     let files = state.files;
+    const nameMatches = new Map;
     if (q) {
       const scored = [];
       for (const f of files) {
-        const hay = flat && f.subpath ? `${f.subpath}/${f.name}` : f.name;
-        const r = fuzzyScore(q, hay);
-        if (r)
-          scored.push({ f, score: r.score });
+        const prefix = flat && f.subpath ? `${f.subpath}/` : "";
+        const r = fuzzyScore(q, `${prefix}${f.name}`);
+        if (!r)
+          continue;
+        scored.push({ f, score: r.score });
+        const off = prefix.length;
+        nameMatches.set(f, r.matches.map((i) => i - off).filter((i) => i >= 0));
       }
       scored.sort((a, b) => b.score - a.score);
       files = scored.map((x) => x.f);
@@ -2034,6 +2161,14 @@ ${when}`;
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
             `;
+      const hits = nameMatches.get(f);
+      if (hits?.length) {
+        const nameEl = c.querySelector(".ip-name");
+        if (nameEl) {
+          nameEl.textContent = "";
+          nameEl.appendChild(highlightMatches(f.name, hits));
+        }
+      }
       gridEl.appendChild(c);
       visible++;
     }
@@ -2200,6 +2335,28 @@ var PICKER_CSS = `
     background: #2f3a52;
     color: #9ec6ff;
 }
+/* Pinned-folder chips get their own toolbar row so they never crowd the
+   crumbs or get painted under the sort dropdown. */
+.ip-pins {
+    order: 10; flex-basis: 100%;
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.ip-pin-chip { display: inline-flex; align-items: stretch; }
+.ip-pin-go {
+    background: #23283a; color: #9ec6ff; border: 1px solid #3a4560; border-right: 0;
+    border-radius: 4px 0 0 4px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+    font-family: inherit; min-height: 32px; max-width: 45vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ip-pin-go:hover { background: #2f3a52; color: #fff; }
+.ip-pin-x {
+    background: #23283a; color: #667; border: 1px solid #3a4560;
+    border-radius: 0 4px 4px 0; padding: 6px 8px; font-size: 11px; cursor: pointer;
+    font-family: inherit; min-height: 32px; min-width: 28px;
+}
+.ip-pin-x:hover { background: #5c2a3c; color: #ff9eb0; }
+.ip-pin-chip.is-current .ip-pin-go { color: #ffd866; border-color: #78683a; }
+.ip-pin-chip.is-current .ip-pin-x { border-color: #78683a; }
 /* Flat view: the file's folder, above the thumbnail. Tapping it drops back to
    folder view there. Fixed min-height so rows stay aligned when a top-level
    file shows the inert "/" instead. */
@@ -2370,7 +2527,7 @@ var PICKER_CSS = `
     background: #3a4868;
     color: #fff;
 }
-/* Kept for parity with sampler-info's si-match. */
+/* Emitted by highlightMatches on the matched characters of a filename. */
 .cmp-match {
     color: #ffd866;
     font-weight: 700;

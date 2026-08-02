@@ -26,6 +26,7 @@ import {
   type ButtonWidgetHost,
   ensureStyleOnce,
   fuzzyScore,
+  highlightMatches,
   nextRating,
   notify,
   openModalShell,
@@ -141,6 +142,49 @@ function markFlatPending(pending: boolean): void {
     else localStorage.removeItem(VIEW_PENDING_KEY);
   } catch {
     // Non-fatal.
+  }
+}
+
+// Pinned directories — quick-nav chips in the toolbar, for hopping between the
+// few folders you actually pick from. Sandboxed roots only; a path-mode picker
+// has no stable "type" to pin against.
+const PINS_STORAGE_KEY = "comfyui-gallery-loader:pins";
+
+interface Pin {
+  type: string;
+  subfolder: string;
+}
+
+function pinKey(p: Pin): string {
+  return `${p.type}:${p.subfolder}`;
+}
+
+function pinLabel(p: Pin): string {
+  return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
+}
+
+function loadPins(): Pin[] {
+  try {
+    const raw = localStorage.getItem(PINS_STORAGE_KEY);
+    if (!raw) return [];
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (p): p is Pin =>
+        !!p &&
+        typeof (p as Pin).subfolder === "string" &&
+        SANDBOXED_TYPES.includes((p as Pin).type),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function savePins(pins: Pin[]): void {
+  try {
+    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+  } catch {
+    // Private mode / disabled storage — non-fatal.
   }
 }
 
@@ -758,7 +802,62 @@ export async function openImagePicker(
     viewToggleEl.textContent = "≣";
   }
 
-  modal.toolbarEl.append(crumbsEl, ...(viewToggleEl ? [viewToggleEl] : []), sortEl, refreshEl);
+  // Pin the current folder / jump to a pinned one. Same gating as the flat
+  // toggle: sandboxed roots only, so it is not created for a path picker.
+  let pinToggleEl: HTMLButtonElement | null = null;
+  let pinsEl: HTMLElement | null = null;
+  if (kind === "loadimage") {
+    pinToggleEl = document.createElement("button");
+    pinToggleEl.type = "button";
+    pinToggleEl.className = "ip-control ip-icon ip-pin-toggle";
+    pinToggleEl.title = "Pin this folder";
+    pinToggleEl.textContent = "📌";
+    pinsEl = document.createElement("div");
+    pinsEl.className = "ip-pins";
+  }
+
+  modal.toolbarEl.append(
+    crumbsEl,
+    ...(viewToggleEl ? [viewToggleEl] : []),
+    ...(pinToggleEl ? [pinToggleEl] : []),
+    sortEl,
+    refreshEl,
+    ...(pinsEl ? [pinsEl] : []),
+  );
+
+  function renderPins(): void {
+    if (!pinToggleEl || !pinsEl) return;
+    const pins = loadPins();
+    const canPin = SANDBOXED_TYPES.includes(state.type);
+    pinToggleEl.style.display = canPin ? "" : "none";
+    const herePinned =
+      canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+    pinToggleEl.classList.toggle("is-active", herePinned);
+    pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    pinsEl.innerHTML = "";
+    pinsEl.style.display = pins.length ? "" : "none";
+    for (const p of pins) {
+      const chip = document.createElement("span");
+      chip.className = "ip-pin-chip";
+      chip.dataset.pinType = p.type;
+      chip.dataset.pinSub = p.subfolder;
+      if (p.type === state.type && p.subfolder === state.subfolder) {
+        chip.classList.add("is-current");
+      }
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "ip-pin-go";
+      go.title = `Go to ${pinLabel(p)}`;
+      go.textContent = `📌 ${pinLabel(p)}`;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "ip-pin-x";
+      x.title = `Unpin ${pinLabel(p)}`;
+      x.textContent = "✕";
+      chip.append(go, x);
+      pinsEl.appendChild(chip);
+    }
+  }
 
   // The toggle's visibility follows the active tab, so it re-syncs per load.
   function renderViewToggle(): void {
@@ -821,6 +920,35 @@ export async function openImagePicker(
   });
 
   refreshEl.addEventListener("click", () => loadAndRender());
+
+  pinToggleEl?.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    const cur: Pin = { type: state.type, subfolder: state.subfolder };
+    const pins = loadPins();
+    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
+    // Nothing was removed ⇒ this folder wasn't pinned ⇒ pin it.
+    if (next.length === pins.length) next.push(cur);
+    savePins(next);
+    renderPins();
+  });
+
+  pinsEl?.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    const chip = t.closest("[data-pin-type]") as HTMLElement | null;
+    if (!chip) return;
+    const type = chip.dataset.pinType as string;
+    if (!SANDBOXED_TYPES.includes(type)) return;
+    const pin: Pin = { type, subfolder: chip.dataset.pinSub || "" };
+    if (t.closest(".ip-pin-x")) {
+      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
+      renderPins();
+      return;
+    }
+    if (pin.type === state.type && pin.subfolder === state.subfolder) return;
+    state.type = pin.type;
+    state.subfolder = pin.subfolder;
+    loadAndRender();
+  });
 
   viewToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
@@ -1015,6 +1143,7 @@ export async function openImagePicker(
     renderTabs();
     renderCrumbs();
     renderViewToggle();
+    renderPins();
     modal.setBusy(true);
     modal.setStatus("Loading…");
     markFlatPending(isFlat());
@@ -1100,14 +1229,27 @@ export async function openImagePicker(
     }
 
     let files = state.files;
+    // Match positions for the visible filename, keyed by file. Only populated
+    // while filtering; `.cmp-match` styles them (the rule already shipped, with
+    // nothing emitting it until now).
+    const nameMatches = new Map<ListingFile, number[]>();
     if (q) {
       const scored: { f: ListingFile; score: number }[] = [];
       for (const f of files) {
         // In flat view the query matches "subpath/name" so you can filter by
         // folder too; folder view matches the bare filename as before.
-        const hay = flat && f.subpath ? `${f.subpath}/${f.name}` : f.name;
-        const r = fuzzyScore(q, hay);
-        if (r) scored.push({ f, score: r.score });
+        const prefix = flat && f.subpath ? `${f.subpath}/` : "";
+        const r = fuzzyScore(q, `${prefix}${f.name}`);
+        if (!r) continue;
+        scored.push({ f, score: r.score });
+        // Highlighting is applied to the NAME element, but the indices are
+        // against the haystack — shift them back and drop anything that landed
+        // on the subpath, which lives in its own element.
+        const off = prefix.length;
+        nameMatches.set(
+          f,
+          r.matches.map((i) => i - off).filter((i) => i >= 0),
+        );
       }
       scored.sort((a, b) => b.score - a.score);
       files = scored.map((x) => x.f);
@@ -1175,6 +1317,18 @@ export async function openImagePicker(
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
             `;
+      // Repaint the name with the matched characters wrapped. Done after the
+      // template because highlightMatches builds a DocumentFragment, not a
+      // string — and going through the DOM keeps the filename un-parsed as
+      // markup, which the escaped template above was also relying on.
+      const hits = nameMatches.get(f);
+      if (hits?.length) {
+        const nameEl = c.querySelector(".ip-name") as HTMLElement | null;
+        if (nameEl) {
+          nameEl.textContent = "";
+          nameEl.appendChild(highlightMatches(f.name, hits));
+        }
+      }
       gridEl.appendChild(c);
       visible++;
     }
@@ -1401,6 +1555,28 @@ const PICKER_CSS = `
     background: #2f3a52;
     color: #9ec6ff;
 }
+/* Pinned-folder chips get their own toolbar row so they never crowd the
+   crumbs or get painted under the sort dropdown. */
+.ip-pins {
+    order: 10; flex-basis: 100%;
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.ip-pin-chip { display: inline-flex; align-items: stretch; }
+.ip-pin-go {
+    background: #23283a; color: #9ec6ff; border: 1px solid #3a4560; border-right: 0;
+    border-radius: 4px 0 0 4px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+    font-family: inherit; min-height: 32px; max-width: 45vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ip-pin-go:hover { background: #2f3a52; color: #fff; }
+.ip-pin-x {
+    background: #23283a; color: #667; border: 1px solid #3a4560;
+    border-radius: 0 4px 4px 0; padding: 6px 8px; font-size: 11px; cursor: pointer;
+    font-family: inherit; min-height: 32px; min-width: 28px;
+}
+.ip-pin-x:hover { background: #5c2a3c; color: #ff9eb0; }
+.ip-pin-chip.is-current .ip-pin-go { color: #ffd866; border-color: #78683a; }
+.ip-pin-chip.is-current .ip-pin-x { border-color: #78683a; }
 /* Flat view: the file's folder, above the thumbnail. Tapping it drops back to
    folder view there. Fixed min-height so rows stay aligned when a top-level
    file shows the inert "/" instead. */
@@ -1571,7 +1747,7 @@ const PICKER_CSS = `
     background: #3a4868;
     color: #fff;
 }
-/* Kept for parity with sampler-info's si-match. */
+/* Emitted by highlightMatches on the matched characters of a filename. */
 .cmp-match {
     color: #ffd866;
     font-weight: 700;
