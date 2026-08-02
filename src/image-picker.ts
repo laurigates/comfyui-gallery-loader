@@ -24,12 +24,14 @@ import {
   appendButtonWidget,
   applyStars,
   type ButtonWidgetHost,
+  copyTextToClipboard,
   ensureStyleOnce,
   fuzzyScore,
   highlightMatches,
   nextRating,
   notify,
   openModalShell,
+  openShellOverlay,
   type PointerPatchableWidget,
   patchWidgetPointer,
   postRating,
@@ -45,6 +47,7 @@ const LIST_URL = "/gallery_loader/list";
 const FILE_URL = "/gallery_loader/file";
 const BASE_URL = "/gallery_loader/base";
 const RATING_URL = "/gallery_loader/rating";
+const METADATA_URL = "/gallery_loader/metadata";
 const STYLE_ID = "ip-style";
 
 // Trace logging is opt-in. Enable in devtools with
@@ -597,6 +600,100 @@ function videoSrcURL(type: string, subfolder: string, name: string, absDir?: str
   return `/api/view?${p.toString()}`;
 }
 
+// ---- Embedded generation metadata -------------------------------------
+
+type MetaField =
+  | "positive"
+  | "negative"
+  | "model"
+  | "seed"
+  | "steps"
+  | "cfg"
+  | "sampler"
+  | "scheduler";
+
+interface ImageMetadata {
+  format: string;
+  source: string;
+  summary: Partial<Record<MetaField, unknown>>;
+  raw: Record<string, string>;
+  truncated: boolean;
+}
+
+// Fixed display order. NOT the response's own key order — that is JSON
+// insertion order and varies by whichever tool wrote the file.
+const META_FIELDS: { key: MetaField; label: string }[] = [
+  { key: "positive", label: "Positive" },
+  { key: "negative", label: "Negative" },
+  { key: "model", label: "Model" },
+  { key: "seed", label: "Seed" },
+  { key: "steps", label: "Steps" },
+  { key: "cfg", label: "CFG" },
+  { key: "sampler", label: "Sampler" },
+  { key: "scheduler", label: "Scheduler" },
+];
+
+interface MetaRow {
+  key: MetaField;
+  label: string;
+  value: string;
+}
+
+// Drop anything missing or whitespace-only, so an unknown field never renders
+// as a bare "Negative:" row with a Copy button that copies nothing.
+function metaRows(summary: Partial<Record<MetaField, unknown>> | null | undefined): MetaRow[] {
+  const rows: MetaRow[] = [];
+  if (!summary || typeof summary !== "object") return rows;
+  const bag = summary as Record<string, unknown>;
+  for (const { key, label } of META_FIELDS) {
+    const v = bag[key];
+    if (v === undefined || v === null) continue;
+    const value = String(v);
+    if (!value.trim()) continue;
+    rows.push({ key, label, value });
+  }
+  return rows;
+}
+
+// The "Copy all" payload. Multi-line prompts stay verbatim so the text can be
+// pasted straight back into a prompt box.
+function metaClipboardText(rows: MetaRow[]): string {
+  return rows.map((r) => `${r.label}: ${r.value}`).join("\n");
+}
+
+async function fetchMetadata(
+  type: string,
+  subfolder: string,
+  name: string,
+  absDir: string,
+): Promise<ImageMetadata> {
+  const p = new URLSearchParams();
+  if (type === "path") {
+    p.set("path", joinAbs(absDir, name));
+  } else {
+    p.set("type", type);
+    p.set("subfolder", subfolder);
+    p.set("name", name);
+  }
+  const r = await fetch(`${METADATA_URL}?${p.toString()}`);
+  let data: Record<string, unknown> = {};
+  try {
+    data = await r.json();
+  } catch {
+    // fall through to the status-based error below
+  }
+  if (!r.ok || !data.ok) {
+    throw new Error((data.error as string) || `HTTP ${r.status}`);
+  }
+  return {
+    format: (data.format as string) || "",
+    source: (data.source as string) || "none",
+    summary: (data.summary as Partial<Record<MetaField, unknown>>) || {},
+    raw: (data.raw as Record<string, string>) || {},
+    truncated: !!data.truncated,
+  };
+}
+
 // ============================================================
 // Picker
 // ============================================================
@@ -1010,6 +1107,12 @@ export async function openImagePicker(
     }
     if (card.classList.contains("is-file")) {
       if (mode === "directory") return; // files are inert in dir mode
+      if (target.closest(".ip-info")) {
+        e.stopPropagation();
+        const info = fileOfCard(card);
+        if (info) void openMetadata(info);
+        return;
+      }
       // Flat view: the subpath label jumps to that folder in folder view.
       const subEl = target.closest(".ip-subpath") as HTMLElement | null;
       if (subEl?.dataset.sub !== undefined) {
@@ -1024,6 +1127,155 @@ export async function openImagePicker(
       if (f) commitFile(f);
     }
   });
+
+  // ---- Metadata overlay ------------------------------------------
+  // Kept in-dialog via openShellOverlay rather than a second openModalShell:
+  // single-modal discipline means a nested shell would dismiss the picker.
+  const copyFeedback = new WeakMap<
+    HTMLButtonElement,
+    { seq: number; timer: ReturnType<typeof setTimeout> | null }
+  >();
+
+  function copyInto(btn: HTMLButtonElement, text: string, restore: string): void {
+    let fb = copyFeedback.get(btn);
+    if (!fb) {
+      fb = { seq: 0, timer: null };
+      copyFeedback.set(btn, fb);
+    }
+    const slot = fb;
+    const seq = ++slot.seq;
+    // Hold the current feedback until this copy answers — no flicker back to
+    // `restore` mid-flight — but drop the stale restore timer that would fire
+    // out of order once this click's own timer is armed.
+    if (slot.timer !== null) {
+      clearTimeout(slot.timer);
+      slot.timer = null;
+    }
+    void copyTextToClipboard(text).then((ok) => {
+      if (slot.seq !== seq) return; // a later click owns the label now
+      btn.textContent = ok ? "Copied ✓" : "Copy failed";
+      btn.classList.toggle("is-copied", ok);
+      slot.timer = setTimeout(() => {
+        slot.timer = null;
+        btn.textContent = restore;
+        btn.classList.remove("is-copied");
+      }, 1500);
+    });
+  }
+
+  async function openMetadata(f: ListingFile): Promise<void> {
+    // The overlay is dismissible while the read is in flight, so a late
+    // response must not paint into a closed card.
+    let live = true;
+    const ov = openShellOverlay(modal, {
+      onDismiss: () => {
+        live = false;
+      },
+    });
+    ov.card.classList.add("ip-meta-card");
+    const close = (): void => {
+      live = false;
+      ov.close();
+    };
+    const title = `Metadata — ${escHTML(f.name)}`;
+    // Painted synchronously: an overlay that appeared only after the read
+    // would feel like a dead button on a big file or a slow disk.
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ip-meta-body"><div class="ip-meta-status">Reading metadata…</div></div>
+      <div class="cmp-ov-actions">
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+
+    let data: ImageMetadata;
+    try {
+      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+    } catch (e) {
+      // Close FIRST, then report: the toast stack is a body-level child above
+      // the dialog, so its ✕ would land on the overlay's own controls.
+      close();
+      console.error(`[${EXT_NAME}] metadata read failed:`, e);
+      notify({
+        severity: "error",
+        summary: "Metadata read failed",
+        detail: String((e as Error)?.message ?? e),
+      });
+      return;
+    }
+    if (!live) return;
+
+    const rows = metaRows(data.summary);
+    const rawKeys = Object.keys(data.raw);
+    const srcLabel =
+      data.source === "comfyui"
+        ? "ComfyUI"
+        : data.source === "a1111"
+          ? "A1111"
+          : "no generation data";
+    const rowsHTML = rows
+      .map(
+        (r, i) => `
+        <div class="ip-meta-row">
+          <div class="ip-meta-k">${escHTML(r.label)}</div>
+          <div class="ip-meta-v">${escHTML(r.value)}</div>
+          <button type="button" class="ip-meta-copy" data-copy-row="${i}">Copy</button>
+        </div>`,
+      )
+      .join("");
+    // Never invent a row. With nothing recognised the honest report is which of
+    // the two cases it is: no embedded text at all, or text we couldn't map (in
+    // which case the raw disclosure below is the whole answer).
+    const emptyHTML = rows.length
+      ? ""
+      : `<div class="ip-meta-empty">${
+          rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."
+        }</div>`;
+    const rawJSON = JSON.stringify(data.raw, null, 2);
+    const rawHTML = rawKeys.length
+      ? `
+        <details class="ip-meta-raw">
+          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
+          <pre>${escHTML(rawJSON)}</pre>
+          <button type="button" class="ip-meta-copy" data-copy-raw>Copy JSON</button>
+        </details>`
+      : "";
+    const noteHTML = data.truncated
+      ? `<div class="ip-meta-note">Some values were truncated by the server.</div>`
+      : "";
+    const copyAll = rows.length
+      ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>`
+      : "";
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ip-meta-body">
+        <div class="ip-meta-src">${escHTML(srcLabel)}${
+          data.format ? `<span class="ip-meta-fmt">${escHTML(data.format)}</span>` : ""
+        }</div>
+        ${emptyHTML}
+        ${rowsHTML}
+        ${noteHTML}
+        ${rawHTML}
+      </div>
+      <div class="cmp-ov-actions">
+        ${copyAll}
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    // Each restore label is read ONCE here, off the freshly painted markup —
+    // never inside the click handler, where a mid-feedback label would stick.
+    for (const btn of ov.card.querySelectorAll<HTMLButtonElement>("[data-copy-row]")) {
+      const row = rows[Number(btn.dataset.copyRow)];
+      const label = btn.textContent || "Copy";
+      if (row) btn.addEventListener("click", () => copyInto(btn, row.value, label));
+    }
+    const rawBtn = ov.card.querySelector<HTMLButtonElement>("[data-copy-raw]");
+    const rawLabel = rawBtn?.textContent || "Copy JSON";
+    rawBtn?.addEventListener("click", () => copyInto(rawBtn, rawJSON, rawLabel));
+    const allBtn = ov.card.querySelector<HTMLButtonElement>("[data-copy-all]");
+    const allLabel = allBtn?.textContent || "Copy all";
+    allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
+  }
 
   // Takes the file OBJECT, not its name: `state.files.find(byName)` rated the
   // first same-named file in the listing, which in flat view is routinely a
@@ -1299,6 +1551,14 @@ export async function openImagePicker(
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
             : `<div class="ip-thumb-icon">${t.text}</div>`;
       const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
+      // ⓘ opens the embedded generation metadata. Gated on the card being an
+      // IMAGE, not on the tab: /metadata is a read and accepts type=path, so
+      // it renders on a path picker too — the one control that isn't scoped to
+      // sandboxed roots. Video cards get none (the endpoint is IMG_EXTS-gated).
+      const infoBtn =
+        mode !== "directory" && IMG_EXTS.has((f.ext || "").toLowerCase())
+          ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>`
+          : "";
       // Flat view: show the file's folder above the thumbnail. It's a button —
       // tapping it drops back to folder view at that directory. The LABEL is
       // the relative subpath (what the user reads) while data-sub is the joined
@@ -1312,7 +1572,7 @@ export async function openImagePicker(
         : "";
       c.innerHTML = `
                 ${subLabel}
-                <div class="ip-thumb">${thumbInner}</div>
+                <div class="ip-thumb">${thumbInner}${infoBtn}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
@@ -1554,6 +1814,62 @@ const PICKER_CSS = `
 .ip-control.is-active {
     background: #2f3a52;
     color: #9ec6ff;
+}
+/* ⓘ overlay button, pinned to the thumbnail's corner. */
+.ip-thumb { position: relative; }
+.ip-info {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #b8b8c0;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.ip-info:hover { background: #2f3a52; color: #9ec6ff; }
+
+/* Metadata overlay (in-dialog — a nested modal shell would dismiss the picker). */
+.ip-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }
+.ip-meta-body {
+    display: flex; flex-direction: column; gap: 8px;
+    overflow-y: auto; padding: 8px 0; -webkit-overflow-scrolling: touch;
+}
+.ip-meta-status { padding: 14px 2px; font-size: 12.5px; color: #888; font-style: italic; }
+.ip-meta-src {
+    display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: #9ec6ff;
+    text-transform: uppercase; letter-spacing: 0.5px;
+}
+.ip-meta-fmt { color: #777; text-transform: none; letter-spacing: 0; }
+.ip-meta-row { display: grid; grid-template-columns: 84px 1fr auto; gap: 8px; align-items: start; }
+.ip-meta-k {
+    padding-top: 7px; font-size: 11px; color: #8a8a92;
+    text-transform: uppercase; letter-spacing: 0.4px;
+}
+.ip-meta-v {
+    /* A long positive prompt scrolls inside its own box instead of pushing the
+       Copy buttons and the overlay actions off the card. Selectable: the card
+       is a reading surface. */
+    max-height: 7.5em; overflow-y: auto;
+    padding: 6px 8px; font-size: 12px; line-height: 1.45; color: #d8d8dc;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+.ip-meta-copy {
+    background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;
+    padding: 0 10px; font-size: 12px; cursor: pointer; font-family: inherit; min-height: 32px;
+}
+.ip-meta-copy:hover { background: #3a3a4a; color: #fff; }
+.ip-meta-copy.is-copied { background: #25402f; color: #8fe0a8; border-color: #37624a; }
+.ip-meta-empty { padding: 16px 2px; font-size: 12.5px; color: #777; font-style: italic; }
+.ip-meta-note { font-size: 11.5px; color: #c8a95c; }
+.ip-meta-raw > summary {
+    padding: 7px 0; font-size: 12px; color: #9ec6ff; cursor: pointer; min-height: 32px;
+}
+.ip-meta-raw pre {
+    margin: 4px 0 8px; padding: 8px; max-height: 30vh; overflow: auto;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-size: 11px; color: #b8b8c0; white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
 }
 /* Pinned-folder chips get their own toolbar row so they never crowd the
    crumbs or get painted under the sort dropdown. */

@@ -744,6 +744,98 @@ function openModalShell(opts = {}) {
   }
   return controller;
 }
+var STYLE_ID3 = "cmp-overlay-style";
+var CSS3 = `
+.cmp-ov-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    touch-action: manipulation;
+}
+.cmp-ov-card {
+    background: #1c1c24;
+    border: 1px solid #33333f;
+    border-radius: 10px;
+    padding: 18px;
+    width: min(520px, calc(100% - 24px));
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.cmp-ov-title { font-size: 15px; font-weight: 600; color: #e8e8ec; }
+.cmp-ov-msg { font-size: 13px; color: #b8b8c0; line-height: 1.5; word-break: break-word; }
+.cmp-ov-input {
+    font-size: 16px;
+    padding: 10px 12px;
+    background: #12121a;
+    border: 1px solid #3a3a44;
+    border-radius: 6px;
+    color: #e8e8ec;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.cmp-ov-input:focus { outline: none; border-color: #6ba6ff; }
+.cmp-ov-err { font-size: 12px; color: #ff7a7a; min-height: 14px; }
+.cmp-ov-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.cmp-ov-btn {
+    font-size: 13px;
+    padding: 9px 16px;
+    border-radius: 6px;
+    border: 1px solid #3a3a44;
+    background: #2a2a36;
+    color: #d8d8dc;
+    cursor: pointer;
+    font-family: inherit;
+    min-height: 38px;
+}
+.cmp-ov-btn:hover { background: #3a3a4a; color: #fff; }
+.cmp-ov-primary { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+.cmp-ov-primary:hover { background: #3a4868; color: #fff; }
+.cmp-ov-danger { background: #4a2230; color: #ff9eb0; border-color: #78384a; }
+.cmp-ov-danger:hover { background: #5c2a3c; color: #fff; }
+`;
+function openShellOverlay(shell, opts = {}) {
+  ensureStyleOnce(STYLE_ID3, CSS3);
+  const backdrop = document.createElement("div");
+  backdrop.className = "cmp-ov-backdrop";
+  const card = document.createElement("div");
+  card.className = "cmp-ov-card";
+  backdrop.appendChild(card);
+  const onKey = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+    }
+  };
+  let closed = false;
+  function close() {
+    if (closed)
+      return;
+    closed = true;
+    document.removeEventListener("keydown", onKey, true);
+    document.addEventListener("keydown", shell._onKey, true);
+    backdrop.remove();
+  }
+  function dismiss() {
+    opts.onDismiss?.();
+    close();
+  }
+  backdrop.addEventListener("pointerdown", (e) => {
+    if (e.target === backdrop)
+      dismiss();
+  });
+  document.removeEventListener("keydown", shell._onKey, true);
+  document.addEventListener("keydown", onKey, true);
+  shell.dialog.appendChild(backdrop);
+  return { card, close };
+}
 function appendButtonWidget(node, label, onClick, opts = {}) {
   const prefix = opts.logPrefix ? `[${opts.logPrefix}]` : "[comfy-modal-kit]";
   try {
@@ -1289,7 +1381,8 @@ var LIST_URL2 = "/gallery_loader/list";
 var FILE_URL = "/gallery_loader/file";
 var BASE_URL = "/gallery_loader/base";
 var RATING_URL2 = "/gallery_loader/rating";
-var STYLE_ID3 = "ip-style";
+var METADATA_URL = "/gallery_loader/metadata";
+var STYLE_ID4 = "ip-style";
 var DEBUG = (() => {
   try {
     return localStorage.getItem(`${EXT_NAME2}:debug`) === "1";
@@ -1615,8 +1708,63 @@ function videoSrcURL(type, subfolder, name, absDir) {
   const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
   return `/api/view?${p.toString()}`;
 }
+var META_FIELDS = [
+  { key: "positive", label: "Positive" },
+  { key: "negative", label: "Negative" },
+  { key: "model", label: "Model" },
+  { key: "seed", label: "Seed" },
+  { key: "steps", label: "Steps" },
+  { key: "cfg", label: "CFG" },
+  { key: "sampler", label: "Sampler" },
+  { key: "scheduler", label: "Scheduler" }
+];
+function metaRows(summary) {
+  const rows = [];
+  if (!summary || typeof summary !== "object")
+    return rows;
+  const bag = summary;
+  for (const { key, label } of META_FIELDS) {
+    const v = bag[key];
+    if (v === undefined || v === null)
+      continue;
+    const value = String(v);
+    if (!value.trim())
+      continue;
+    rows.push({ key, label, value });
+  }
+  return rows;
+}
+function metaClipboardText(rows) {
+  return rows.map((r) => `${r.label}: ${r.value}`).join(`
+`);
+}
+async function fetchMetadata(type, subfolder, name, absDir) {
+  const p = new URLSearchParams;
+  if (type === "path") {
+    p.set("path", joinAbs(absDir, name));
+  } else {
+    p.set("type", type);
+    p.set("subfolder", subfolder);
+    p.set("name", name);
+  }
+  const r = await fetch(`${METADATA_URL}?${p.toString()}`);
+  let data = {};
+  try {
+    data = await r.json();
+  } catch {}
+  if (!r.ok || !data.ok) {
+    throw new Error(data.error || `HTTP ${r.status}`);
+  }
+  return {
+    format: data.format || "",
+    source: data.source || "none",
+    summary: data.summary || {},
+    raw: data.raw || {},
+    truncated: !!data.truncated
+  };
+}
 async function openImagePicker(widget, node, opts) {
-  ensureStyleOnce(STYLE_ID3, PICKER_CSS);
+  ensureStyleOnce(STYLE_ID4, PICKER_CSS);
   const kind = opts.kind;
   const mode = opts.mode || "file";
   const extensions = Array.isArray(opts.extensions) ? opts.extensions : null;
@@ -1912,6 +2060,13 @@ async function openImagePicker(widget, node, opts) {
     if (card.classList.contains("is-file")) {
       if (mode === "directory")
         return;
+      if (target.closest(".ip-info")) {
+        e.stopPropagation();
+        const info = fileOfCard(card);
+        if (info)
+          openMetadata(info);
+        return;
+      }
       const subEl = target.closest(".ip-subpath");
       if (subEl?.dataset.sub !== undefined) {
         e.stopPropagation();
@@ -1926,6 +2081,112 @@ async function openImagePicker(widget, node, opts) {
         commitFile(f);
     }
   });
+  const copyFeedback = new WeakMap;
+  function copyInto(btn, text, restore) {
+    let fb = copyFeedback.get(btn);
+    if (!fb) {
+      fb = { seq: 0, timer: null };
+      copyFeedback.set(btn, fb);
+    }
+    const slot = fb;
+    const seq = ++slot.seq;
+    if (slot.timer !== null) {
+      clearTimeout(slot.timer);
+      slot.timer = null;
+    }
+    copyTextToClipboard(text).then((ok) => {
+      if (slot.seq !== seq)
+        return;
+      btn.textContent = ok ? "Copied ✓" : "Copy failed";
+      btn.classList.toggle("is-copied", ok);
+      slot.timer = setTimeout(() => {
+        slot.timer = null;
+        btn.textContent = restore;
+        btn.classList.remove("is-copied");
+      }, 1500);
+    });
+  }
+  async function openMetadata(f) {
+    let live = true;
+    const ov = openShellOverlay(modal, {
+      onDismiss: () => {
+        live = false;
+      }
+    });
+    ov.card.classList.add("ip-meta-card");
+    const close = () => {
+      live = false;
+      ov.close();
+    };
+    const title = `Metadata — ${escHTML(f.name)}`;
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ip-meta-body"><div class="ip-meta-status">Reading metadata…</div></div>
+      <div class="cmp-ov-actions">
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    let data;
+    try {
+      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+    } catch (e) {
+      close();
+      console.error(`[${EXT_NAME2}] metadata read failed:`, e);
+      notify({
+        severity: "error",
+        summary: "Metadata read failed",
+        detail: String(e?.message ?? e)
+      });
+      return;
+    }
+    if (!live)
+      return;
+    const rows = metaRows(data.summary);
+    const rawKeys = Object.keys(data.raw);
+    const srcLabel = data.source === "comfyui" ? "ComfyUI" : data.source === "a1111" ? "A1111" : "no generation data";
+    const rowsHTML = rows.map((r, i) => `
+        <div class="ip-meta-row">
+          <div class="ip-meta-k">${escHTML(r.label)}</div>
+          <div class="ip-meta-v">${escHTML(r.value)}</div>
+          <button type="button" class="ip-meta-copy" data-copy-row="${i}">Copy</button>
+        </div>`).join("");
+    const emptyHTML = rows.length ? "" : `<div class="ip-meta-empty">${rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."}</div>`;
+    const rawJSON = JSON.stringify(data.raw, null, 2);
+    const rawHTML = rawKeys.length ? `
+        <details class="ip-meta-raw">
+          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
+          <pre>${escHTML(rawJSON)}</pre>
+          <button type="button" class="ip-meta-copy" data-copy-raw>Copy JSON</button>
+        </details>` : "";
+    const noteHTML = data.truncated ? `<div class="ip-meta-note">Some values were truncated by the server.</div>` : "";
+    const copyAll = rows.length ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>` : "";
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ip-meta-body">
+        <div class="ip-meta-src">${escHTML(srcLabel)}${data.format ? `<span class="ip-meta-fmt">${escHTML(data.format)}</span>` : ""}</div>
+        ${emptyHTML}
+        ${rowsHTML}
+        ${noteHTML}
+        ${rawHTML}
+      </div>
+      <div class="cmp-ov-actions">
+        ${copyAll}
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    for (const btn of ov.card.querySelectorAll("[data-copy-row]")) {
+      const row = rows[Number(btn.dataset.copyRow)];
+      const label = btn.textContent || "Copy";
+      if (row)
+        btn.addEventListener("click", () => copyInto(btn, row.value, label));
+    }
+    const rawBtn = ov.card.querySelector("[data-copy-raw]");
+    const rawLabel = rawBtn?.textContent || "Copy JSON";
+    rawBtn?.addEventListener("click", () => copyInto(rawBtn, rawJSON, rawLabel));
+    const allBtn = ov.card.querySelector("[data-copy-all]");
+    const allLabel = allBtn?.textContent || "Copy all";
+    allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
+  }
   function setStarRating(f, row, next) {
     const prev = Number(row.dataset.rating || "0");
     applyStars(row, next);
@@ -2153,10 +2414,11 @@ ${when}` : `${f.name}
 ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ip-thumb-icon">${t.text}</div>`;
       const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
+      const infoBtn = mode !== "directory" && IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>` : "";
       const subLabel = flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
                 ${subLabel}
-                <div class="ip-thumb">${thumbInner}</div>
+                <div class="ip-thumb">${thumbInner}${infoBtn}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
@@ -2334,6 +2596,62 @@ var PICKER_CSS = `
 .ip-control.is-active {
     background: #2f3a52;
     color: #9ec6ff;
+}
+/* ⓘ overlay button, pinned to the thumbnail's corner. */
+.ip-thumb { position: relative; }
+.ip-info {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #b8b8c0;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.ip-info:hover { background: #2f3a52; color: #9ec6ff; }
+
+/* Metadata overlay (in-dialog — a nested modal shell would dismiss the picker). */
+.ip-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }
+.ip-meta-body {
+    display: flex; flex-direction: column; gap: 8px;
+    overflow-y: auto; padding: 8px 0; -webkit-overflow-scrolling: touch;
+}
+.ip-meta-status { padding: 14px 2px; font-size: 12.5px; color: #888; font-style: italic; }
+.ip-meta-src {
+    display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: #9ec6ff;
+    text-transform: uppercase; letter-spacing: 0.5px;
+}
+.ip-meta-fmt { color: #777; text-transform: none; letter-spacing: 0; }
+.ip-meta-row { display: grid; grid-template-columns: 84px 1fr auto; gap: 8px; align-items: start; }
+.ip-meta-k {
+    padding-top: 7px; font-size: 11px; color: #8a8a92;
+    text-transform: uppercase; letter-spacing: 0.4px;
+}
+.ip-meta-v {
+    /* A long positive prompt scrolls inside its own box instead of pushing the
+       Copy buttons and the overlay actions off the card. Selectable: the card
+       is a reading surface. */
+    max-height: 7.5em; overflow-y: auto;
+    padding: 6px 8px; font-size: 12px; line-height: 1.45; color: #d8d8dc;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+.ip-meta-copy {
+    background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;
+    padding: 0 10px; font-size: 12px; cursor: pointer; font-family: inherit; min-height: 32px;
+}
+.ip-meta-copy:hover { background: #3a3a4a; color: #fff; }
+.ip-meta-copy.is-copied { background: #25402f; color: #8fe0a8; border-color: #37624a; }
+.ip-meta-empty { padding: 16px 2px; font-size: 12.5px; color: #777; font-style: italic; }
+.ip-meta-note { font-size: 11.5px; color: #c8a95c; }
+.ip-meta-raw > summary {
+    padding: 7px 0; font-size: 12px; color: #9ec6ff; cursor: pointer; min-height: 32px;
+}
+.ip-meta-raw pre {
+    margin: 4px 0 8px; padding: 8px; max-height: 30vh; overflow: auto;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-size: 11px; color: #b8b8c0; white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
 }
 /* Pinned-folder chips get their own toolbar row so they never crowd the
    crumbs or get painted under the sort dropdown. */
@@ -2547,7 +2865,7 @@ try {
       }
     },
     setup() {
-      ensureStyleOnce(STYLE_ID3, PICKER_CSS);
+      ensureStyleOnce(STYLE_ID4, PICKER_CSS);
       debug("image-picker setup running");
       const nodes = app2?.graph?._nodes;
       if (Array.isArray(nodes)) {

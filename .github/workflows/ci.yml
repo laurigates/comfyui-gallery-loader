@@ -97,6 +97,18 @@ jobs:
       - name: Run Vitest
         run: bun run test
 
+  vendored-drift:
+    name: Vendored modules match canonical
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Diff image_meta.py against comfyui-image-browser@main
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/laurigates/comfyui-image-browser/main/image_meta.py | diff -u - image_meta.py || {
+            echo "::error::image_meta.py drifted from its canonical home (comfyui-image-browser). Run 'just sync-image-meta' — or land the fix upstream first."
+            exit 1
+          }
+
   security:
     name: Security scanning
     runs-on: ubuntu-latest

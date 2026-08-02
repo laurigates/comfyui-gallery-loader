@@ -36,10 +36,11 @@ try:
     # ComfyUI imports custom_nodes as packages, so the sibling module must
     # be pulled in relatively — a bare ``import xmp_meta`` raises
     # ModuleNotFoundError at load time because the pack dir isn't on sys.path.
-    from . import thumb_cache, xmp_meta
+    from . import image_meta, thumb_cache, xmp_meta
 except ImportError:
     # Pytest imports this module flat (pack root on sys.path via pyproject's
     # ``pythonpath = ["."]``); fall back to the absolute import.
+    import image_meta
     import thumb_cache
     import xmp_meta
 
@@ -641,6 +642,50 @@ async def gallery_thumb(request: web.Request) -> web.Response:
     if data is None:
         return web.Response(status=500)
     return web.Response(body=data, content_type="image/webp", headers=cache_headers)
+
+
+@PromptServer.instance.routes.get("/gallery_loader/metadata")
+async def gallery_metadata(request: web.Request) -> web.Response:
+    """Embedded generation metadata for one image — sandboxed roots AND type=path.
+
+    Same dual addressing as /thumb (``_resolve_thumb_target``), and images
+    only: the gate is IMG_EXTS, not STREAMABLE_EXTS, so no video metadata is
+    read and no new extension enters the perimeter.
+
+    The whitelist is asserted **before** ``os.path.isfile`` — the opposite
+    order to /file, which stats an arbitrary caller-supplied path before
+    checking the extension (a pre-existing wart; new read endpoints follow
+    this order). It also splits /thumb's single 404 in two, because a
+    non-whitelisted extension is a bad request (400), not a missing file.
+
+    No cache headers: this is a one-shot tap-to-open read, so duplicating
+    /thumb's ETag scheme would buy nothing.
+    """
+    path, err = _resolve_thumb_target(request.rel_url.query)
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert path is not None
+    if not _is_image_file(path):
+        return web.json_response({"ok": False, "error": "unsupported file type"}, status=400)
+    if not os.path.isfile(path):
+        return web.json_response({"ok": False, "error": "file not found"}, status=404)
+
+    raw, truncated = image_meta.read_raw_metadata(path)
+    source, summary = image_meta.parse_generation_meta(raw)
+    # The container label comes from the extension, keeping one source of
+    # truth with the rest of the pack; an image whose format has no parser
+    # (a .gif from IMG_EXTS) answers 200 with empty metadata, never a 500.
+    fmt = image_meta.FORMAT_EXTS.get(os.path.splitext(path)[1].lower(), "")
+    return web.json_response(
+        {
+            "ok": True,
+            "format": fmt,
+            "source": source,
+            "summary": summary,
+            "raw": raw,
+            "truncated": truncated,
+        }
+    )
 
 
 @PromptServer.instance.routes.post("/gallery_loader/rating")

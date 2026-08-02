@@ -561,3 +561,208 @@ describe("image picker match highlighting", () => {
     expect(name.querySelectorAll(".cmp-match")).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Metadata overlay
+// ---------------------------------------------------------------------------
+
+/** Extends the recording stub with a /metadata reply. */
+function stubFetchWithMeta(meta, { fail = false } = {}) {
+  const calls = { meta: [] };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url) => {
+      const s = String(url);
+      if (s.includes("/gallery_loader/metadata")) {
+        calls.meta.push(s);
+        if (fail) return { ok: false, status: 500, json: async () => ({ ok: false }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true, ...meta }) };
+      }
+      if (s.includes("/gallery_loader/base")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, base_path: "/", input_dir: "", output_dir: "" }),
+        };
+      }
+      const recursive = s.includes("recursive=1");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type: "input",
+          subfolder: "",
+          dirs: [],
+          files: recursive ? FLAT_FILES : FILES,
+          exists: true,
+          truncated: false,
+        }),
+      };
+    }),
+  );
+  return calls;
+}
+
+const FULL_META = {
+  format: "png",
+  source: "a1111",
+  summary: { positive: "a cat", negative: "blurry", seed: "42" },
+  raw: { parameters: "a cat\nNegative prompt: blurry" },
+  truncated: false,
+};
+
+async function openInfo(idx = 0) {
+  document.querySelectorAll(".ip-card.is-file")[idx].querySelector(".ip-info").click();
+  await vi.waitFor(() => {
+    if (!document.querySelector(".ip-meta-src")) throw new Error("overlay not filled");
+  });
+}
+
+describe("image picker metadata overlay", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it("shows ⓘ on images but not on video cards", async () => {
+    stubInertObserver();
+    stubFetchWithMeta(FULL_META);
+    await openWith();
+
+    const cards = [...document.querySelectorAll(".ip-card.is-file")];
+    const byName = Object.fromEntries(cards.map((c) => [c.dataset.name, c]));
+    expect(byName["a.png"].querySelector(".ip-info")).not.toBeNull();
+    // /metadata is IMG_EXTS-gated, so a video card must not offer the control.
+    expect(byName["clip.mp4"].querySelector(".ip-info")).toBeNull();
+  });
+
+  it("renders ⓘ on a path picker too — it is a read, not a write", async () => {
+    stubInertObserver();
+    stubFetchWithMeta(FULL_META);
+    await openWith({ kind: "vhs-path", value: "/abs/dir/f.png" });
+    expect(document.querySelector(".ip-card.is-file .ip-info")).not.toBeNull();
+  });
+
+  it("paints a status line immediately, before the read resolves", async () => {
+    stubInertObserver();
+    stubFetchWithMeta(FULL_META);
+    await openWith();
+    // No await — the overlay must exist synchronously on click, or a big file
+    // on a slow disk makes the button feel dead.
+    document.querySelector(".ip-card.is-file .ip-info").click();
+    expect(document.querySelector(".ip-meta-status")).not.toBeNull();
+  });
+
+  it("lists recognised fields in a fixed order with per-row copy", async () => {
+    stubInertObserver();
+    stubFetchWithMeta(FULL_META);
+    await openWith();
+    await openInfo();
+
+    const labels = [...document.querySelectorAll(".ip-meta-k")].map((k) => k.textContent);
+    // META_FIELDS order, not the response's key order.
+    expect(labels).toEqual(["Positive", "Negative", "Seed"]);
+    expect(document.querySelectorAll("[data-copy-row]")).toHaveLength(3);
+    expect(document.querySelector(".ip-meta-src").textContent).toContain("A1111");
+    expect(document.querySelector("[data-copy-all]")).not.toBeNull();
+  });
+
+  it("never invents a row for an empty or whitespace value", async () => {
+    stubInertObserver();
+    stubFetchWithMeta({
+      ...FULL_META,
+      summary: { positive: "a cat", negative: "   ", seed: null },
+    });
+    await openWith();
+    await openInfo();
+
+    const labels = [...document.querySelectorAll(".ip-meta-k")].map((k) => k.textContent);
+    expect(labels).toEqual(["Positive"]);
+  });
+
+  it("distinguishes no embedded text from unmapped text", async () => {
+    stubInertObserver();
+    stubFetchWithMeta({ format: "png", source: "none", summary: {}, raw: {}, truncated: false });
+    await openWith();
+    await openInfo();
+    expect(document.querySelector(".ip-meta-empty").textContent).toContain(
+      "No generation metadata found",
+    );
+    expect(document.querySelector(".ip-meta-raw")).toBeNull();
+
+    document.body.innerHTML = "";
+    vi.unstubAllGlobals();
+    stubInertObserver();
+    stubFetchWithMeta({
+      format: "png",
+      source: "none",
+      summary: {},
+      raw: { Software: "some tool" },
+      truncated: false,
+    });
+    await openWith();
+    await openInfo();
+    expect(document.querySelector(".ip-meta-empty").textContent).toContain(
+      "No recognised generation parameters",
+    );
+    // The raw disclosure IS the answer in this case, so it must be there.
+    expect(document.querySelector(".ip-meta-raw")).not.toBeNull();
+    expect(document.querySelector(".ip-meta-raw summary").textContent).toContain("1 key");
+  });
+
+  it("notes a server-side truncation", async () => {
+    stubInertObserver();
+    stubFetchWithMeta({ ...FULL_META, truncated: true });
+    await openWith();
+    await openInfo();
+    expect(document.querySelector(".ip-meta-note")).not.toBeNull();
+  });
+
+  it("addresses the clicked file's own subfolder in flat view", async () => {
+    stubInertObserver();
+    const calls = stubFetchWithMeta(FULL_META);
+    await openWith();
+    await goFlat();
+    await openInfo(1); // the c/x.png copy
+
+    expect(calls.meta[0]).toContain("subfolder=c");
+    expect(calls.meta[0]).toContain("name=x.png");
+  });
+
+  it("closes the overlay first, then reports a read failure", async () => {
+    // The toast stack is a body-level child above the dialog, so its ✕ would
+    // land on the overlay's own controls if the overlay were still open.
+    stubInertObserver();
+    stubFetchWithMeta(FULL_META, { fail: true });
+    await openWith();
+    document.querySelector(".ip-card.is-file .ip-info").click();
+
+    await vi.waitFor(() => {
+      if (!document.querySelector("#cmn-notify-container")) throw new Error("no toast");
+    });
+    expect(document.querySelector(".ip-meta-card")).toBeNull();
+    expect(document.querySelector("#cmn-notify-container").textContent).toContain("Metadata");
+  });
+
+  it("keeps the picker open — the overlay is in-dialog", async () => {
+    // A second openModalShell would dismiss the picker under single-modal
+    // discipline; openShellOverlay is what avoids that.
+    stubInertObserver();
+    stubFetchWithMeta(FULL_META);
+    await openWith();
+    await openInfo();
+    expect(document.querySelector(".ip-grid")).not.toBeNull();
+    expect(document.querySelectorAll(".cmp-dialog")).toHaveLength(1);
+  });
+
+  it("does not commit the file when ⓘ is clicked", async () => {
+    stubInertObserver();
+    stubFetchWithMeta(FULL_META);
+    const widget = await openWith();
+    const before = widget.value;
+    await openInfo();
+    expect(widget.value).toBe(before);
+  });
+});
