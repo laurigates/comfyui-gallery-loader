@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.22](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.21...comfyui-gallery-loader-v0.1.22) (2026-08-03)
+
+
+### Features
+
+* flat (recursive) view in the picker, plus listing caps ([#85](https://github.com/laurigates/comfyui-gallery-loader/issues/85)) ([782b2cd](https://github.com/laurigates/comfyui-gallery-loader/commit/782b2cd814fe5b7362b505970cd741cbf6950cff))
+
+
+### Bug Fixes
+
+* **deps:** bump comfy-modal-kit to 0.8.1 so the toast fix is actually live ([#80](https://github.com/laurigates/comfyui-gallery-loader/issues/80)) ([9437602](https://github.com/laurigates/comfyui-gallery-loader/commit/9437602827341cf904d98462bd9c115095162699))
+
 ## [0.1.21](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.20...comfyui-gallery-loader-v0.1.21) (2026-07-30)
 
 
