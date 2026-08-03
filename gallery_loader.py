@@ -36,10 +36,11 @@ try:
     # ComfyUI imports custom_nodes as packages, so the sibling module must
     # be pulled in relatively — a bare ``import xmp_meta`` raises
     # ModuleNotFoundError at load time because the pack dir isn't on sys.path.
-    from . import thumb_cache, xmp_meta
+    from . import image_meta, thumb_cache, xmp_meta
 except ImportError:
     # Pytest imports this module flat (pack root on sys.path via pyproject's
     # ``pythonpath = ["."]``); fall back to the absolute import.
+    import image_meta
     import thumb_cache
     import xmp_meta
 
@@ -53,6 +54,29 @@ VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"}
 STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS
 
 SANDBOXED_TYPES = ("input", "output", "temp")
+
+# The media a listing may ever enumerate. /list is a read of NAMES only, but a
+# recursive listing turns "enumerate one directory" into "enumerate the whole
+# tree in one request", so the extensions parameter is clamped to this rather
+# than passed through — see gallery_list.
+MEDIA_EXTS = IMG_EXTS | VIDEO_EXTS
+
+# Upper bound on files a recursive ("flat") listing RETURNS. The walk itself
+# always covers the whole subtree (see FLAT_WALK_CAP) and the cap is applied
+# after an mtime sort, so a truncated response holds the newest N files — not
+# whichever N a directory-order walk happened to reach first. That distinction
+# is the whole point of the view: "find the render I just made".
+FLAT_LIST_CAP = 5000
+
+# Backstop on the cheap enumeration pass. Phase 1 only stats entries (no file
+# opens), so this is far higher than FLAT_LIST_CAP; it exists so a pathological
+# tree cannot pin the event loop indefinitely.
+FLAT_WALK_CAP = 200_000
+
+# Upper bound on a NON-recursive listing. Same newest-N semantics. Without it a
+# 50k-file directory costs 50k header opens plus 50k rating reads on the event
+# loop, and 50k cards in one grid is well past usable either way.
+DIR_LIST_CAP = 5000
 
 # Image-content mimetypes guard for the picker; covers the common cases
 # that mimetypes.guess_type misses on this distro.
@@ -270,16 +294,160 @@ def _validate_rating_request(body: Any) -> tuple[dict[str, Any] | None, str]:
     }, ""
 
 
+def _scan_file_entry(
+    path: str, name: str, ext: str, st: os.stat_result, image_subset: set[str]
+) -> dict[str, Any]:
+    """Build one listing row for a file.
+
+    Shared by the flat and non-flat listers so both emit an identical shape —
+    the flat one then adds ``subpath`` on top. Both probes are best-effort and
+    swallow their own failures: a listing must not fail because one file is
+    unreadable.
+    """
+    width: int | None = None
+    height: int | None = None
+    if ext in image_subset:
+        try:
+            # PIL.Image.open is lazy — only the header is read until pixel
+            # access, so .size is cheap.
+            with Image.open(path) as im:
+                width, height = im.size
+        except Exception as exc:
+            log.debug("size probe failed for %s: %s", path, exc)
+    try:
+        rating = xmp_meta.read_rating_cached(path, st)
+    except Exception as exc:
+        log.debug("rating read failed for %s: %s", path, exc)
+        rating = 0
+    return {
+        "name": name,
+        "mtime": st.st_mtime,
+        "size": st.st_size,
+        "width": width,
+        "height": height,
+        "ext": ext,
+        "rating": rating,
+    }
+
+
+# (mtime, subpath, name, ext, path, stat) — what phase 1 collects per file.
+_FoundEntry = tuple[float, str, str, str, str, os.stat_result]
+
+
+def _probe_newest(
+    found: list[_FoundEntry],
+    image_subset: set[str],
+    cap: int,
+    walk_truncated: bool,
+    *,
+    with_subpath: bool,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Sort newest-first, slice to ``cap``, then probe only the survivors.
+
+    The ordering matters. Probing during enumeration and stopping at the cap
+    truncates in DIRECTORY order, which silently omits the newest render — the
+    one thing a user opening this view is looking for. Sorting first costs an
+    extra pass over cheap tuples and makes the cap mean "the newest N".
+
+    Ties break on (subpath, name) so the slice is deterministic for same-mtime
+    files; a batch render writes many within one clock tick.
+
+    ``with_subpath`` is False for a non-recursive listing, which must omit the
+    key ENTIRELY rather than emit an empty string — the frontend distinguishes
+    "flat listing, file at top level" from "folder listing" by its presence.
+    """
+    found.sort(key=lambda f: (-f[0], f[1], f[2]))
+    truncated = walk_truncated or len(found) > cap
+    files: list[dict[str, Any]] = []
+    for _mtime, subpath, name, ext, path, st in found[:cap]:
+        fd = _scan_file_entry(path, name, ext, st, image_subset)
+        if with_subpath:
+            fd["subpath"] = subpath
+        files.append(fd)
+    return files, truncated
+
+
+def _walk_files(
+    base: str, exts: set[str], image_subset: set[str], cap: int
+) -> tuple[list[dict[str, Any]], bool]:
+    """Recursively collect files under ``base``, newest first, capped.
+
+    Two phases: a cheap stat-only enumeration of the whole subtree, then the
+    expensive probes (PIL header open + XMP rating read) on only the files that
+    will actually ship. See _probe_newest for why the sort precedes the slice.
+    """
+    # Phase 1 — cheap enumeration.
+    found: list[_FoundEntry] = []
+    walk_truncated = False
+    # DFS over scandir (not os.walk) so each directory keeps DirEntry's cheap,
+    # symlink-safe is_dir/is_file/stat — the same guards the flat lister uses.
+    stack: list[tuple[str, str]] = [("", base)]
+    while stack and not walk_truncated:
+        subpath, directory = stack.pop()
+        try:
+            with os.scandir(directory) as it:
+                subdirs: list[tuple[str, str]] = []
+                for entry in it:
+                    try:
+                        if entry.name.startswith("."):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name in ("clipspace", "__pycache__"):
+                                continue
+                            child = f"{subpath}/{entry.name}" if subpath else entry.name
+                            subdirs.append((child, entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            ext = os.path.splitext(entry.name)[1].lower()
+                            if ext not in exts:
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                            found.append((st.st_mtime, subpath, entry.name, ext, entry.path, st))
+                            if len(found) >= FLAT_WALK_CAP:
+                                walk_truncated = True
+                                break
+                    except OSError:
+                        continue
+                # Descend in name order (reversed onto the LIFO stack) so the
+                # enumeration frontier is predictable if the backstop ever bites.
+                subdirs.sort(key=lambda s: s[0].lower(), reverse=True)
+                stack.extend(subdirs)
+        except OSError:
+            # An unreadable subdirectory is skipped, not fatal — one bad
+            # permission deep in the tree must not kill the whole listing.
+            continue
+
+    return _probe_newest(found, image_subset, cap, walk_truncated, with_subpath=True)
+
+
 @PromptServer.instance.routes.get("/gallery_loader/list")
 async def gallery_list(request: web.Request) -> web.Response:
     q = request.rel_url.query
     type_name = q.get("type", "input")
     subfolder = q.get("subfolder", "")
     abs_path = q.get("path", "")
-    exts = _parse_extensions(q.get("extensions", ""))
+    # Clamp to media. This is a name-only read, but recursion turns it from a
+    # directory-at-a-time enumeration primitive into a whole-tree one, and
+    # `?recursive=1&extensions=.txt,.safetensors` has no legitimate caller.
+    #
+    # The clamp lives HERE and not inside _parse_extensions on purpose: that
+    # helper falls back to IMG_EXTS on an empty result, which would re-expand
+    # an empty intersection. Directory mode depends on the current behaviour —
+    # it passes `.__none__` to get an empty listing, and `{".__none__"} &
+    # MEDIA_EXTS` is still empty, so it keeps working. Moving the clamp into
+    # the parser would silently start listing every image there.
+    exts = _parse_extensions(q.get("extensions", "")) & MEDIA_EXTS
     # Width/height probing only makes sense for image entries; for video
     # listings we skip the PIL.Image.open() call entirely.
     image_subset = exts & IMG_EXTS
+    # Flat/recursive listing is a sandboxed-root affordance only — recursing an
+    # arbitrary base path (type=path, e.g. models/) is out of scope and could
+    # be enormous, so the flag is ignored there. An empty extension set would
+    # walk the whole tree to return nothing, so don't bother.
+    recursive = (
+        q.get("recursive", "") in ("1", "true", "yes")
+        and type_name in SANDBOXED_TYPES
+        and bool(exts)
+    )
 
     base, err = _resolve_listing_base(type_name, subfolder, abs_path)
     if err:
@@ -296,65 +464,50 @@ async def gallery_list(request: web.Request) -> web.Response:
                 "dirs": [],
                 "files": [],
                 "exists": False,
+                "truncated": False,
             }
         )
 
     dirs: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
-    try:
-        with os.scandir(base) as it:
-            for entry in it:
-                try:
-                    if entry.name.startswith("."):
+    if recursive:
+        # Flat view: no folder cards, files carry their relative subpath.
+        files, truncated = _walk_files(base, exts, image_subset, FLAT_LIST_CAP)
+    else:
+        found: list[_FoundEntry] = []
+        try:
+            with os.scandir(base) as it:
+                for entry in it:
+                    try:
+                        if entry.name.startswith("."):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            # Skip clipspace (matches LoadImage convention) and __pycache__
+                            if entry.name in ("clipspace", "__pycache__"):
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                            dirs.append({"name": entry.name, "mtime": st.st_mtime})
+                        elif entry.is_file(follow_symlinks=False):
+                            ext = os.path.splitext(entry.name)[1].lower()
+                            if ext not in exts:
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                            found.append((st.st_mtime, "", entry.name, ext, entry.path, st))
+                    except OSError:
+                        # Broken symlink / permission error — skip silently
                         continue
-                    if entry.is_dir(follow_symlinks=False):
-                        # Skip clipspace (matches LoadImage convention) and __pycache__
-                        if entry.name in ("clipspace", "__pycache__"):
-                            continue
-                        st = entry.stat(follow_symlinks=False)
-                        dirs.append({"name": entry.name, "mtime": st.st_mtime})
-                    elif entry.is_file(follow_symlinks=False):
-                        ext = os.path.splitext(entry.name)[1].lower()
-                        if ext not in exts:
-                            continue
-                        st = entry.stat(follow_symlinks=False)
-                        width: int | None = None
-                        height: int | None = None
-                        if ext in image_subset:
-                            try:
-                                # PIL.Image.open is lazy — only the header is
-                                # read until pixel access, so .size is cheap.
-                                with Image.open(entry.path) as im:
-                                    width, height = im.size
-                            except Exception as exc:
-                                log.debug("size probe failed for %s: %s", entry.path, exc)
-                        try:
-                            rating = xmp_meta.read_rating_cached(entry.path, st)
-                        except Exception as exc:
-                            log.debug("rating read failed for %s: %s", entry.path, exc)
-                            rating = 0
-                        files.append(
-                            {
-                                "name": entry.name,
-                                "mtime": st.st_mtime,
-                                "size": st.st_size,
-                                "width": width,
-                                "height": height,
-                                "ext": ext,
-                                "rating": rating,
-                            }
-                        )
-                except OSError:
-                    # Broken symlink / permission error — skip silently
-                    continue
-    except PermissionError as exc:
-        return web.json_response({"ok": False, "error": str(exc)}, status=403)
-    except OSError as exc:
-        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        except PermissionError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=403)
+        except OSError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        # Same enumerate → sort → slice → probe shape as the recursive path, so
+        # a huge single directory costs the expensive probes only for the files
+        # that ship. Newest first — the common case is "I just rendered this".
+        files, truncated = _probe_newest(
+            found, image_subset, DIR_LIST_CAP, False, with_subpath=False
+        )
 
     dirs.sort(key=lambda d: d["name"].lower())
-    # Newest first — the common case is "I just rendered this, pick it".
-    files.sort(key=lambda f: f["mtime"], reverse=True)
 
     return web.json_response(
         {
@@ -365,6 +518,7 @@ async def gallery_list(request: web.Request) -> web.Response:
             "dirs": dirs,
             "files": files,
             "exists": True,
+            "truncated": truncated,
         }
     )
 
@@ -488,6 +642,50 @@ async def gallery_thumb(request: web.Request) -> web.Response:
     if data is None:
         return web.Response(status=500)
     return web.Response(body=data, content_type="image/webp", headers=cache_headers)
+
+
+@PromptServer.instance.routes.get("/gallery_loader/metadata")
+async def gallery_metadata(request: web.Request) -> web.Response:
+    """Embedded generation metadata for one image — sandboxed roots AND type=path.
+
+    Same dual addressing as /thumb (``_resolve_thumb_target``), and images
+    only: the gate is IMG_EXTS, not STREAMABLE_EXTS, so no video metadata is
+    read and no new extension enters the perimeter.
+
+    The whitelist is asserted **before** ``os.path.isfile`` — the opposite
+    order to /file, which stats an arbitrary caller-supplied path before
+    checking the extension (a pre-existing wart; new read endpoints follow
+    this order). It also splits /thumb's single 404 in two, because a
+    non-whitelisted extension is a bad request (400), not a missing file.
+
+    No cache headers: this is a one-shot tap-to-open read, so duplicating
+    /thumb's ETag scheme would buy nothing.
+    """
+    path, err = _resolve_thumb_target(request.rel_url.query)
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert path is not None
+    if not _is_image_file(path):
+        return web.json_response({"ok": False, "error": "unsupported file type"}, status=400)
+    if not os.path.isfile(path):
+        return web.json_response({"ok": False, "error": "file not found"}, status=404)
+
+    raw, truncated = image_meta.read_raw_metadata(path)
+    source, summary = image_meta.parse_generation_meta(raw)
+    # The container label comes from the extension, keeping one source of
+    # truth with the rest of the pack; an image whose format has no parser
+    # (a .gif from IMG_EXTS) answers 200 with empty metadata, never a 500.
+    fmt = image_meta.FORMAT_EXTS.get(os.path.splitext(path)[1].lower(), "")
+    return web.json_response(
+        {
+            "ok": True,
+            "format": fmt,
+            "source": source,
+            "summary": summary,
+            "raw": raw,
+            "truncated": truncated,
+        }
+    )
 
 
 @PromptServer.instance.routes.post("/gallery_loader/rating")

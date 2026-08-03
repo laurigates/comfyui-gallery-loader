@@ -43,6 +43,30 @@ probe:
     @curl -s -o /dev/null -w "extension: %{http_code}\n" http://127.0.0.1:8188/extensions/comfyui-gallery-loader/js/image-picker.js
     @curl -s -o /dev/null -w "base:      %{http_code}\n" http://127.0.0.1:8188/gallery_loader/base
 
+############
+# Vendored
+############
+
+# Canonical home of the shared embedded-metadata reader (vendored verbatim
+# here). image_meta.py lives in comfyui-image-browser: that pack owns the
+# /metadata feature and its 1200-line attacker-shaped parser test suite, so the
+# direction is deliberately the reverse of xmp_meta.py / thumb_cache.py, which
+# this pack is canonical for. Each file still has exactly one home.
+image-meta-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-image-browser/main/image_meta.py"
+
+# Re-sync the vendored image_meta.py from its canonical home.
+[group: "vendored"]
+sync-image-meta:
+    curl -fsSL {{image-meta-upstream}} -o image_meta.py
+    @echo "image_meta.py synced from comfyui-image-browser@main"
+
+# Fail if the vendored image_meta.py has drifted from the canonical copy.
+[group: "vendored"]
+check-image-meta-drift:
+    @curl -fsSL {{image-meta-upstream}} | diff -u - image_meta.py \
+        && echo "image_meta.py matches canonical" \
+        || { echo "DRIFT: image_meta.py differs from comfyui-image-browser@main — run 'just sync-image-meta' (or land the fix upstream first)"; exit 1; }
+
 ##########
 # Assets
 ##########

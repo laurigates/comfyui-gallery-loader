@@ -24,16 +24,25 @@ import {
   appendButtonWidget,
   applyStars,
   type ButtonWidgetHost,
+  copyTextToClipboard,
   ensureStyleOnce,
+  escapeHTML as escHTML,
   fuzzyScore,
+  highlightMatches,
+  installBackGuard,
+  installLazyMedia,
+  isValidSort,
   nextRating,
   notify,
   openModalShell,
+  openShellOverlay,
   type PointerPatchableWidget,
   patchWidgetPointer,
   postRating,
   type RatingAddress,
   ratingOf,
+  SORT_OPTIONS,
+  sortFiles,
   starsHTML,
   warnRating,
 } from "@laurigates/comfy-modal-kit";
@@ -44,6 +53,7 @@ const LIST_URL = "/gallery_loader/list";
 const FILE_URL = "/gallery_loader/file";
 const BASE_URL = "/gallery_loader/base";
 const RATING_URL = "/gallery_loader/rating";
+const METADATA_URL = "/gallery_loader/metadata";
 const STYLE_ID = "ip-style";
 
 // Trace logging is opt-in. Enable in devtools with
@@ -78,16 +88,100 @@ const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".m
 // Persisted sort preference. One shared key across every picker flavour so a
 // user's "Name A→Z" choice sticks regardless of which node opened the modal.
 const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
-const VALID_SORTS = new Set([
-  "mtime:desc",
-  "mtime:asc",
-  "name:asc",
-  "name:desc",
-  "size:desc",
-  "pixels:desc",
-  "rating:desc",
-  "rating:asc",
-]);
+
+const SANDBOXED_TYPES = ["input", "output", "temp"];
+
+// Flat ("all subfolders") view preference.
+type ViewMode = "folder" | "flat";
+const VIEW_STORAGE_KEY = "comfyui-gallery-loader:view";
+// Breadcrumb set while a flat load is in flight and cleared once the grid has
+// painted. If it is STILL set at open time, the previous flat attempt never
+// finished — the tab died under it — so the persisted preference would reopen
+// straight into the same failure with no way to reach the toggle. Falling back
+// to folder view is the only self-service escape.
+const VIEW_PENDING_KEY = "comfyui-gallery-loader:view-pending";
+
+interface SavedView {
+  mode: ViewMode;
+  recovered: boolean;
+}
+
+function loadSavedView(): SavedView {
+  try {
+    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
+      localStorage.removeItem(VIEW_PENDING_KEY);
+      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
+      return { mode: "folder", recovered: true };
+    }
+    return {
+      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
+      recovered: false,
+    };
+  } catch {
+    // Private mode / disabled storage — non-fatal.
+    return { mode: "folder", recovered: false };
+  }
+}
+
+function saveView(mode: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, mode);
+  } catch {
+    // Non-fatal.
+  }
+}
+
+function markFlatPending(pending: boolean): void {
+  try {
+    if (pending) localStorage.setItem(VIEW_PENDING_KEY, "1");
+    else localStorage.removeItem(VIEW_PENDING_KEY);
+  } catch {
+    // Non-fatal.
+  }
+}
+
+// Pinned directories — quick-nav chips in the toolbar, for hopping between the
+// few folders you actually pick from. Sandboxed roots only; a path-mode picker
+// has no stable "type" to pin against.
+const PINS_STORAGE_KEY = "comfyui-gallery-loader:pins";
+
+interface Pin {
+  type: string;
+  subfolder: string;
+}
+
+function pinKey(p: Pin): string {
+  return `${p.type}:${p.subfolder}`;
+}
+
+function pinLabel(p: Pin): string {
+  return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
+}
+
+function loadPins(): Pin[] {
+  try {
+    const raw = localStorage.getItem(PINS_STORAGE_KEY);
+    if (!raw) return [];
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (p): p is Pin =>
+        !!p &&
+        typeof (p as Pin).subfolder === "string" &&
+        SANDBOXED_TYPES.includes((p as Pin).type),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function savePins(pins: Pin[]): void {
+  try {
+    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+  } catch {
+    // Private mode / disabled storage — non-fatal.
+  }
+}
 
 // ============================================================
 // Types
@@ -162,6 +256,11 @@ interface ListingFile {
   width?: number;
   height?: number;
   rating?: number;
+  // Present only in a recursive ("flat") listing: the file's directory relative
+  // to the requested subfolder, forward-slashed, "" for a top-level file. A
+  // folder listing omits the key entirely. Never address a file with this
+  // directly — go through fileSub(), which joins it onto state.subfolder.
+  subpath?: string;
 }
 
 type PickerKind = "loadimage" | "vhs-path";
@@ -181,7 +280,7 @@ interface SavedSort {
 function loadSavedSort(): SavedSort | null {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS.has(raw)) return null;
+    if (!raw || !isValidSort(raw)) return null;
     const [key, dir] = raw.split(":");
     return { key: key as string, dir: dir as string };
   } catch (e) {
@@ -493,6 +592,100 @@ function videoSrcURL(type: string, subfolder: string, name: string, absDir?: str
   return `/api/view?${p.toString()}`;
 }
 
+// ---- Embedded generation metadata -------------------------------------
+
+type MetaField =
+  | "positive"
+  | "negative"
+  | "model"
+  | "seed"
+  | "steps"
+  | "cfg"
+  | "sampler"
+  | "scheduler";
+
+interface ImageMetadata {
+  format: string;
+  source: string;
+  summary: Partial<Record<MetaField, unknown>>;
+  raw: Record<string, string>;
+  truncated: boolean;
+}
+
+// Fixed display order. NOT the response's own key order — that is JSON
+// insertion order and varies by whichever tool wrote the file.
+const META_FIELDS: { key: MetaField; label: string }[] = [
+  { key: "positive", label: "Positive" },
+  { key: "negative", label: "Negative" },
+  { key: "model", label: "Model" },
+  { key: "seed", label: "Seed" },
+  { key: "steps", label: "Steps" },
+  { key: "cfg", label: "CFG" },
+  { key: "sampler", label: "Sampler" },
+  { key: "scheduler", label: "Scheduler" },
+];
+
+interface MetaRow {
+  key: MetaField;
+  label: string;
+  value: string;
+}
+
+// Drop anything missing or whitespace-only, so an unknown field never renders
+// as a bare "Negative:" row with a Copy button that copies nothing.
+function metaRows(summary: Partial<Record<MetaField, unknown>> | null | undefined): MetaRow[] {
+  const rows: MetaRow[] = [];
+  if (!summary || typeof summary !== "object") return rows;
+  const bag = summary as Record<string, unknown>;
+  for (const { key, label } of META_FIELDS) {
+    const v = bag[key];
+    if (v === undefined || v === null) continue;
+    const value = String(v);
+    if (!value.trim()) continue;
+    rows.push({ key, label, value });
+  }
+  return rows;
+}
+
+// The "Copy all" payload. Multi-line prompts stay verbatim so the text can be
+// pasted straight back into a prompt box.
+function metaClipboardText(rows: MetaRow[]): string {
+  return rows.map((r) => `${r.label}: ${r.value}`).join("\n");
+}
+
+async function fetchMetadata(
+  type: string,
+  subfolder: string,
+  name: string,
+  absDir: string,
+): Promise<ImageMetadata> {
+  const p = new URLSearchParams();
+  if (type === "path") {
+    p.set("path", joinAbs(absDir, name));
+  } else {
+    p.set("type", type);
+    p.set("subfolder", subfolder);
+    p.set("name", name);
+  }
+  const r = await fetch(`${METADATA_URL}?${p.toString()}`);
+  let data: Record<string, unknown> = {};
+  try {
+    data = await r.json();
+  } catch {
+    // fall through to the status-based error below
+  }
+  if (!r.ok || !data.ok) {
+    throw new Error((data.error as string) || `HTTP ${r.status}`);
+  }
+  return {
+    format: (data.format as string) || "",
+    source: (data.source as string) || "none",
+    summary: (data.summary as Partial<Record<MetaField, unknown>>) || {},
+    raw: (data.raw as Record<string, string>) || {},
+    truncated: !!data.truncated,
+  };
+}
+
 // ============================================================
 // Picker
 // ============================================================
@@ -511,6 +704,7 @@ interface PickerState {
   query: string;
   didInitialScroll: boolean;
   extensionsParam: string[] | null;
+  viewMode: ViewMode;
 }
 
 interface InitialSnapshot {
@@ -562,6 +756,7 @@ export async function openImagePicker(
     // The set of extension strings (".mp4", ".png", …) we'll send to the
     // backend. null → backend's default (images).
     extensionsParam: null,
+    viewMode: "folder",
   };
 
   // Restore the user's last-used sort so it persists across modal opens.
@@ -569,6 +764,30 @@ export async function openImagePicker(
   if (savedSort) {
     state.sortKey = savedSort.key;
     state.sortDir = savedSort.dir;
+  }
+
+  const savedView = loadSavedView();
+  state.viewMode = savedView.mode;
+
+  // Flat view is only in effect on a sandboxed root — the toggle is hidden on
+  // the path tab and the backend ignores `recursive` there, so guard both.
+  // Directory mode never lists files at all.
+  function isFlat(): boolean {
+    return (
+      state.viewMode === "flat" && mode !== "directory" && SANDBOXED_TYPES.includes(state.type)
+    );
+  }
+
+  // A file's effective subfolder: in folder view every file lives in
+  // state.subfolder; in flat view each carries its own subpath, joined onto the
+  // request subfolder. EVERY per-file address (thumbnail, rating, committed
+  // value, subpath-label target) routes through this so both views share one
+  // code path.
+  function fileSub(f: ListingFile): string {
+    const sp = f.subpath || "";
+    if (!sp) return state.subfolder;
+    const base = state.subfolder.replace(/\/+$/, "");
+    return base ? `${base}/${sp}` : sp;
   }
 
   let initialSnapshot: InitialSnapshot;
@@ -617,6 +836,39 @@ export async function openImagePicker(
     height: "min(88vh, 820px)",
     footerLeftHTML,
     footerRightHTML: '<span class="ip-count"></span>',
+    onClose: () => {
+      disposeBackGuard?.();
+      disposeBackGuard = null;
+    },
+  });
+
+  // ---- Android / gesture back ------------------------------------
+  // A sentinel history entry keeps the hardware back button acting on the
+  // picker instead of navigating away from ComfyUI. The kit owns the history
+  // bookkeeping; what "back" MEANS here is this callback: dismiss an open
+  // overlay (the metadata card), else ascend one directory, and only close at
+  // a root. Assigned after the shell exists because onClose above closes over
+  // it, and the guard needs `modal` to hit-test the overlay.
+  let disposeBackGuard: (() => void) | null = null;
+
+  function canGoUp(): boolean {
+    return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
+  }
+
+  disposeBackGuard = installBackGuard(() => {
+    if (modal.dialog.querySelector(".cmp-ov-backdrop")) {
+      // Route through the overlay's own ESC path so its onDismiss fires and
+      // the shell's key handler is restored — closing it by hand would leave
+      // the overlay's suspended ESC listener unrestored.
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      return true;
+    }
+    if (canGoUp()) {
+      navigateUp();
+      return true;
+    }
+    modal.close();
+    return false;
   });
 
   // ---- Toolbar: tabs (loadimage only) + breadcrumbs + sort + refresh -
@@ -641,16 +893,11 @@ export async function openImagePicker(
   const sortEl = document.createElement("select");
   sortEl.className = "ip-control";
   sortEl.title = "Sort";
-  sortEl.innerHTML = `
-        <option value="mtime:desc">Newest</option>
-        <option value="mtime:asc">Oldest</option>
-        <option value="name:asc">Name A→Z</option>
-        <option value="name:desc">Name Z→A</option>
-        <option value="size:desc">Largest file</option>
-        <option value="pixels:desc">Highest resolution</option>
-        <option value="rating:desc">Highest rating</option>
-        <option value="rating:asc">Lowest rating</option>
-    `;
+  // Options come from the kit so both surfaces offer — and accept — the same
+  // ten, which is what makes sharing the :sort key safe.
+  sortEl.innerHTML = SORT_OPTIONS.map(
+    (o) => `<option value="${o.value}">${escHTML(o.label)}</option>`,
+  ).join("");
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
 
   const refreshEl = document.createElement("button");
@@ -659,12 +906,99 @@ export async function openImagePicker(
   refreshEl.title = "Refresh";
   refreshEl.textContent = "⟳";
 
-  modal.toolbarEl.append(crumbsEl, sortEl, refreshEl);
+  // Flat view toggle: fold the current folder's whole subtree into one grid.
+  // Sandboxed roots only, and meaningless in directory mode — so it is not
+  // CREATED at all for those flavours rather than created-then-hidden, which is
+  // how a dead control ships.
+  let viewToggleEl: HTMLButtonElement | null = null;
+  if (kind === "loadimage" && mode !== "directory") {
+    viewToggleEl = document.createElement("button");
+    viewToggleEl.type = "button";
+    viewToggleEl.className = "ip-control ip-icon ip-view-toggle";
+    viewToggleEl.title = "Flat view (all subfolders)";
+    viewToggleEl.textContent = "≣";
+  }
+
+  // Pin the current folder / jump to a pinned one. Same gating as the flat
+  // toggle: sandboxed roots only, so it is not created for a path picker.
+  let pinToggleEl: HTMLButtonElement | null = null;
+  let pinsEl: HTMLElement | null = null;
+  if (kind === "loadimage") {
+    pinToggleEl = document.createElement("button");
+    pinToggleEl.type = "button";
+    pinToggleEl.className = "ip-control ip-icon ip-pin-toggle";
+    pinToggleEl.title = "Pin this folder";
+    pinToggleEl.textContent = "📌";
+    pinsEl = document.createElement("div");
+    pinsEl.className = "ip-pins";
+  }
+
+  modal.toolbarEl.append(
+    crumbsEl,
+    ...(viewToggleEl ? [viewToggleEl] : []),
+    ...(pinToggleEl ? [pinToggleEl] : []),
+    sortEl,
+    refreshEl,
+    ...(pinsEl ? [pinsEl] : []),
+  );
+
+  function renderPins(): void {
+    if (!pinToggleEl || !pinsEl) return;
+    const pins = loadPins();
+    const canPin = SANDBOXED_TYPES.includes(state.type);
+    pinToggleEl.style.display = canPin ? "" : "none";
+    const herePinned =
+      canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+    pinToggleEl.classList.toggle("is-active", herePinned);
+    pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    pinsEl.innerHTML = "";
+    pinsEl.style.display = pins.length ? "" : "none";
+    for (const p of pins) {
+      const chip = document.createElement("span");
+      chip.className = "ip-pin-chip";
+      chip.dataset.pinType = p.type;
+      chip.dataset.pinSub = p.subfolder;
+      if (p.type === state.type && p.subfolder === state.subfolder) {
+        chip.classList.add("is-current");
+      }
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "ip-pin-go";
+      go.title = `Go to ${pinLabel(p)}`;
+      go.textContent = `📌 ${pinLabel(p)}`;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "ip-pin-x";
+      x.title = `Unpin ${pinLabel(p)}`;
+      x.textContent = "✕";
+      chip.append(go, x);
+      pinsEl.appendChild(chip);
+    }
+  }
+
+  // The toggle's visibility follows the active tab, so it re-syncs per load.
+  function renderViewToggle(): void {
+    if (!viewToggleEl) return;
+    const ok = SANDBOXED_TYPES.includes(state.type);
+    viewToggleEl.style.display = ok ? "" : "none";
+    viewToggleEl.classList.toggle("is-active", isFlat());
+    viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
+  }
 
   // ---- Body: grid -------------------------------------------------
   const gridEl = document.createElement("div");
   gridEl.className = "ip-grid";
   modal.bodyEl.appendChild(gridEl);
+
+  // The files currently painted, in render order. Cards carry their index into
+  // this, which is the only safe identity once flat view can show two files
+  // with the same name from different subfolders.
+  let renderedFiles: ListingFile[] = [];
+
+  function fileOfCard(card: HTMLElement): ListingFile | null {
+    const idx = Number(card.dataset.idx);
+    return Number.isInteger(idx) ? (renderedFiles[idx] ?? null) : null;
+  }
 
   const countEl = modal.footerEl.querySelector(".ip-count") as HTMLElement | null;
   function setCount(visible: number, total: number): void {
@@ -704,6 +1038,43 @@ export async function openImagePicker(
 
   refreshEl.addEventListener("click", () => loadAndRender());
 
+  pinToggleEl?.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    const cur: Pin = { type: state.type, subfolder: state.subfolder };
+    const pins = loadPins();
+    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
+    // Nothing was removed ⇒ this folder wasn't pinned ⇒ pin it.
+    if (next.length === pins.length) next.push(cur);
+    savePins(next);
+    renderPins();
+  });
+
+  pinsEl?.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    const chip = t.closest("[data-pin-type]") as HTMLElement | null;
+    if (!chip) return;
+    const type = chip.dataset.pinType as string;
+    if (!SANDBOXED_TYPES.includes(type)) return;
+    const pin: Pin = { type, subfolder: chip.dataset.pinSub || "" };
+    if (t.closest(".ip-pin-x")) {
+      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
+      renderPins();
+      return;
+    }
+    if (pin.type === state.type && pin.subfolder === state.subfolder) return;
+    state.type = pin.type;
+    state.subfolder = pin.subfolder;
+    loadAndRender();
+  });
+
+  viewToggleEl?.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
+    saveView(state.viewMode);
+    // Flat needs a recursive re-fetch, so this is a reload, not a re-render.
+    loadAndRender();
+  });
+
   if (tabsEl) {
     tabsEl.addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest("[data-type]") as HTMLElement | null;
@@ -735,13 +1106,16 @@ export async function openImagePicker(
     const card = star.closest(".ip-card") as HTMLElement | null;
     const row = star.parentElement as HTMLElement | null;
     if (!card || !row) return;
+    const f = fileOfCard(card);
+    if (!f) return;
     const cur = Number(row.dataset.rating || "0");
-    setStarRating(card.dataset.name as string, row, nextRating(cur, Number(star.dataset.val)));
+    setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
   });
 
   gridEl.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).closest(".ip-star")) return;
-    const card = (e.target as HTMLElement).closest(".ip-card") as HTMLElement | null;
+    const target = e.target as HTMLElement;
+    if (target.closest(".ip-star")) return;
+    const card = target.closest(".ip-card") as HTMLElement | null;
     if (!card) return;
     if (card.classList.contains("is-up")) {
       navigateUp();
@@ -753,26 +1127,195 @@ export async function openImagePicker(
     }
     if (card.classList.contains("is-file")) {
       if (mode === "directory") return; // files are inert in dir mode
-      commitFile(card.dataset.name as string, card.dataset.ext || "");
+      if (target.closest(".ip-info")) {
+        e.stopPropagation();
+        const info = fileOfCard(card);
+        if (info) void openMetadata(info);
+        return;
+      }
+      // Flat view: the subpath label jumps to that folder in folder view.
+      const subEl = target.closest(".ip-subpath") as HTMLElement | null;
+      if (subEl?.dataset.sub !== undefined) {
+        e.stopPropagation();
+        state.viewMode = "folder";
+        saveView("folder");
+        state.subfolder = subEl.dataset.sub || "";
+        loadAndRender();
+        return;
+      }
+      const f = fileOfCard(card);
+      if (f) commitFile(f);
     }
   });
 
-  function setStarRating(name: string, row: HTMLElement, next: number): void {
+  // ---- Metadata overlay ------------------------------------------
+  // Kept in-dialog via openShellOverlay rather than a second openModalShell:
+  // single-modal discipline means a nested shell would dismiss the picker.
+  const copyFeedback = new WeakMap<
+    HTMLButtonElement,
+    { seq: number; timer: ReturnType<typeof setTimeout> | null }
+  >();
+
+  function copyInto(btn: HTMLButtonElement, text: string, restore: string): void {
+    let fb = copyFeedback.get(btn);
+    if (!fb) {
+      fb = { seq: 0, timer: null };
+      copyFeedback.set(btn, fb);
+    }
+    const slot = fb;
+    const seq = ++slot.seq;
+    // Hold the current feedback until this copy answers — no flicker back to
+    // `restore` mid-flight — but drop the stale restore timer that would fire
+    // out of order once this click's own timer is armed.
+    if (slot.timer !== null) {
+      clearTimeout(slot.timer);
+      slot.timer = null;
+    }
+    void copyTextToClipboard(text).then((ok) => {
+      if (slot.seq !== seq) return; // a later click owns the label now
+      btn.textContent = ok ? "Copied ✓" : "Copy failed";
+      btn.classList.toggle("is-copied", ok);
+      slot.timer = setTimeout(() => {
+        slot.timer = null;
+        btn.textContent = restore;
+        btn.classList.remove("is-copied");
+      }, 1500);
+    });
+  }
+
+  async function openMetadata(f: ListingFile): Promise<void> {
+    // The overlay is dismissible while the read is in flight, so a late
+    // response must not paint into a closed card.
+    let live = true;
+    const ov = openShellOverlay(modal, {
+      onDismiss: () => {
+        live = false;
+      },
+    });
+    ov.card.classList.add("ip-meta-card");
+    const close = (): void => {
+      live = false;
+      ov.close();
+    };
+    const title = `Metadata — ${escHTML(f.name)}`;
+    // Painted synchronously: an overlay that appeared only after the read
+    // would feel like a dead button on a big file or a slow disk.
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ip-meta-body"><div class="ip-meta-status">Reading metadata…</div></div>
+      <div class="cmp-ov-actions">
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+
+    let data: ImageMetadata;
+    try {
+      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+    } catch (e) {
+      // Close FIRST, then report: the toast stack is a body-level child above
+      // the dialog, so its ✕ would land on the overlay's own controls.
+      close();
+      console.error(`[${EXT_NAME}] metadata read failed:`, e);
+      notify({
+        severity: "error",
+        summary: "Metadata read failed",
+        detail: String((e as Error)?.message ?? e),
+      });
+      return;
+    }
+    if (!live) return;
+
+    const rows = metaRows(data.summary);
+    const rawKeys = Object.keys(data.raw);
+    const srcLabel =
+      data.source === "comfyui"
+        ? "ComfyUI"
+        : data.source === "a1111"
+          ? "A1111"
+          : "no generation data";
+    const rowsHTML = rows
+      .map(
+        (r, i) => `
+        <div class="ip-meta-row">
+          <div class="ip-meta-k">${escHTML(r.label)}</div>
+          <div class="ip-meta-v">${escHTML(r.value)}</div>
+          <button type="button" class="ip-meta-copy" data-copy-row="${i}">Copy</button>
+        </div>`,
+      )
+      .join("");
+    // Never invent a row. With nothing recognised the honest report is which of
+    // the two cases it is: no embedded text at all, or text we couldn't map (in
+    // which case the raw disclosure below is the whole answer).
+    const emptyHTML = rows.length
+      ? ""
+      : `<div class="ip-meta-empty">${
+          rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."
+        }</div>`;
+    const rawJSON = JSON.stringify(data.raw, null, 2);
+    const rawHTML = rawKeys.length
+      ? `
+        <details class="ip-meta-raw">
+          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
+          <pre>${escHTML(rawJSON)}</pre>
+          <button type="button" class="ip-meta-copy" data-copy-raw>Copy JSON</button>
+        </details>`
+      : "";
+    const noteHTML = data.truncated
+      ? `<div class="ip-meta-note">Some values were truncated by the server.</div>`
+      : "";
+    const copyAll = rows.length
+      ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>`
+      : "";
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ip-meta-body">
+        <div class="ip-meta-src">${escHTML(srcLabel)}${
+          data.format ? `<span class="ip-meta-fmt">${escHTML(data.format)}</span>` : ""
+        }</div>
+        ${emptyHTML}
+        ${rowsHTML}
+        ${noteHTML}
+        ${rawHTML}
+      </div>
+      <div class="cmp-ov-actions">
+        ${copyAll}
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    // Each restore label is read ONCE here, off the freshly painted markup —
+    // never inside the click handler, where a mid-feedback label would stick.
+    for (const btn of ov.card.querySelectorAll<HTMLButtonElement>("[data-copy-row]")) {
+      const row = rows[Number(btn.dataset.copyRow)];
+      const label = btn.textContent || "Copy";
+      if (row) btn.addEventListener("click", () => copyInto(btn, row.value, label));
+    }
+    const rawBtn = ov.card.querySelector<HTMLButtonElement>("[data-copy-raw]");
+    const rawLabel = rawBtn?.textContent || "Copy JSON";
+    rawBtn?.addEventListener("click", () => copyInto(rawBtn, rawJSON, rawLabel));
+    const allBtn = ov.card.querySelector<HTMLButtonElement>("[data-copy-all]");
+    const allLabel = allBtn?.textContent || "Copy all";
+    allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
+  }
+
+  // Takes the file OBJECT, not its name: `state.files.find(byName)` rated the
+  // first same-named file in the listing, which in flat view is routinely a
+  // different file in a different folder — and the optimistic repaint made the
+  // wrong write look like it had worked.
+  function setStarRating(f: ListingFile, row: HTMLElement, next: number): void {
     const prev = Number(row.dataset.rating || "0");
     applyStars(row, next);
-    const f = state.files.find((x) => x.name === name);
-    if (f) f.rating = next;
+    f.rating = next;
     const addr: RatingAddress = {
       type: state.type,
-      subfolder: state.subfolder,
+      subfolder: fileSub(f),
       absDir: state.absPath,
-      name,
+      name: f.name,
     };
     postRating(RATING_URL, addr, next)
       .then((confirmed) => {
         if (confirmed !== next) {
           applyStars(row, confirmed);
-          if (f) f.rating = confirmed;
+          f.rating = confirmed;
         }
       })
       .catch((e) => {
@@ -783,7 +1326,7 @@ export async function openImagePicker(
           detail: String((e as Error)?.message ?? e),
         });
         applyStars(row, prev);
-        if (f) f.rating = prev;
+        f.rating = prev;
       });
   }
 
@@ -858,6 +1401,9 @@ export async function openImagePicker(
     } else {
       p.set("type", state.type);
       p.set("subfolder", state.subfolder);
+      // Only ever on a sandboxed root. The backend ignores it for type=path
+      // anyway; not sending it keeps that from being load-bearing.
+      if (isFlat()) p.set("recursive", "1");
     }
     if (state.extensionsParam?.length) {
       p.set("extensions", state.extensionsParam.join(","));
@@ -868,8 +1414,11 @@ export async function openImagePicker(
   async function loadAndRender(): Promise<void> {
     renderTabs();
     renderCrumbs();
+    renderViewToggle();
+    renderPins();
     modal.setBusy(true);
     modal.setStatus("Loading…");
+    markFlatPending(isFlat());
     try {
       const r = await fetch(buildListingURL());
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -878,6 +1427,13 @@ export async function openImagePicker(
       state.dirs = data.dirs || [];
       state.files = data.files || [];
       modal.setStatus(data.exists ? "" : "Directory not found.");
+      if (data.truncated) {
+        notify({
+          severity: "warn",
+          summary: `Showing the newest ${state.files.length}`,
+          detail: "This folder has more files than the listing returns; older ones are not shown.",
+        });
+      }
     } catch (e) {
       console.error(`[${EXT_NAME}] list failed:`, e);
       modal.setStatus(`Error: ${(e as Error).message}`);
@@ -886,6 +1442,9 @@ export async function openImagePicker(
     }
     modal.setBusy(false);
     renderGrid();
+    // Cleared only once the grid has actually painted — that is what makes a
+    // still-set flag at open time mean "the last flat load never finished".
+    markFlatPending(false);
   }
 
   function thumbForFile(f: ListingFile): ThumbDescriptor {
@@ -899,11 +1458,12 @@ export async function openImagePicker(
       }
       return { kind: "icon", text: "📄" };
     }
+    const sub = fileSub(f);
     if (IMG_EXTS.has(ext)) {
-      return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f) };
+      return { kind: "img", src: imageThumbURL(state.type, sub, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
-      return { kind: "video", src: videoSrcURL(state.type, state.subfolder, f.name) };
+      return { kind: "video", src: videoSrcURL(state.type, sub, f.name) };
     }
     return { kind: "icon", text: "📄" };
   }
@@ -912,8 +1472,12 @@ export async function openImagePicker(
     const q = state.query;
     gridEl.innerHTML = "";
 
+    // Flat view collapses the subtree into files only — no ".." card and no
+    // folder cards (the backend returns dirs:[] recursively anyway). A ".."
+    // here would silently drop out of flat view.
+    const flat = isFlat();
     const showUp =
-      state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder;
+      !flat && (state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder);
     if (showUp) {
       const up = document.createElement("div");
       up.className = "ip-card is-up";
@@ -924,7 +1488,7 @@ export async function openImagePicker(
       gridEl.appendChild(up);
     }
 
-    for (const d of state.dirs) {
+    for (const d of flat ? [] : state.dirs) {
       if (q && !d.name.toLowerCase().includes(q)) continue;
       const c = document.createElement("div");
       c.className = "ip-card is-dir";
@@ -937,11 +1501,27 @@ export async function openImagePicker(
     }
 
     let files = state.files;
+    // Match positions for the visible filename, keyed by file. Only populated
+    // while filtering; `.cmp-match` styles them (the rule already shipped, with
+    // nothing emitting it until now).
+    const nameMatches = new Map<ListingFile, number[]>();
     if (q) {
       const scored: { f: ListingFile; score: number }[] = [];
       for (const f of files) {
-        const r = fuzzyScore(q, f.name);
-        if (r) scored.push({ f, score: r.score });
+        // In flat view the query matches "subpath/name" so you can filter by
+        // folder too; folder view matches the bare filename as before.
+        const prefix = flat && f.subpath ? `${f.subpath}/` : "";
+        const r = fuzzyScore(q, `${prefix}${f.name}`);
+        if (!r) continue;
+        scored.push({ f, score: r.score });
+        // Highlighting is applied to the NAME element, but the indices are
+        // against the haystack — shift them back and drop anything that landed
+        // on the subpath, which lives in its own element.
+        const off = prefix.length;
+        nameMatches.set(
+          f,
+          r.matches.map((i) => i - off).filter((i) => i >= 0),
+        );
       }
       scored.sort((a, b) => b.score - a.score);
       files = scored.map((x) => x.f);
@@ -949,18 +1529,33 @@ export async function openImagePicker(
       files = sortFiles(files, state.sortKey, state.sortDir);
     }
 
+    // The rendered order IS the identity map: cards address their file by
+    // index, never by name. In flat view a bare filename is not unique across
+    // subfolders, so a name-keyed lookup silently commits (and rates) the wrong
+    // ComfyUI_00001_.png.
+    renderedFiles = files;
+
     let visible = 0;
     const inSameLocation =
       state.type === "path"
         ? state.absPath === initialSnapshot.subfolder
         : state.type === initialSnapshot.type && state.subfolder === initialSnapshot.subfolder;
-    for (const f of files) {
+    for (const [i, f] of files.entries()) {
       const c = document.createElement("div");
       c.className = "ip-card is-file";
-      c.dataset.name = f.name;
+      c.dataset.idx = String(i);
+      c.dataset.name = f.name; // display/debug only — never an identity
       c.dataset.ext = (f.ext || "").toLowerCase();
-      if (inSameLocation && f.name === initialSnapshot.name) {
+      const selected = flat
+        ? state.type === initialSnapshot.type &&
+          fileSub(f) === initialSnapshot.subfolder &&
+          f.name === initialSnapshot.name
+        : inSameLocation && f.name === initialSnapshot.name;
+      if (selected) {
         c.classList.add("is-selected");
+      }
+      if (flat) {
+        c.classList.add("is-flat");
       }
       if (mode === "directory") {
         c.classList.add("is-inert");
@@ -976,12 +1571,44 @@ export async function openImagePicker(
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
             : `<div class="ip-thumb-icon">${t.text}</div>`;
       const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
+      // ⓘ opens the embedded generation metadata. Gated on the card being an
+      // IMAGE, not on the tab: /metadata is a read and accepts type=path, so
+      // it renders on a path picker too — the one control that isn't scoped to
+      // sandboxed roots. Video cards get none (the endpoint is IMG_EXTS-gated).
+      const infoBtn =
+        mode !== "directory" && IMG_EXTS.has((f.ext || "").toLowerCase())
+          ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>`
+          : "";
+      // Flat view: show the file's folder above the thumbnail. It's a button —
+      // tapping it drops back to folder view at that directory. The LABEL is
+      // the relative subpath (what the user reads) while data-sub is the joined
+      // one (where the tap goes); they differ whenever flat view is entered
+      // from a non-root subfolder, so a root-only test cannot see a mix-up.
+      // Top-level files get a muted "/" so the row height stays consistent.
+      const subLabel = flat
+        ? f.subpath
+          ? `<button type="button" class="ip-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>`
+          : `<div class="ip-subpath is-root" title="Top level">/</div>`
+        : "";
       c.innerHTML = `
-                <div class="ip-thumb">${thumbInner}</div>
+                ${subLabel}
+                <div class="ip-thumb">${thumbInner}${infoBtn}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
             `;
+      // Repaint the name with the matched characters wrapped. Done after the
+      // template because highlightMatches builds a DocumentFragment, not a
+      // string — and going through the DOM keeps the filename un-parsed as
+      // markup, which the escaped template above was also relying on.
+      const hits = nameMatches.get(f);
+      if (hits?.length) {
+        const nameEl = c.querySelector(".ip-name") as HTMLElement | null;
+        if (nameEl) {
+          nameEl.textContent = "";
+          nameEl.appendChild(highlightMatches(f.name, hits));
+        }
+      }
       gridEl.appendChild(c);
       visible++;
     }
@@ -1008,7 +1635,13 @@ export async function openImagePicker(
     // On first paint, scroll the currently loaded image into the middle of the
     // viewport so the user lands where they left off — neighbours visible above
     // and below make picking the next image quick. Only once per modal open.
-    if (!state.didInitialScroll) {
+    // Not in flat view: the target may be thousands of cards down a grid whose
+    // thumbnails are all still data-src placeholders, so the single bare write
+    // below lands against a shorter-than-final layout and gets CLAMPED at the
+    // instant of assignment — leaving the view somewhere arbitrary once the
+    // real heights arrive. Doing better needs a re-assert loop, which needs a
+    // browser test suite this pack does not have; not scrolling is honest.
+    if (!state.didInitialScroll && !isFlat()) {
       state.didInitialScroll = true;
       scrollToSelected();
     }
@@ -1028,62 +1661,27 @@ export async function openImagePicker(
     return `…${p.slice(-46)}`;
   }
 
-  // Observer for the current render, kept so the next one can disconnect it
-  // instead of leaking an observer (still referencing every detached card) per
-  // navigation / sort / search keystroke.
-  let thumbObserver: IntersectionObserver | null = null;
+  // The root MUST be the shell body: `.ip-grid` has no overflow clip, so
+  // rooting on it makes every card intersect on the first callback and the
+  // "lazy" load fires for the whole listing at once. The kit takes the root as
+  // a required parameter for exactly this reason.
+  let disposeLazyThumbs: (() => void) | null = null;
 
-  function installLazyThumbs(container: HTMLElement): void {
-    thumbObserver?.disconnect();
-    thumbObserver = null;
-    // Without the guard a browser lacking IntersectionObserver throws here and
-    // takes the whole grid render down with it — thumbnails degrading to
-    // never-loaded is survivable, an exception out of renderGrid is not.
-    if (typeof IntersectionObserver === "undefined") return;
-    const els = container.querySelectorAll("img[data-src], video[data-src]");
-    if (!els.length) return;
-    // The root MUST be the scrolling ancestor (modal.bodyEl / .cmp-body), NOT
-    // the grid. `.ip-grid` has no overflow clip, so with the grid as root the
-    // root rectangle is the grid's whole bounding box and EVERY card reports as
-    // intersecting on the first callback — the "lazy" load fires for the entire
-    // listing at once (measured 400/400 off-screen cards vs 20/400 with the
-    // real scroller). A big output dir then issues one /thumb request per file
-    // and gives every video a src + preload=metadata simultaneously.
-    //
-    // Note this differs from gallery_loader.ts, where `.gl-grid` IS the scroll
-    // container and passing the grid is correct. The picker's grid lives inside
-    // the modal shell's body, so the scroller moved and the root had to follow.
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          if (!e.isIntersecting) continue;
-          const el = e.target as HTMLImageElement | HTMLVideoElement;
-          const src = (el as HTMLElement).dataset.src;
-          if (src) {
-            if (el.tagName === "VIDEO") {
-              // Switch to preload=metadata only when in view, so
-              // the browser only fetches video headers for thumbs
-              // the user actually scrolled to.
-              (el as HTMLVideoElement).preload = "metadata";
-            }
-            el.src = src;
-            el.removeAttribute("data-src");
-          }
-          io.unobserve(el);
-        }
-      },
-      { root: modal.bodyEl, rootMargin: "300px" },
-    );
-    for (const el of els) io.observe(el);
-    thumbObserver = io;
+  function installLazyThumbs(rootEl: HTMLElement): void {
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(rootEl, { root: modal.bodyEl, rootMargin: "300px" });
   }
 
-  function commitFile(name: string, _ext: string): void {
+  // Takes the file object so flat view commits the file's OWN folder. The
+  // value contract is unchanged: buildLoadImageValue already normalises a
+  // nested subfolder, so a flat pick of a/b/x.png yields exactly what folder
+  // navigation would have produced.
+  function commitFile(f: ListingFile): void {
     let value: string;
     if (state.type === "path") {
-      value = joinAbs(state.absPath, name);
+      value = joinAbs(state.absPath, f.name);
     } else {
-      value = buildLoadImageValue(state.type, state.subfolder, name);
+      value = buildLoadImageValue(state.type, fileSub(f), f.name);
       // The native LiteGraph combo validates against options.values;
       // append so re-renders treat the new value as valid.
       const values = widget.options?.values;
@@ -1118,39 +1716,15 @@ export async function openImagePicker(
     app.graph?.setDirtyCanvas?.(true, true);
   }
 
-  function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[] {
-    const mul = dir === "asc" ? 1 : -1;
-    const nameCmp = (a: ListingFile, b: ListingFile) =>
-      a.name.localeCompare(b.name, undefined, {
-        numeric: true,
-        sensitivity: "base",
-      });
-    const numCmp =
-      (getter: (f: ListingFile) => number | undefined) => (a: ListingFile, b: ListingFile) =>
-        (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
-    let cmp: (a: ListingFile, b: ListingFile) => number;
-    switch (key) {
-      case "name":
-        cmp = nameCmp;
-        break;
-      case "size":
-        cmp = numCmp((f) => f.size);
-        break;
-      case "pixels":
-        cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
-        break;
-      case "rating":
-        cmp = numCmp((f) => f.rating);
-        break;
-      default:
-        cmp = numCmp((f) => f.mtime);
-        break;
-    }
-    return [...files].sort((a, b) => mul * cmp(a, b));
-  }
-
   // First paint.
   loadAndRender();
+  if (savedView.recovered) {
+    notify({
+      severity: "warn",
+      summary: "Reopened in folder view",
+      detail: "The last flat-view load didn't finish, so the picker fell back to folder view.",
+    });
+  }
 }
 
 // ============================================================
@@ -1186,6 +1760,103 @@ const PICKER_CSS = `
     background: #2f3a52;
     color: #9ec6ff;
 }
+/* Shared active state for toolbar controls (the flat-view toggle). */
+.ip-control.is-active {
+    background: #2f3a52;
+    color: #9ec6ff;
+}
+/* ⓘ overlay button, pinned to the thumbnail's corner. */
+.ip-thumb { position: relative; }
+.ip-info {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #b8b8c0;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.ip-info:hover { background: #2f3a52; color: #9ec6ff; }
+
+/* Metadata overlay (in-dialog — a nested modal shell would dismiss the picker). */
+.ip-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }
+.ip-meta-body {
+    display: flex; flex-direction: column; gap: 8px;
+    overflow-y: auto; padding: 8px 0; -webkit-overflow-scrolling: touch;
+}
+.ip-meta-status { padding: 14px 2px; font-size: 12.5px; color: #888; font-style: italic; }
+.ip-meta-src {
+    display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: #9ec6ff;
+    text-transform: uppercase; letter-spacing: 0.5px;
+}
+.ip-meta-fmt { color: #777; text-transform: none; letter-spacing: 0; }
+.ip-meta-row { display: grid; grid-template-columns: 84px 1fr auto; gap: 8px; align-items: start; }
+.ip-meta-k {
+    padding-top: 7px; font-size: 11px; color: #8a8a92;
+    text-transform: uppercase; letter-spacing: 0.4px;
+}
+.ip-meta-v {
+    /* A long positive prompt scrolls inside its own box instead of pushing the
+       Copy buttons and the overlay actions off the card. Selectable: the card
+       is a reading surface. */
+    max-height: 7.5em; overflow-y: auto;
+    padding: 6px 8px; font-size: 12px; line-height: 1.45; color: #d8d8dc;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+.ip-meta-copy {
+    background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;
+    padding: 0 10px; font-size: 12px; cursor: pointer; font-family: inherit; min-height: 32px;
+}
+.ip-meta-copy:hover { background: #3a3a4a; color: #fff; }
+.ip-meta-copy.is-copied { background: #25402f; color: #8fe0a8; border-color: #37624a; }
+.ip-meta-empty { padding: 16px 2px; font-size: 12.5px; color: #777; font-style: italic; }
+.ip-meta-note { font-size: 11.5px; color: #c8a95c; }
+.ip-meta-raw > summary {
+    padding: 7px 0; font-size: 12px; color: #9ec6ff; cursor: pointer; min-height: 32px;
+}
+.ip-meta-raw pre {
+    margin: 4px 0 8px; padding: 8px; max-height: 30vh; overflow: auto;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-size: 11px; color: #b8b8c0; white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+/* Pinned-folder chips get their own toolbar row so they never crowd the
+   crumbs or get painted under the sort dropdown. */
+.ip-pins {
+    order: 10; flex-basis: 100%;
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.ip-pin-chip { display: inline-flex; align-items: stretch; }
+.ip-pin-go {
+    background: #23283a; color: #9ec6ff; border: 1px solid #3a4560; border-right: 0;
+    border-radius: 4px 0 0 4px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+    font-family: inherit; min-height: 32px; max-width: 45vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ip-pin-go:hover { background: #2f3a52; color: #fff; }
+.ip-pin-x {
+    background: #23283a; color: #667; border: 1px solid #3a4560;
+    border-radius: 0 4px 4px 0; padding: 6px 8px; font-size: 11px; cursor: pointer;
+    font-family: inherit; min-height: 32px; min-width: 28px;
+}
+.ip-pin-x:hover { background: #5c2a3c; color: #ff9eb0; }
+.ip-pin-chip.is-current .ip-pin-go { color: #ffd866; border-color: #78683a; }
+.ip-pin-chip.is-current .ip-pin-x { border-color: #78683a; }
+/* Flat view: the file's folder, above the thumbnail. Tapping it drops back to
+   folder view there. Fixed min-height so rows stay aligned when a top-level
+   file shows the inert "/" instead. */
+.ip-subpath {
+    display: block; width: 100%; text-align: left; box-sizing: border-box;
+    padding: 5px 8px; font-size: 10px; line-height: 1.3; min-height: 26px;
+    color: #8a9bb5; background: transparent; border: 0;
+    border-bottom: 1px solid #2a2a32;
+    white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; cursor: pointer;
+}
+.ip-subpath:hover { color: #9ec6ff; background: #23232e; }
+.ip-subpath.is-root { color: #555; cursor: default; }
+.ip-subpath.is-root:hover { background: transparent; color: #555; }
 .ip-crumbs {
     display: flex;
     flex-wrap: wrap;
@@ -1342,25 +2013,12 @@ const PICKER_CSS = `
     background: #3a4868;
     color: #fff;
 }
-/* Kept for parity with sampler-info's si-match. */
+/* Emitted by highlightMatches on the matched characters of a filename. */
 .cmp-match {
     color: #ffd866;
     font-weight: 700;
 }
 `;
-
-function escHTML(s: unknown): string {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) =>
-      (
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }) as Record<
-          string,
-          string
-        >
-      )[c] as string,
-  );
-}
 
 // ============================================================
 // Extension registration

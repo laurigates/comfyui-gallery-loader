@@ -10,11 +10,17 @@
 
 import {
   applyStars,
+  escapeHTML,
+  fuzzyScore,
+  installLazyMedia,
+  isValidSort,
   nextRating,
   notify,
   postRating,
   type RatingAddress,
   ratingOf,
+  SORT_OPTIONS,
+  sortFiles,
   starsHTML,
   warnRating,
 } from "@laurigates/comfy-modal-kit";
@@ -38,6 +44,32 @@ const TYPES = ["input", "output", "temp", "path"] as const;
 
 // Some sensible mins. The grid is internally scrollable, so the user can
 // keep the node compact and still see thumbnails.
+// Persisted sort preference. Deliberately the SAME key the modal picker uses —
+// one choice across every surface. The option lists had to be converged first:
+// this grid offered size:asc / pixels:asc that the picker's validator rejected,
+// so a preference set here was silently dropped there with nothing to explain
+// it to the user.
+const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
+
+function loadSavedSort(): { key: string; dir: string } | null {
+  try {
+    const raw = localStorage.getItem(SORT_STORAGE_KEY);
+    if (!raw || !isValidSort(raw)) return null;
+    const [key, dir] = raw.split(":");
+    return key && dir ? { key, dir } : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSort(key: string, dir: string): void {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+  } catch {
+    // Private mode / disabled storage — non-fatal.
+  }
+}
+
 const MIN_NODE_W = 360;
 const MIN_NODE_H = 460;
 
@@ -202,7 +234,11 @@ interface GalleryState {
   selectedName: string;
 }
 
-function attachGallery(node: GalleryNode): void {
+// Exported as a test seam only — production reaches it through onNodeCreated
+// below. Mirrors image-picker.ts's openImagePicker, which exists for the same
+// reason: this module is otherwise pure side-effect registration with nothing
+// importable, and that is what left the inline grid with no JS coverage.
+export function attachGallery(node: GalleryNode): void {
   const found = node.widgets?.find((w) => w.name === "image");
   if (!found) return;
   // Bind a non-undefined alias so the nested render closures below see the
@@ -232,16 +268,7 @@ function attachGallery(node: GalleryNode): void {
         <div class="gl-bar">
             <div class="gl-chips"></div>
             <select class="gl-sort" title="Sort">
-                <option value="mtime:desc">Newest</option>
-                <option value="mtime:asc">Oldest</option>
-                <option value="name:asc">Name A→Z</option>
-                <option value="name:desc">Name Z→A</option>
-                <option value="size:desc">Largest file</option>
-                <option value="size:asc">Smallest file</option>
-                <option value="pixels:desc">Largest resolution</option>
-                <option value="pixels:asc">Smallest resolution</option>
-                <option value="rating:desc">Highest rating</option>
-                <option value="rating:asc">Lowest rating</option>
+                <!-- options injected from the kit's SORT_OPTIONS below -->
             </select>
             <button class="gl-icon gl-refresh" title="Refresh">⟳</button>
         </div>
@@ -281,6 +308,14 @@ function attachGallery(node: GalleryNode): void {
     selectedName: initial.name,
   };
 
+  // Restore the user's last-used sort so it persists across node creations,
+  // and matches whatever they picked in the modal picker.
+  const savedSort = loadSavedSort();
+  if (savedSort) {
+    state.sortKey = savedSort.key;
+    state.sortDir = savedSort.dir;
+  }
+
   const refs = {
     grid: root.querySelector(".gl-grid") as HTMLElement,
     status: root.querySelector(".gl-status") as HTMLElement,
@@ -292,11 +327,17 @@ function attachGallery(node: GalleryNode): void {
     refresh: root.querySelector(".gl-refresh") as HTMLElement,
     sort: root.querySelector(".gl-sort") as HTMLSelectElement,
   };
+  // Options come from the kit so both surfaces offer — and accept — the same
+  // ten, which is what makes sharing the :sort key safe.
+  refs.sort.innerHTML = SORT_OPTIONS.map(
+    (o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`,
+  ).join("");
   refs.sort.value = `${state.sortKey}:${state.sortDir}`;
   refs.sort.addEventListener("change", (e) => {
     const [key, dir] = (e.target as HTMLSelectElement).value.split(":");
     state.sortKey = key as string;
     state.sortDir = dir as string;
+    saveSort(key as string, dir as string);
     renderGrid();
   });
 
@@ -541,9 +582,22 @@ function attachGallery(node: GalleryNode): void {
       grid.appendChild(c);
     }
 
-    const sortedFiles = sortFiles(state.files, state.sortKey, state.sortDir);
+    // Fuzzy-rank while filtering (score order wins over the sort selection),
+    // matching the modal picker. A plain substring test made "clp" miss
+    // clip.mp4 here while finding it there.
+    let sortedFiles: ListingFile[];
+    if (q) {
+      const scored: { f: ListingFile; score: number }[] = [];
+      for (const f of state.files) {
+        const r = fuzzyScore(q, f.name);
+        if (r) scored.push({ f, score: r.score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      sortedFiles = scored.map((x) => x.f);
+    } else {
+      sortedFiles = sortFiles(state.files, state.sortKey, state.sortDir);
+    }
     for (const f of sortedFiles) {
-      if (q && !f.name.toLowerCase().includes(q)) continue;
       const c = document.createElement("div");
       c.className = "gl-card is-file";
       c.dataset.name = f.name;
@@ -623,71 +677,20 @@ function attachGallery(node: GalleryNode): void {
 
   // Use IntersectionObserver to defer thumbnail loading until visible.
   // Cheap and self-contained per re-render.
+  // `root: grid` is correct HERE and only here: `.gl-grid` has
+  // overflow-y:auto, so it IS the scroller. The modal picker's `.ip-grid` has
+  // no overflow clip and roots on the shell body instead. The kit takes the
+  // root as a required parameter so neither call site can drift into the
+  // other's answer.
+  let disposeLazyThumbs: (() => void) | null = null;
+
   function installLazyThumbs(grid: HTMLElement): void {
-    const imgs = grid.querySelectorAll("img[data-src]");
-    if (!imgs.length) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          if (!e.isIntersecting) continue;
-          const im = e.target as HTMLImageElement;
-          const src = im.dataset.src;
-          if (src) {
-            im.src = src;
-            im.removeAttribute("data-src");
-          }
-          io.unobserve(im);
-        }
-      },
-      { root: grid, rootMargin: "200px" },
-    );
-    for (const im of imgs) io.observe(im);
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(grid, { root: grid, rootMargin: "200px" });
   }
 
   // First paint.
   renderControls();
   loadAndRender();
   updateSelectedFooter();
-}
-
-function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[] {
-  const mul = dir === "asc" ? 1 : -1;
-  const nameCmp = (a: ListingFile, b: ListingFile) =>
-    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-  const numCmp =
-    (extract: (f: ListingFile) => number | undefined) => (a: ListingFile, b: ListingFile) =>
-      (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
-  let cmp: (a: ListingFile, b: ListingFile) => number;
-  switch (key) {
-    case "name":
-      cmp = nameCmp;
-      break;
-    case "size":
-      cmp = numCmp((f) => f.size);
-      break;
-    case "pixels":
-      cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
-      break;
-    case "rating":
-      cmp = numCmp((f) => f.rating);
-      break;
-    default:
-      cmp = numCmp((f) => f.mtime);
-      break;
-  }
-  // Copy so we don't mutate the cached listing.
-  return [...files].sort((a, b) => mul * cmp(a, b));
-}
-
-function escapeHTML(s: unknown): string {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) =>
-      (
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }) as Record<
-          string,
-          string
-        >
-      )[c] as string,
-  );
 }

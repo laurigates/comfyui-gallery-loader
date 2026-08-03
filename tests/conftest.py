@@ -47,6 +47,20 @@ for _sub in ("Image", "ImageOps", "ImageSequence"):
 # aiohttp.web — gallery_loader uses `from aiohttp import web`.
 sys.modules["aiohttp"].web = _ensure_stub("aiohttp.web")
 
+
+def _stub_json_response(body, status: int = 200, **kwargs):
+    """Stand in for aiohttp's web.json_response.
+
+    Without this, _StubModule hands back a MagicMock whose return value has no
+    inspectable body, so a handler can be CALLED but nothing about its response
+    can be asserted. Endpoint-level tests (the recursive listing) need the body,
+    so return a plain object carrying it.
+    """
+    return SimpleNamespace(status=status, _body=body)
+
+
+sys.modules["aiohttp"].web.json_response = _stub_json_response
+
 # ComfyUI internals
 _ensure_stub("folder_paths")
 _ensure_stub("node_helpers")

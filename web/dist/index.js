@@ -1,6 +1,53 @@
 /* web/dist bundle built by bun from src/ in this repository (see package.json). Inlines @laurigates/comfy-modal-kit (MIT) - a first-party library by the same publisher, published to npm with provenance attestation: https://www.npmjs.com/package/@laurigates/comfy-modal-kit */
 
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
+function installBackGuard(onBack) {
+  if (typeof window === "undefined" || typeof history === "undefined")
+    return () => {};
+  let armed = false;
+  let disposed = false;
+  const arm = () => {
+    history.pushState({ cmpBackGuard: true }, "");
+    armed = true;
+  };
+  const dispose = () => {
+    if (disposed)
+      return;
+    disposed = true;
+    window.removeEventListener("popstate", onPop);
+    if (armed) {
+      armed = false;
+      history.back();
+    }
+  };
+  function onPop() {
+    armed = false;
+    let handled = false;
+    try {
+      handled = onBack();
+    } catch (e) {
+      console.error("[comfy-modal-kit] back handler threw", e);
+    }
+    if (handled && !disposed) {
+      arm();
+      return;
+    }
+    dispose();
+  }
+  arm();
+  window.addEventListener("popstate", onPop);
+  return dispose;
+}
+var ENTITIES = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;"
+};
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ENTITIES[c]);
+}
 var KEY = Symbol.for("laurigates.comfyModalKit");
 function getKit() {
   const g = globalThis;
@@ -23,6 +70,46 @@ function getKit() {
   if (!kit.modalChrome)
     kit.modalChrome = [];
   return kit;
+}
+var SORT_OPTIONS = [
+  { value: "mtime:desc", label: "Newest" },
+  { value: "mtime:asc", label: "Oldest" },
+  { value: "name:asc", label: "Name A→Z" },
+  { value: "name:desc", label: "Name Z→A" },
+  { value: "size:desc", label: "Largest file" },
+  { value: "size:asc", label: "Smallest file" },
+  { value: "pixels:desc", label: "Largest resolution" },
+  { value: "pixels:asc", label: "Smallest resolution" },
+  { value: "rating:desc", label: "Highest rating" },
+  { value: "rating:asc", label: "Lowest rating" }
+];
+var VALID_SORTS = new Set(SORT_OPTIONS.map((o) => o.value));
+function isValidSort(value) {
+  return VALID_SORTS.has(value);
+}
+function sortFiles(files, key, dir) {
+  const mul = dir === "asc" ? 1 : -1;
+  const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  const numCmp = (extract) => (a, b) => (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
+  let cmp;
+  switch (key) {
+    case "name":
+      cmp = nameCmp;
+      break;
+    case "size":
+      cmp = numCmp((f) => f.size);
+      break;
+    case "pixels":
+      cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
+      break;
+    case "rating":
+      cmp = numCmp((f) => f.rating);
+      break;
+    default:
+      cmp = numCmp((f) => f.mtime);
+      break;
+  }
+  return [...files].sort((a, b) => mul * cmp(a, b));
 }
 var CHROME_ATTR = "data-cmp-chrome";
 function setActiveModal(handle) {
@@ -349,6 +436,33 @@ function notify(opts) {
   }
   return { close, el: toast };
 }
+var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
+function installLazyMedia(container, opts) {
+  const noop = () => {};
+  if (typeof IntersectionObserver === "undefined")
+    return noop;
+  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
+  if (!els.length)
+    return noop;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting)
+        continue;
+      const el = e.target;
+      const src = el.dataset.src;
+      if (src) {
+        if (el.tagName === "VIDEO")
+          el.preload = "metadata";
+        el.src = src;
+        el.removeAttribute("data-src");
+      }
+      io.unobserve(el);
+    }
+  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
+  for (const el of els)
+    io.observe(el);
+  return () => io.disconnect();
+}
 function fuzzyScore(query, target) {
   if (!query)
     return { score: 0, matches: [] };
@@ -393,6 +507,28 @@ function fuzzyScore(query, target) {
     return null;
   score -= target.length * 0.01;
   return { score, matches };
+}
+function highlightMatches(target, matchIndices) {
+  const frag = document.createDocumentFragment();
+  if (!target)
+    return frag;
+  const set = new Set(matchIndices || []);
+  if (!set.size) {
+    frag.appendChild(document.createTextNode(target));
+    return frag;
+  }
+  for (let i = 0;i < target.length; i++) {
+    const ch = target[i];
+    if (set.has(i)) {
+      const m = document.createElement("span");
+      m.className = "cmp-match";
+      m.textContent = ch;
+      frag.appendChild(m);
+    } else {
+      frag.appendChild(document.createTextNode(ch));
+    }
+  }
+  return frag;
 }
 var MAX_RATING = 5;
 function ratingOf(f) {
@@ -722,6 +858,98 @@ function openModalShell(opts = {}) {
   }
   return controller;
 }
+var STYLE_ID3 = "cmp-overlay-style";
+var CSS3 = `
+.cmp-ov-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    touch-action: manipulation;
+}
+.cmp-ov-card {
+    background: #1c1c24;
+    border: 1px solid #33333f;
+    border-radius: 10px;
+    padding: 18px;
+    width: min(520px, calc(100% - 24px));
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.cmp-ov-title { font-size: 15px; font-weight: 600; color: #e8e8ec; }
+.cmp-ov-msg { font-size: 13px; color: #b8b8c0; line-height: 1.5; word-break: break-word; }
+.cmp-ov-input {
+    font-size: 16px;
+    padding: 10px 12px;
+    background: #12121a;
+    border: 1px solid #3a3a44;
+    border-radius: 6px;
+    color: #e8e8ec;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.cmp-ov-input:focus { outline: none; border-color: #6ba6ff; }
+.cmp-ov-err { font-size: 12px; color: #ff7a7a; min-height: 14px; }
+.cmp-ov-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.cmp-ov-btn {
+    font-size: 13px;
+    padding: 9px 16px;
+    border-radius: 6px;
+    border: 1px solid #3a3a44;
+    background: #2a2a36;
+    color: #d8d8dc;
+    cursor: pointer;
+    font-family: inherit;
+    min-height: 38px;
+}
+.cmp-ov-btn:hover { background: #3a3a4a; color: #fff; }
+.cmp-ov-primary { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+.cmp-ov-primary:hover { background: #3a4868; color: #fff; }
+.cmp-ov-danger { background: #4a2230; color: #ff9eb0; border-color: #78384a; }
+.cmp-ov-danger:hover { background: #5c2a3c; color: #fff; }
+`;
+function openShellOverlay(shell, opts = {}) {
+  ensureStyleOnce(STYLE_ID3, CSS3);
+  const backdrop = document.createElement("div");
+  backdrop.className = "cmp-ov-backdrop";
+  const card = document.createElement("div");
+  card.className = "cmp-ov-card";
+  backdrop.appendChild(card);
+  const onKey = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+    }
+  };
+  let closed = false;
+  function close() {
+    if (closed)
+      return;
+    closed = true;
+    document.removeEventListener("keydown", onKey, true);
+    document.addEventListener("keydown", shell._onKey, true);
+    backdrop.remove();
+  }
+  function dismiss() {
+    opts.onDismiss?.();
+    close();
+  }
+  backdrop.addEventListener("pointerdown", (e) => {
+    if (e.target === backdrop)
+      dismiss();
+  });
+  document.removeEventListener("keydown", shell._onKey, true);
+  document.addEventListener("keydown", onKey, true);
+  shell.dialog.appendChild(backdrop);
+  return { card, close };
+}
 function appendButtonWidget(node, label, onClick, opts = {}) {
   const prefix = opts.logPrefix ? `[${opts.logPrefix}]` : "[comfy-modal-kit]";
   try {
@@ -761,6 +989,23 @@ if (!document.querySelector(`link[href="${CSS_URL}"]`)) {
   document.head.appendChild(link);
 }
 var TYPES = ["input", "output", "temp", "path"];
+var SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
+function loadSavedSort() {
+  try {
+    const raw = localStorage.getItem(SORT_STORAGE_KEY);
+    if (!raw || !isValidSort(raw))
+      return null;
+    const [key, dir] = raw.split(":");
+    return key && dir ? { key, dir } : null;
+  } catch {
+    return null;
+  }
+}
+function saveSort(key, dir) {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+  } catch {}
+}
 var MIN_NODE_W = 360;
 var MIN_NODE_H = 460;
 app.registerExtension({
@@ -859,16 +1104,7 @@ function attachGallery(node) {
         <div class="gl-bar">
             <div class="gl-chips"></div>
             <select class="gl-sort" title="Sort">
-                <option value="mtime:desc">Newest</option>
-                <option value="mtime:asc">Oldest</option>
-                <option value="name:asc">Name A→Z</option>
-                <option value="name:desc">Name Z→A</option>
-                <option value="size:desc">Largest file</option>
-                <option value="size:asc">Smallest file</option>
-                <option value="pixels:desc">Largest resolution</option>
-                <option value="pixels:asc">Smallest resolution</option>
-                <option value="rating:desc">Highest rating</option>
-                <option value="rating:asc">Lowest rating</option>
+                <!-- options injected from the kit's SORT_OPTIONS below -->
             </select>
             <button class="gl-icon gl-refresh" title="Refresh">⟳</button>
         </div>
@@ -902,6 +1138,11 @@ function attachGallery(node) {
     files: [],
     selectedName: initial.name
   };
+  const savedSort = loadSavedSort();
+  if (savedSort) {
+    state.sortKey = savedSort.key;
+    state.sortDir = savedSort.dir;
+  }
   const refs = {
     grid: root.querySelector(".gl-grid"),
     status: root.querySelector(".gl-status"),
@@ -913,11 +1154,13 @@ function attachGallery(node) {
     refresh: root.querySelector(".gl-refresh"),
     sort: root.querySelector(".gl-sort")
   };
+  refs.sort.innerHTML = SORT_OPTIONS.map((o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`).join("");
   refs.sort.value = `${state.sortKey}:${state.sortDir}`;
   refs.sort.addEventListener("change", (e) => {
     const [key, dir] = e.target.value.split(":");
     state.sortKey = key;
     state.sortDir = dir;
+    saveSort(key, dir);
     renderGrid();
   });
   chipsEl.addEventListener("click", (e) => {
@@ -1132,10 +1375,20 @@ function attachGallery(node) {
       c.innerHTML = `<div class="gl-thumb gl-folder">\uD83D\uDCC1</div><div class="gl-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>`;
       grid.appendChild(c);
     }
-    const sortedFiles = sortFiles(state.files, state.sortKey, state.sortDir);
+    let sortedFiles;
+    if (q) {
+      const scored = [];
+      for (const f of state.files) {
+        const r = fuzzyScore(q, f.name);
+        if (r)
+          scored.push({ f, score: r.score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      sortedFiles = scored.map((x) => x.f);
+    } else {
+      sortedFiles = sortFiles(state.files, state.sortKey, state.sortDir);
+    }
     for (const f of sortedFiles) {
-      if (q && !f.name.toLowerCase().includes(q))
-        continue;
       const c = document.createElement("div");
       c.className = "gl-card is-file";
       c.dataset.name = f.name;
@@ -1208,56 +1461,14 @@ ${stamp}`;
         f.rating = prev;
     });
   }
+  let disposeLazyThumbs = null;
   function installLazyThumbs(grid) {
-    const imgs = grid.querySelectorAll("img[data-src]");
-    if (!imgs.length)
-      return;
-    const io = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (!e.isIntersecting)
-          continue;
-        const im = e.target;
-        const src = im.dataset.src;
-        if (src) {
-          im.src = src;
-          im.removeAttribute("data-src");
-        }
-        io.unobserve(im);
-      }
-    }, { root: grid, rootMargin: "200px" });
-    for (const im of imgs)
-      io.observe(im);
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(grid, { root: grid, rootMargin: "200px" });
   }
   renderControls();
   loadAndRender();
   updateSelectedFooter();
-}
-function sortFiles(files, key, dir) {
-  const mul = dir === "asc" ? 1 : -1;
-  const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-  const numCmp = (extract) => (a, b) => (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
-  let cmp;
-  switch (key) {
-    case "name":
-      cmp = nameCmp;
-      break;
-    case "size":
-      cmp = numCmp((f) => f.size);
-      break;
-    case "pixels":
-      cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
-      break;
-    case "rating":
-      cmp = numCmp((f) => f.rating);
-      break;
-    default:
-      cmp = numCmp((f) => f.mtime);
-      break;
-  }
-  return [...files].sort((a, b) => mul * cmp(a, b));
-}
-function escapeHTML(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 // src/image-picker.ts
@@ -1267,7 +1478,8 @@ var LIST_URL2 = "/gallery_loader/list";
 var FILE_URL = "/gallery_loader/file";
 var BASE_URL = "/gallery_loader/base";
 var RATING_URL2 = "/gallery_loader/rating";
-var STYLE_ID3 = "ip-style";
+var METADATA_URL = "/gallery_loader/metadata";
+var STYLE_ID4 = "ip-style";
 var DEBUG = (() => {
   try {
     return localStorage.getItem(`${EXT_NAME2}:debug`) === "1";
@@ -1291,21 +1503,67 @@ var IMG_EXTS = new Set([
   ".avif"
 ]);
 var VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"]);
-var SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
-var VALID_SORTS = new Set([
-  "mtime:desc",
-  "mtime:asc",
-  "name:asc",
-  "name:desc",
-  "size:desc",
-  "pixels:desc",
-  "rating:desc",
-  "rating:asc"
-]);
-function loadSavedSort() {
+var SORT_STORAGE_KEY2 = "comfyui-gallery-loader:sort";
+var SANDBOXED_TYPES = ["input", "output", "temp"];
+var VIEW_STORAGE_KEY = "comfyui-gallery-loader:view";
+var VIEW_PENDING_KEY = "comfyui-gallery-loader:view-pending";
+function loadSavedView() {
   try {
-    const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS.has(raw))
+    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
+      localStorage.removeItem(VIEW_PENDING_KEY);
+      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
+      return { mode: "folder", recovered: true };
+    }
+    return {
+      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
+      recovered: false
+    };
+  } catch {
+    return { mode: "folder", recovered: false };
+  }
+}
+function saveView(mode) {
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, mode);
+  } catch {}
+}
+function markFlatPending(pending) {
+  try {
+    if (pending)
+      localStorage.setItem(VIEW_PENDING_KEY, "1");
+    else
+      localStorage.removeItem(VIEW_PENDING_KEY);
+  } catch {}
+}
+var PINS_STORAGE_KEY = "comfyui-gallery-loader:pins";
+function pinKey(p) {
+  return `${p.type}:${p.subfolder}`;
+}
+function pinLabel(p) {
+  return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
+}
+function loadPins() {
+  try {
+    const raw = localStorage.getItem(PINS_STORAGE_KEY);
+    if (!raw)
+      return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr))
+      return [];
+    return arr.filter((p) => !!p && typeof p.subfolder === "string" && SANDBOXED_TYPES.includes(p.type));
+  } catch {
+    return [];
+  }
+}
+function savePins(pins) {
+  try {
+    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+  } catch {}
+}
+function loadSavedSort2() {
+  try {
+    const raw = localStorage.getItem(SORT_STORAGE_KEY2);
+    if (!raw || !isValidSort(raw))
       return null;
     const [key, dir] = raw.split(":");
     return { key, dir };
@@ -1314,9 +1572,9 @@ function loadSavedSort() {
     return null;
   }
 }
-function saveSort(key, dir) {
+function saveSort2(key, dir) {
   try {
-    localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+    localStorage.setItem(SORT_STORAGE_KEY2, `${key}:${dir}`);
   } catch (e) {
     console.warn(`[${EXT_NAME2}] could not save sort`, e);
   }
@@ -1537,8 +1795,63 @@ function videoSrcURL(type, subfolder, name, absDir) {
   const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
   return `/api/view?${p.toString()}`;
 }
+var META_FIELDS = [
+  { key: "positive", label: "Positive" },
+  { key: "negative", label: "Negative" },
+  { key: "model", label: "Model" },
+  { key: "seed", label: "Seed" },
+  { key: "steps", label: "Steps" },
+  { key: "cfg", label: "CFG" },
+  { key: "sampler", label: "Sampler" },
+  { key: "scheduler", label: "Scheduler" }
+];
+function metaRows(summary) {
+  const rows = [];
+  if (!summary || typeof summary !== "object")
+    return rows;
+  const bag = summary;
+  for (const { key, label } of META_FIELDS) {
+    const v = bag[key];
+    if (v === undefined || v === null)
+      continue;
+    const value = String(v);
+    if (!value.trim())
+      continue;
+    rows.push({ key, label, value });
+  }
+  return rows;
+}
+function metaClipboardText(rows) {
+  return rows.map((r) => `${r.label}: ${r.value}`).join(`
+`);
+}
+async function fetchMetadata(type, subfolder, name, absDir) {
+  const p = new URLSearchParams;
+  if (type === "path") {
+    p.set("path", joinAbs(absDir, name));
+  } else {
+    p.set("type", type);
+    p.set("subfolder", subfolder);
+    p.set("name", name);
+  }
+  const r = await fetch(`${METADATA_URL}?${p.toString()}`);
+  let data = {};
+  try {
+    data = await r.json();
+  } catch {}
+  if (!r.ok || !data.ok) {
+    throw new Error(data.error || `HTTP ${r.status}`);
+  }
+  return {
+    format: data.format || "",
+    source: data.source || "none",
+    summary: data.summary || {},
+    raw: data.raw || {},
+    truncated: !!data.truncated
+  };
+}
 async function openImagePicker(widget, node, opts) {
-  ensureStyleOnce(STYLE_ID3, PICKER_CSS);
+  ensureStyleOnce(STYLE_ID4, PICKER_CSS);
   const kind = opts.kind;
   const mode = opts.mode || "file";
   const extensions = Array.isArray(opts.extensions) ? opts.extensions : null;
@@ -1555,12 +1868,25 @@ async function openImagePicker(widget, node, opts) {
     sortDir: "desc",
     query: "",
     didInitialScroll: false,
-    extensionsParam: null
+    extensionsParam: null,
+    viewMode: "folder"
   };
-  const savedSort = loadSavedSort();
+  const savedSort = loadSavedSort2();
   if (savedSort) {
     state.sortKey = savedSort.key;
     state.sortDir = savedSort.dir;
+  }
+  const savedView = loadSavedView();
+  state.viewMode = savedView.mode;
+  function isFlat() {
+    return state.viewMode === "flat" && mode !== "directory" && SANDBOXED_TYPES.includes(state.type);
+  }
+  function fileSub(f) {
+    const sp = f.subpath || "";
+    if (!sp)
+      return state.subfolder;
+    const base = state.subfolder.replace(/\/+$/, "");
+    return base ? `${base}/${sp}` : sp;
   }
   let initialSnapshot;
   if (kind === "loadimage") {
@@ -1591,7 +1917,27 @@ async function openImagePicker(widget, node, opts) {
     width: "min(1100px, calc(100vw - 16px))",
     height: "min(88vh, 820px)",
     footerLeftHTML,
-    footerRightHTML: '<span class="ip-count"></span>'
+    footerRightHTML: '<span class="ip-count"></span>',
+    onClose: () => {
+      disposeBackGuard?.();
+      disposeBackGuard = null;
+    }
+  });
+  let disposeBackGuard = null;
+  function canGoUp() {
+    return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
+  }
+  disposeBackGuard = installBackGuard(() => {
+    if (modal.dialog.querySelector(".cmp-ov-backdrop")) {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      return true;
+    }
+    if (canGoUp()) {
+      navigateUp();
+      return true;
+    }
+    modal.close();
+    return false;
   });
   let tabsEl = null;
   if (kind === "loadimage") {
@@ -1612,26 +1958,82 @@ async function openImagePicker(widget, node, opts) {
   const sortEl = document.createElement("select");
   sortEl.className = "ip-control";
   sortEl.title = "Sort";
-  sortEl.innerHTML = `
-        <option value="mtime:desc">Newest</option>
-        <option value="mtime:asc">Oldest</option>
-        <option value="name:asc">Name A→Z</option>
-        <option value="name:desc">Name Z→A</option>
-        <option value="size:desc">Largest file</option>
-        <option value="pixels:desc">Highest resolution</option>
-        <option value="rating:desc">Highest rating</option>
-        <option value="rating:asc">Lowest rating</option>
-    `;
+  sortEl.innerHTML = SORT_OPTIONS.map((o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`).join("");
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
   const refreshEl = document.createElement("button");
   refreshEl.type = "button";
   refreshEl.className = "ip-control ip-icon";
   refreshEl.title = "Refresh";
   refreshEl.textContent = "⟳";
-  modal.toolbarEl.append(crumbsEl, sortEl, refreshEl);
+  let viewToggleEl = null;
+  if (kind === "loadimage" && mode !== "directory") {
+    viewToggleEl = document.createElement("button");
+    viewToggleEl.type = "button";
+    viewToggleEl.className = "ip-control ip-icon ip-view-toggle";
+    viewToggleEl.title = "Flat view (all subfolders)";
+    viewToggleEl.textContent = "≣";
+  }
+  let pinToggleEl = null;
+  let pinsEl = null;
+  if (kind === "loadimage") {
+    pinToggleEl = document.createElement("button");
+    pinToggleEl.type = "button";
+    pinToggleEl.className = "ip-control ip-icon ip-pin-toggle";
+    pinToggleEl.title = "Pin this folder";
+    pinToggleEl.textContent = "\uD83D\uDCCC";
+    pinsEl = document.createElement("div");
+    pinsEl.className = "ip-pins";
+  }
+  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], ...pinToggleEl ? [pinToggleEl] : [], sortEl, refreshEl, ...pinsEl ? [pinsEl] : []);
+  function renderPins() {
+    if (!pinToggleEl || !pinsEl)
+      return;
+    const pins = loadPins();
+    const canPin = SANDBOXED_TYPES.includes(state.type);
+    pinToggleEl.style.display = canPin ? "" : "none";
+    const herePinned = canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+    pinToggleEl.classList.toggle("is-active", herePinned);
+    pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    pinsEl.innerHTML = "";
+    pinsEl.style.display = pins.length ? "" : "none";
+    for (const p of pins) {
+      const chip = document.createElement("span");
+      chip.className = "ip-pin-chip";
+      chip.dataset.pinType = p.type;
+      chip.dataset.pinSub = p.subfolder;
+      if (p.type === state.type && p.subfolder === state.subfolder) {
+        chip.classList.add("is-current");
+      }
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "ip-pin-go";
+      go.title = `Go to ${pinLabel(p)}`;
+      go.textContent = `\uD83D\uDCCC ${pinLabel(p)}`;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "ip-pin-x";
+      x.title = `Unpin ${pinLabel(p)}`;
+      x.textContent = "✕";
+      chip.append(go, x);
+      pinsEl.appendChild(chip);
+    }
+  }
+  function renderViewToggle() {
+    if (!viewToggleEl)
+      return;
+    const ok = SANDBOXED_TYPES.includes(state.type);
+    viewToggleEl.style.display = ok ? "" : "none";
+    viewToggleEl.classList.toggle("is-active", isFlat());
+    viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
+  }
   const gridEl = document.createElement("div");
   gridEl.className = "ip-grid";
   modal.bodyEl.appendChild(gridEl);
+  let renderedFiles = [];
+  function fileOfCard(card) {
+    const idx = Number(card.dataset.idx);
+    return Number.isInteger(idx) ? renderedFiles[idx] ?? null : null;
+  }
   const countEl = modal.footerEl.querySelector(".ip-count");
   function setCount(visible, total) {
     if (!countEl)
@@ -1658,10 +2060,48 @@ async function openImagePicker(widget, node, opts) {
     const [k, d] = sortEl.value.split(":");
     state.sortKey = k;
     state.sortDir = d;
-    saveSort(k, d);
+    saveSort2(k, d);
     renderGrid();
   });
   refreshEl.addEventListener("click", () => loadAndRender());
+  pinToggleEl?.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const cur = { type: state.type, subfolder: state.subfolder };
+    const pins = loadPins();
+    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
+    if (next.length === pins.length)
+      next.push(cur);
+    savePins(next);
+    renderPins();
+  });
+  pinsEl?.addEventListener("click", (e) => {
+    const t = e.target;
+    const chip = t.closest("[data-pin-type]");
+    if (!chip)
+      return;
+    const type = chip.dataset.pinType;
+    if (!SANDBOXED_TYPES.includes(type))
+      return;
+    const pin = { type, subfolder: chip.dataset.pinSub || "" };
+    if (t.closest(".ip-pin-x")) {
+      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
+      renderPins();
+      return;
+    }
+    if (pin.type === state.type && pin.subfolder === state.subfolder)
+      return;
+    state.type = pin.type;
+    state.subfolder = pin.subfolder;
+    loadAndRender();
+  });
+  viewToggleEl?.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
+    saveView(state.viewMode);
+    loadAndRender();
+  });
   if (tabsEl) {
     tabsEl.addEventListener("click", (e) => {
       const b = e.target.closest("[data-type]");
@@ -1694,13 +2134,17 @@ async function openImagePicker(widget, node, opts) {
     const row = star.parentElement;
     if (!card || !row)
       return;
+    const f = fileOfCard(card);
+    if (!f)
+      return;
     const cur = Number(row.dataset.rating || "0");
-    setStarRating(card.dataset.name, row, nextRating(cur, Number(star.dataset.val)));
+    setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
   });
   gridEl.addEventListener("click", (e) => {
-    if (e.target.closest(".ip-star"))
+    const target = e.target;
+    if (target.closest(".ip-star"))
       return;
-    const card = e.target.closest(".ip-card");
+    const card = target.closest(".ip-card");
     if (!card)
       return;
     if (card.classList.contains("is-up")) {
@@ -1714,26 +2158,147 @@ async function openImagePicker(widget, node, opts) {
     if (card.classList.contains("is-file")) {
       if (mode === "directory")
         return;
-      commitFile(card.dataset.name, card.dataset.ext || "");
+      if (target.closest(".ip-info")) {
+        e.stopPropagation();
+        const info = fileOfCard(card);
+        if (info)
+          openMetadata(info);
+        return;
+      }
+      const subEl = target.closest(".ip-subpath");
+      if (subEl?.dataset.sub !== undefined) {
+        e.stopPropagation();
+        state.viewMode = "folder";
+        saveView("folder");
+        state.subfolder = subEl.dataset.sub || "";
+        loadAndRender();
+        return;
+      }
+      const f = fileOfCard(card);
+      if (f)
+        commitFile(f);
     }
   });
-  function setStarRating(name, row, next) {
+  const copyFeedback = new WeakMap;
+  function copyInto(btn, text, restore) {
+    let fb = copyFeedback.get(btn);
+    if (!fb) {
+      fb = { seq: 0, timer: null };
+      copyFeedback.set(btn, fb);
+    }
+    const slot = fb;
+    const seq = ++slot.seq;
+    if (slot.timer !== null) {
+      clearTimeout(slot.timer);
+      slot.timer = null;
+    }
+    copyTextToClipboard(text).then((ok) => {
+      if (slot.seq !== seq)
+        return;
+      btn.textContent = ok ? "Copied ✓" : "Copy failed";
+      btn.classList.toggle("is-copied", ok);
+      slot.timer = setTimeout(() => {
+        slot.timer = null;
+        btn.textContent = restore;
+        btn.classList.remove("is-copied");
+      }, 1500);
+    });
+  }
+  async function openMetadata(f) {
+    let live = true;
+    const ov = openShellOverlay(modal, {
+      onDismiss: () => {
+        live = false;
+      }
+    });
+    ov.card.classList.add("ip-meta-card");
+    const close = () => {
+      live = false;
+      ov.close();
+    };
+    const title = `Metadata — ${escapeHTML(f.name)}`;
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ip-meta-body"><div class="ip-meta-status">Reading metadata…</div></div>
+      <div class="cmp-ov-actions">
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    let data;
+    try {
+      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+    } catch (e) {
+      close();
+      console.error(`[${EXT_NAME2}] metadata read failed:`, e);
+      notify({
+        severity: "error",
+        summary: "Metadata read failed",
+        detail: String(e?.message ?? e)
+      });
+      return;
+    }
+    if (!live)
+      return;
+    const rows = metaRows(data.summary);
+    const rawKeys = Object.keys(data.raw);
+    const srcLabel = data.source === "comfyui" ? "ComfyUI" : data.source === "a1111" ? "A1111" : "no generation data";
+    const rowsHTML = rows.map((r, i) => `
+        <div class="ip-meta-row">
+          <div class="ip-meta-k">${escapeHTML(r.label)}</div>
+          <div class="ip-meta-v">${escapeHTML(r.value)}</div>
+          <button type="button" class="ip-meta-copy" data-copy-row="${i}">Copy</button>
+        </div>`).join("");
+    const emptyHTML = rows.length ? "" : `<div class="ip-meta-empty">${rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."}</div>`;
+    const rawJSON = JSON.stringify(data.raw, null, 2);
+    const rawHTML = rawKeys.length ? `
+        <details class="ip-meta-raw">
+          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
+          <pre>${escapeHTML(rawJSON)}</pre>
+          <button type="button" class="ip-meta-copy" data-copy-raw>Copy JSON</button>
+        </details>` : "";
+    const noteHTML = data.truncated ? `<div class="ip-meta-note">Some values were truncated by the server.</div>` : "";
+    const copyAll = rows.length ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>` : "";
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ip-meta-body">
+        <div class="ip-meta-src">${escapeHTML(srcLabel)}${data.format ? `<span class="ip-meta-fmt">${escapeHTML(data.format)}</span>` : ""}</div>
+        ${emptyHTML}
+        ${rowsHTML}
+        ${noteHTML}
+        ${rawHTML}
+      </div>
+      <div class="cmp-ov-actions">
+        ${copyAll}
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    for (const btn of ov.card.querySelectorAll("[data-copy-row]")) {
+      const row = rows[Number(btn.dataset.copyRow)];
+      const label = btn.textContent || "Copy";
+      if (row)
+        btn.addEventListener("click", () => copyInto(btn, row.value, label));
+    }
+    const rawBtn = ov.card.querySelector("[data-copy-raw]");
+    const rawLabel = rawBtn?.textContent || "Copy JSON";
+    rawBtn?.addEventListener("click", () => copyInto(rawBtn, rawJSON, rawLabel));
+    const allBtn = ov.card.querySelector("[data-copy-all]");
+    const allLabel = allBtn?.textContent || "Copy all";
+    allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
+  }
+  function setStarRating(f, row, next) {
     const prev = Number(row.dataset.rating || "0");
     applyStars(row, next);
-    const f = state.files.find((x) => x.name === name);
-    if (f)
-      f.rating = next;
+    f.rating = next;
     const addr = {
       type: state.type,
-      subfolder: state.subfolder,
+      subfolder: fileSub(f),
       absDir: state.absPath,
-      name
+      name: f.name
     };
     postRating(RATING_URL2, addr, next).then((confirmed) => {
       if (confirmed !== next) {
         applyStars(row, confirmed);
-        if (f)
-          f.rating = confirmed;
+        f.rating = confirmed;
       }
     }).catch((e) => {
       warnRating(EXT_NAME2, e);
@@ -1743,8 +2308,7 @@ async function openImagePicker(widget, node, opts) {
         detail: String(e?.message ?? e)
       });
       applyStars(row, prev);
-      if (f)
-        f.rating = prev;
+      f.rating = prev;
     });
   }
   function navigateUp() {
@@ -1813,6 +2377,8 @@ async function openImagePicker(widget, node, opts) {
     } else {
       p.set("type", state.type);
       p.set("subfolder", state.subfolder);
+      if (isFlat())
+        p.set("recursive", "1");
     }
     if (state.extensionsParam?.length) {
       p.set("extensions", state.extensionsParam.join(","));
@@ -1822,8 +2388,11 @@ async function openImagePicker(widget, node, opts) {
   async function loadAndRender() {
     renderTabs();
     renderCrumbs();
+    renderViewToggle();
+    renderPins();
     modal.setBusy(true);
     modal.setStatus("Loading…");
+    markFlatPending(isFlat());
     try {
       const r = await fetch(buildListingURL());
       if (!r.ok)
@@ -1834,6 +2403,13 @@ async function openImagePicker(widget, node, opts) {
       state.dirs = data.dirs || [];
       state.files = data.files || [];
       modal.setStatus(data.exists ? "" : "Directory not found.");
+      if (data.truncated) {
+        notify({
+          severity: "warn",
+          summary: `Showing the newest ${state.files.length}`,
+          detail: "This folder has more files than the listing returns; older ones are not shown."
+        });
+      }
     } catch (e) {
       console.error(`[${EXT_NAME2}] list failed:`, e);
       modal.setStatus(`Error: ${e.message}`);
@@ -1842,6 +2418,7 @@ async function openImagePicker(widget, node, opts) {
     }
     modal.setBusy(false);
     renderGrid();
+    markFlatPending(false);
   }
   function thumbForFile(f) {
     const ext = (f.ext || "").toLowerCase();
@@ -1854,18 +2431,20 @@ async function openImagePicker(widget, node, opts) {
       }
       return { kind: "icon", text: "\uD83D\uDCC4" };
     }
+    const sub = fileSub(f);
     if (IMG_EXTS.has(ext)) {
-      return { kind: "img", src: imageThumbURL(state.type, state.subfolder, f) };
+      return { kind: "img", src: imageThumbURL(state.type, sub, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
-      return { kind: "video", src: videoSrcURL(state.type, state.subfolder, f.name) };
+      return { kind: "video", src: videoSrcURL(state.type, sub, f.name) };
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
   function renderGrid() {
     const q = state.query;
     gridEl.innerHTML = "";
-    const showUp = state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder;
+    const flat = isFlat();
+    const showUp = !flat && (state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder);
     if (showUp) {
       const up = document.createElement("div");
       up.className = "ip-card is-up";
@@ -1875,7 +2454,7 @@ async function openImagePicker(widget, node, opts) {
             `;
       gridEl.appendChild(up);
     }
-    for (const d of state.dirs) {
+    for (const d of flat ? [] : state.dirs) {
       if (q && !d.name.toLowerCase().includes(q))
         continue;
       const c = document.createElement("div");
@@ -1883,32 +2462,43 @@ async function openImagePicker(widget, node, opts) {
       c.dataset.name = d.name;
       c.innerHTML = `
                 <div class="ip-thumb ip-thumb-icon">\uD83D\uDCC1</div>
-                <div class="ip-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>
+                <div class="ip-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>
             `;
       gridEl.appendChild(c);
     }
     let files = state.files;
+    const nameMatches = new Map;
     if (q) {
       const scored = [];
       for (const f of files) {
-        const r = fuzzyScore(q, f.name);
-        if (r)
-          scored.push({ f, score: r.score });
+        const prefix = flat && f.subpath ? `${f.subpath}/` : "";
+        const r = fuzzyScore(q, `${prefix}${f.name}`);
+        if (!r)
+          continue;
+        scored.push({ f, score: r.score });
+        const off = prefix.length;
+        nameMatches.set(f, r.matches.map((i) => i - off).filter((i) => i >= 0));
       }
       scored.sort((a, b) => b.score - a.score);
       files = scored.map((x) => x.f);
     } else {
-      files = sortFiles2(files, state.sortKey, state.sortDir);
+      files = sortFiles(files, state.sortKey, state.sortDir);
     }
+    renderedFiles = files;
     let visible = 0;
     const inSameLocation = state.type === "path" ? state.absPath === initialSnapshot.subfolder : state.type === initialSnapshot.type && state.subfolder === initialSnapshot.subfolder;
-    for (const f of files) {
+    for (const [i, f] of files.entries()) {
       const c = document.createElement("div");
       c.className = "ip-card is-file";
+      c.dataset.idx = String(i);
       c.dataset.name = f.name;
       c.dataset.ext = (f.ext || "").toLowerCase();
-      if (inSameLocation && f.name === initialSnapshot.name) {
+      const selected = flat ? state.type === initialSnapshot.type && fileSub(f) === initialSnapshot.subfolder && f.name === initialSnapshot.name : inSameLocation && f.name === initialSnapshot.name;
+      if (selected) {
         c.classList.add("is-selected");
+      }
+      if (flat) {
+        c.classList.add("is-flat");
       }
       if (mode === "directory") {
         c.classList.add("is-inert");
@@ -1922,12 +2512,23 @@ ${when}` : `${f.name}
 ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ip-thumb-icon">${t.text}</div>`;
       const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
+      const infoBtn = mode !== "directory" && IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>` : "";
+      const subLabel = flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
-                <div class="ip-thumb">${thumbInner}</div>
-                <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
+                ${subLabel}
+                <div class="ip-thumb">${thumbInner}${infoBtn}</div>
+                <div class="ip-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
             `;
+      const hits = nameMatches.get(f);
+      if (hits?.length) {
+        const nameEl = c.querySelector(".ip-name");
+        if (nameEl) {
+          nameEl.textContent = "";
+          nameEl.appendChild(highlightMatches(f.name, hits));
+        }
+      }
       gridEl.appendChild(c);
       visible++;
     }
@@ -1943,7 +2544,7 @@ ${when}`;
     }
     setCount(visible, state.files.length);
     installLazyThumbs(gridEl);
-    if (!state.didInitialScroll) {
+    if (!state.didInitialScroll && !isFlat()) {
       state.didInitialScroll = true;
       scrollToSelected();
     }
@@ -1963,41 +2564,17 @@ ${when}`;
       return p;
     return `…${p.slice(-46)}`;
   }
-  let thumbObserver = null;
-  function installLazyThumbs(container) {
-    thumbObserver?.disconnect();
-    thumbObserver = null;
-    if (typeof IntersectionObserver === "undefined")
-      return;
-    const els = container.querySelectorAll("img[data-src], video[data-src]");
-    if (!els.length)
-      return;
-    const io = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (!e.isIntersecting)
-          continue;
-        const el = e.target;
-        const src = el.dataset.src;
-        if (src) {
-          if (el.tagName === "VIDEO") {
-            el.preload = "metadata";
-          }
-          el.src = src;
-          el.removeAttribute("data-src");
-        }
-        io.unobserve(el);
-      }
-    }, { root: modal.bodyEl, rootMargin: "300px" });
-    for (const el of els)
-      io.observe(el);
-    thumbObserver = io;
+  let disposeLazyThumbs = null;
+  function installLazyThumbs(rootEl) {
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(rootEl, { root: modal.bodyEl, rootMargin: "300px" });
   }
-  function commitFile(name, _ext) {
+  function commitFile(f) {
     let value;
     if (state.type === "path") {
-      value = joinAbs(state.absPath, name);
+      value = joinAbs(state.absPath, f.name);
     } else {
-      value = buildLoadImageValue(state.type, state.subfolder, name);
+      value = buildLoadImageValue(state.type, fileSub(f), f.name);
       const values = widget.options?.values;
       if (Array.isArray(values) && !values.includes(value)) {
         values.push(value);
@@ -2024,34 +2601,14 @@ ${when}`;
     node?.setDirtyCanvas?.(true, true);
     app2.graph?.setDirtyCanvas?.(true, true);
   }
-  function sortFiles2(files, key, dir) {
-    const mul = dir === "asc" ? 1 : -1;
-    const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, {
-      numeric: true,
-      sensitivity: "base"
-    });
-    const numCmp = (getter) => (a, b) => (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
-    let cmp;
-    switch (key) {
-      case "name":
-        cmp = nameCmp;
-        break;
-      case "size":
-        cmp = numCmp((f) => f.size);
-        break;
-      case "pixels":
-        cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
-        break;
-      case "rating":
-        cmp = numCmp((f) => f.rating);
-        break;
-      default:
-        cmp = numCmp((f) => f.mtime);
-        break;
-    }
-    return [...files].sort((a, b) => mul * cmp(a, b));
-  }
   loadAndRender();
+  if (savedView.recovered) {
+    notify({
+      severity: "warn",
+      summary: "Reopened in folder view",
+      detail: "The last flat-view load didn't finish, so the picker fell back to folder view."
+    });
+  }
 }
 var PICKER_CSS = `
 .ip-tabs {
@@ -2082,6 +2639,103 @@ var PICKER_CSS = `
     background: #2f3a52;
     color: #9ec6ff;
 }
+/* Shared active state for toolbar controls (the flat-view toggle). */
+.ip-control.is-active {
+    background: #2f3a52;
+    color: #9ec6ff;
+}
+/* ⓘ overlay button, pinned to the thumbnail's corner. */
+.ip-thumb { position: relative; }
+.ip-info {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #b8b8c0;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.ip-info:hover { background: #2f3a52; color: #9ec6ff; }
+
+/* Metadata overlay (in-dialog — a nested modal shell would dismiss the picker). */
+.ip-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }
+.ip-meta-body {
+    display: flex; flex-direction: column; gap: 8px;
+    overflow-y: auto; padding: 8px 0; -webkit-overflow-scrolling: touch;
+}
+.ip-meta-status { padding: 14px 2px; font-size: 12.5px; color: #888; font-style: italic; }
+.ip-meta-src {
+    display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: #9ec6ff;
+    text-transform: uppercase; letter-spacing: 0.5px;
+}
+.ip-meta-fmt { color: #777; text-transform: none; letter-spacing: 0; }
+.ip-meta-row { display: grid; grid-template-columns: 84px 1fr auto; gap: 8px; align-items: start; }
+.ip-meta-k {
+    padding-top: 7px; font-size: 11px; color: #8a8a92;
+    text-transform: uppercase; letter-spacing: 0.4px;
+}
+.ip-meta-v {
+    /* A long positive prompt scrolls inside its own box instead of pushing the
+       Copy buttons and the overlay actions off the card. Selectable: the card
+       is a reading surface. */
+    max-height: 7.5em; overflow-y: auto;
+    padding: 6px 8px; font-size: 12px; line-height: 1.45; color: #d8d8dc;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+.ip-meta-copy {
+    background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;
+    padding: 0 10px; font-size: 12px; cursor: pointer; font-family: inherit; min-height: 32px;
+}
+.ip-meta-copy:hover { background: #3a3a4a; color: #fff; }
+.ip-meta-copy.is-copied { background: #25402f; color: #8fe0a8; border-color: #37624a; }
+.ip-meta-empty { padding: 16px 2px; font-size: 12.5px; color: #777; font-style: italic; }
+.ip-meta-note { font-size: 11.5px; color: #c8a95c; }
+.ip-meta-raw > summary {
+    padding: 7px 0; font-size: 12px; color: #9ec6ff; cursor: pointer; min-height: 32px;
+}
+.ip-meta-raw pre {
+    margin: 4px 0 8px; padding: 8px; max-height: 30vh; overflow: auto;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-size: 11px; color: #b8b8c0; white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+/* Pinned-folder chips get their own toolbar row so they never crowd the
+   crumbs or get painted under the sort dropdown. */
+.ip-pins {
+    order: 10; flex-basis: 100%;
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.ip-pin-chip { display: inline-flex; align-items: stretch; }
+.ip-pin-go {
+    background: #23283a; color: #9ec6ff; border: 1px solid #3a4560; border-right: 0;
+    border-radius: 4px 0 0 4px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+    font-family: inherit; min-height: 32px; max-width: 45vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ip-pin-go:hover { background: #2f3a52; color: #fff; }
+.ip-pin-x {
+    background: #23283a; color: #667; border: 1px solid #3a4560;
+    border-radius: 0 4px 4px 0; padding: 6px 8px; font-size: 11px; cursor: pointer;
+    font-family: inherit; min-height: 32px; min-width: 28px;
+}
+.ip-pin-x:hover { background: #5c2a3c; color: #ff9eb0; }
+.ip-pin-chip.is-current .ip-pin-go { color: #ffd866; border-color: #78683a; }
+.ip-pin-chip.is-current .ip-pin-x { border-color: #78683a; }
+/* Flat view: the file's folder, above the thumbnail. Tapping it drops back to
+   folder view there. Fixed min-height so rows stay aligned when a top-level
+   file shows the inert "/" instead. */
+.ip-subpath {
+    display: block; width: 100%; text-align: left; box-sizing: border-box;
+    padding: 5px 8px; font-size: 10px; line-height: 1.3; min-height: 26px;
+    color: #8a9bb5; background: transparent; border: 0;
+    border-bottom: 1px solid #2a2a32;
+    white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; cursor: pointer;
+}
+.ip-subpath:hover { color: #9ec6ff; background: #23232e; }
+.ip-subpath.is-root { color: #555; cursor: default; }
+.ip-subpath.is-root:hover { background: transparent; color: #555; }
 .ip-crumbs {
     display: flex;
     flex-wrap: wrap;
@@ -2238,15 +2892,12 @@ var PICKER_CSS = `
     background: #3a4868;
     color: #fff;
 }
-/* Kept for parity with sampler-info's si-match. */
+/* Emitted by highlightMatches on the matched characters of a filename. */
 .cmp-match {
     color: #ffd866;
     font-weight: 700;
 }
 `;
-function escHTML(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-}
 try {
   app2.registerExtension({
     name: "comfy.gallery-loader.image-picker",
@@ -2258,7 +2909,7 @@ try {
       }
     },
     setup() {
-      ensureStyleOnce(STYLE_ID3, PICKER_CSS);
+      ensureStyleOnce(STYLE_ID4, PICKER_CSS);
       debug("image-picker setup running");
       const nodes = app2?.graph?._nodes;
       if (Array.isArray(nodes)) {
