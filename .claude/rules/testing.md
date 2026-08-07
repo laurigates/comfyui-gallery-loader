@@ -17,6 +17,14 @@ Pure backend helpers and pure frontend helpers carry real unit tests:
 | Python helpers (`_parse_extensions`, `_resolve_input_string`, etc.) | `tests/test_helpers.py` | pytest |
 | Python loader stub | `tests/test_init.py` | pytest |
 | JS fuzzy matcher (`fuzzyScore`, `fuzzyRank`) | `tests/js/modal-fuzzy.test.js` | Vitest |
+| Node detection (which classes/widgets the picker takes over, and the extension set it then requests) | `tests/js/video-loaders.test.js` | Vitest + jsdom |
+
+`video-loaders.test.js` drives the **registered** extension hooks
+(`beforeRegisterNodeDef` / `nodeCreated`) via the recording
+`tests/js/__mocks__/app.js`, rather than calling `openImagePicker` with
+hand-built opts — the detection itself is the thing under test, and a
+synthesised call would assert the harness instead. Every assertion in it has
+been shown to fail against a deliberately broken mechanism.
 
 DOM-dependent helpers (`highlightMatches`, modal-shell DOM builders) are
 currently uncovered — the smoke matrix below substitutes. Promoting
@@ -58,6 +66,9 @@ After non-trivial picker changes, verify in browser:
 | `VHS_LoadImagePath` | 📁 button opens path-mode modal at base dir; selecting commits absolute path. |
 | `VHS_LoadImagesPath` | 📁 button opens modal in directory mode; footer "Use this folder" commits absolute dir. |
 | `VHS_LoadVideoPath` | Same as image path, with video poster thumbs. |
+| `LoadVideo` (core) | Tabs; grid lists only videos. Output pick commits `clip.mp4 [output]` and executes. |
+| `VHS_LoadVideo` / `VHS_LoadVideoFFmpeg` | Same; a `.gif` renders as a still thumbnail, not a `<video>`. |
+| `VHS_LoadImages` | Directory mode inside the selected folder; "Use this folder" commits `frames` / `frames [output]`, and `.` at a root. |
 
 Keyboard navigation: Up, Down, PgUp, PgDn, Enter, Esc; type anywhere
 to filter; Backspace from anywhere.

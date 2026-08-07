@@ -21,7 +21,15 @@ Three entry points share one picker UI:
    Output / Temp**; commits annotated values (`foo.png [output]`)
    that core's `folder_paths.get_annotated_filepath` resolves
    transparently.
-3. **VHS path-loader integration** (`src/image-picker.ts`) —
+3. **Video + folder combo loaders** (`src/image-picker.ts`) — core
+   `LoadVideo` (detected by its `video_upload` flag, same defang path
+   as `image_upload`) and VHS's upload-flavour `VHS_LoadVideo`,
+   `VHS_LoadVideoFFmpeg`, `VHS_LoadImages` (detected by **class name** —
+   VHS builds those widgets from its own JS and leaves no marker on the
+   input spec). Same sandboxed tabs and annotated values; VHS resolves
+   them through `get_annotated_filepath` after its own `strip_path`.
+   `VHS_LoadImages` runs in directory mode.
+4. **VHS path-loader integration** (`src/image-picker.ts`) —
    detects nodes whose `STRING` widget has `vhs_path_extensions`
    (`VHS_LoadImagePath`, `VHS_LoadImagesPath`, `VHS_LoadVideoPath`,
    `VHS_LoadVideoFFmpegPath`). Adds a `📁 Browse` button that opens
@@ -51,7 +59,7 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | `src/image-picker.ts` | Modal picker for stock `LoadImage` + VHS path loaders (TS port; consumes `@laurigates/comfy-modal-kit`). |
 | `src/comfyui-shims.d.ts` | Types the `/scripts/app.js` runtime import via the `tsconfig.json` `paths` shim. |
 | `web/css/gallery_loader.css` | Inline-grid styles, copied into `web/dist/css/` by the build. (The modal injects its own `<style>` from `image-picker.ts`.) |
-| `web/dist/` | **Generated** build output (`bun run build`). Git-ignored; force-shipped to the registry via `[tool.comfy] includes`. |
+| `web/dist/` | **Generated** build output (`bun run build`) — **tracked in git**, and shipped to the registry via `[tool.comfy] includes`. Tracked deliberately: ComfyUI-Manager updates over git, and a `fetch && merge --ff-only` cannot pull an ignored path, so an ignored bundle updates "successfully" while ComfyUI keeps serving the stale one. Rebuild and commit it in the same commit as any `src/` change. |
 | `tsconfig.json` | TypeScript config: strict, `noEmit` (bun emits), `/scripts/app.js` `paths` shim. |
 | `knip.json` | Dead-export / unused-dependency checker config. |
 | `package.json` | Bun scripts (`build`, `typecheck`, `test`, `lint`, `knip`); runtime dep `@laurigates/comfy-modal-kit`; dev deps. |
@@ -145,6 +153,37 @@ handlers resolve the file OBJECT; every per-file address (thumbnail, rating,
 committed value, metadata, subpath-label target) goes through `fileSub()`, which
 joins the file's own `subpath` onto `state.subfolder`. `dataset.name` is
 display/debug only. Reverting either handler to a name lookup fails two tests.
+
+### The defang records WHICH upload flag it stripped
+
+`_origUploadFlag` holds `"image_upload"` or `"video_upload"`, not a boolean.
+It is the only thing left on a constructed widget that says whether the combo
+lists images or videos, and the two ask the backend for different extension
+sets — a boolean marker silently gives every video loader the image listing.
+Only those two flags are stripped: `audio_upload` and `mesh_upload` combos keep
+their native control, because the picker cannot serve them. There are tests for
+both halves.
+
+### VHS extension sets are copied, and can go stale
+
+`VHS_VIDEO_EXTS` mirrors VHS's own `video_extensions`
+(`videohelpersuite/load_video_nodes.py`: `webm, mp4, mkv, gif, mov`) so the grid
+offers exactly what the node's native dropdown does — deliberately **not** this
+pack's broader `VIDEO_EXTS`, which would list `.avi`/`.mpg` files the dropdown
+never shows. Note `.gif` is in VHS's list and in our `IMG_EXTS`, so it renders
+as a still `<img>` thumbnail; that is correct, not a bug. If VHS widens its
+list, ours goes stale silently — the symptom is a loadable file the grid won't
+show.
+
+### A sandboxed folder value uses `.` for a root, never `""`
+
+`VHS_LoadImages` commits through the same annotated grammar as a file, with the
+whole relative path in the name slot (`a/b [output]`). At a root the value is
+`.` — `get_annotated_filepath` joins it onto the base dir and `abspath`
+normalises it away, whereas `""` serializes as a blank widget value that reads
+as "nothing chosen". Note `folder_paths.annotated_filepath` strips **9**
+characters for `[output]`, i.e. the suffix *plus the preceding space*, so the
+space in `${rel} [${type}]` is load-bearing.
 
 ### Frontend hook is version-sensitive
 
@@ -278,6 +317,9 @@ After non-trivial frontend changes, verify in browser:
 | `VHS_LoadImagePath` | 📁 button opens path-mode modal at base dir; selecting a file commits absolute path. |
 | `VHS_LoadImagesPath` | 📁 button opens modal in directory mode; footer "Use this folder" commits the absolute dir. |
 | `VHS_LoadVideoPath` | Same as image path, with video poster thumbs. |
+| `LoadVideo` (core) | Tabs; grid shows only videos (no PNGs). Picking from Output commits `clip.mp4 [output]` and the node still executes. |
+| `VHS_LoadVideo` / `VHS_LoadVideoFFmpeg` | Same, and a `.gif` in the folder shows as a still thumbnail rather than a `<video>`. |
+| `VHS_LoadImages` | Opens inside the currently selected folder in directory mode; file cards inert; "Use this folder" commits `frames` (input) / `frames [output]`. At a root it commits `.` and the node still loads. |
 | Flat view (`≣`) | On a sandboxed tab, folds the current folder's subtree into one newest-first grid; each card labelled with its subpath. Tapping a label drops to folder view there. Picking a nested file commits `sub/dir/foo.png [output]`. Hidden on the path tab and in directory mode. Preference persists; a huge tree toasts "truncated". |
 | Flat view — same-named files | Two subfolders each holding `ComfyUI_00001_.png`: clicking each card commits ITS OWN path, and starring one rates only that one. |
 | Metadata (`ⓘ`) | On an image card (including on a path picker) → in-dialog overlay, painted immediately with "Reading metadata…", then a source line, one row per recognised field with its own Copy, Copy all, and a collapsed raw disclosure. No `ⓘ` on video cards. A read failure closes the overlay FIRST, then toasts. |
