@@ -140,8 +140,10 @@ const FLAT_FILES = [
 ];
 
 /** Records every request, and serves a flat listing when recursive=1. */
+const pinKeyOf = (p) => [p.kind, p.type, p.subfolder ?? "", p.name ?? ""].join(":");
+
 function stubFetchRecording(opts = {}) {
-  const calls = { list: [], posts: [] };
+  const calls = { list: [], posts: [], pins: [], store: [...(opts.pins ?? [])] };
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url, init) => {
@@ -151,6 +153,27 @@ function stubFetchRecording(opts = {}) {
           ok: true,
           status: 200,
           json: async () => ({ ok: true, base_path: "/", input_dir: "", output_dir: "" }),
+        };
+      }
+      // Pins are fetched on EVERY load (the chips show on every tab), so they
+      // must not land in `calls.list` — a listing assertion reading .at(-1)
+      // would otherwise be reading the pin request.
+      if (s.includes("/gallery_loader/pins")) {
+        if (opts.pinsFail) throw new Error("pin store unreachable");
+        if (init?.method === "POST") {
+          const body = JSON.parse(init.body);
+          calls.pins.push(body);
+          if (body.op === "add") calls.store = [...calls.store, { ...body.item, exists: true }];
+          else if (body.op === "remove") {
+            calls.store = calls.store.filter((p) => pinKeyOf(p) !== pinKeyOf(body.item));
+          } else if (body.op === "prune") {
+            calls.store = calls.store.filter((p) => p.exists !== false);
+          }
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, max: 200, pins: calls.store }),
         };
       }
       if (s.includes("/gallery_loader/rating")) {
@@ -420,7 +443,8 @@ describe("image picker flat (recursive) view", () => {
 // Pinned folders + match highlighting
 // ---------------------------------------------------------------------------
 
-const PINS_KEY = "comfyui-gallery-loader:pins";
+/** One resolved dir pin, as GET/POST /pins answer it. */
+const dirPin = (type, subfolder) => ({ kind: "dir", type, subfolder, exists: true });
 
 describe("image picker pinned folders", () => {
   beforeEach(() => {
@@ -429,35 +453,48 @@ describe("image picker pinned folders", () => {
     localStorage.clear();
   });
 
-  it("pins the current folder and reflects it on the toggle", async () => {
+  // The list is SERVER-side now (pins_store.py), shared with
+  // comfyui-image-browser and across devices; localStorage cannot span either.
+  // The toolbar toggle writes it with a delta, never a whole-list PUT.
+  it("posts an add delta for the current folder and reflects it on the toggle", async () => {
     stubInertObserver();
-    stubFetchRecording();
+    const calls = stubFetchRecording();
     await openWith({ value: "run/a.png" });
 
     document.querySelector(".ip-pin-toggle").click();
-    expect(JSON.parse(localStorage.getItem(PINS_KEY))).toEqual([
-      { type: "input", subfolder: "run" },
+    // Wait on the CHIP, not on the recorded POST: the stub records the body
+    // before the response is adopted, so a wait on calls.pins would run the
+    // assertions below against the pre-click render.
+    await vi.waitFor(() => {
+      if (!document.querySelector(".ip-pin-chip")) throw new Error("chip not painted");
+    });
+    expect(calls.pins).toEqual([
+      { op: "add", item: { kind: "dir", type: "input", subfolder: "run" } },
     ]);
     expect(document.querySelector(".ip-pin-toggle").classList.contains("is-active")).toBe(true);
     expect(document.querySelector(".ip-pin-go").textContent).toBe("📌 input/run");
   });
 
-  it("toggling again unpins", async () => {
+  it("toggling again posts a remove delta", async () => {
     stubInertObserver();
-    stubFetchRecording();
+    const calls = stubFetchRecording();
     await openWith({ value: "run/a.png" });
 
     const toggle = document.querySelector(".ip-pin-toggle");
     toggle.click();
+    await vi.waitFor(() => {
+      if (!document.querySelector(".ip-pin-chip")) throw new Error("chip not painted");
+    });
     toggle.click();
-    expect(JSON.parse(localStorage.getItem(PINS_KEY))).toEqual([]);
-    expect(document.querySelectorAll(".ip-pin-chip")).toHaveLength(0);
+    await vi.waitFor(() => {
+      if (document.querySelector(".ip-pin-chip")) throw new Error("chip not removed");
+    });
+    expect(calls.pins.map((p) => p.op)).toEqual(["add", "remove"]);
   });
 
   it("tapping a chip navigates there", async () => {
-    localStorage.setItem(PINS_KEY, JSON.stringify([{ type: "output", subfolder: "keep" }]));
     stubInertObserver();
-    const calls = stubFetchRecording();
+    const calls = stubFetchRecording({ pins: [dirPin("output", "keep")] });
     await openWith();
 
     document.querySelector(".ip-pin-go").click();
@@ -468,41 +505,59 @@ describe("image picker pinned folders", () => {
   });
 
   it("the ✕ unpins without navigating", async () => {
-    localStorage.setItem(PINS_KEY, JSON.stringify([{ type: "output", subfolder: "keep" }]));
     stubInertObserver();
-    const calls = stubFetchRecording();
+    const calls = stubFetchRecording({ pins: [dirPin("output", "keep")] });
     await openWith();
     const before = calls.list.length;
 
     document.querySelector(".ip-pin-x").click();
-    expect(JSON.parse(localStorage.getItem(PINS_KEY))).toEqual([]);
+    await vi.waitFor(() => {
+      if (!calls.pins.length) throw new Error("no delta posted");
+    });
+    expect(calls.pins).toEqual([
+      { op: "remove", item: { kind: "dir", type: "output", subfolder: "keep" } },
+    ]);
+    // No re-listing: unpinning is not navigation.
     expect(calls.list.length).toBe(before);
   });
 
-  it("drops persisted pins that name a non-sandboxed root", async () => {
+  it("drops stored pins that name a non-sandboxed root", async () => {
     // Pins address write-ish targets; a `path` pin has no stable meaning and
-    // would send type=path with a subfolder the backend cannot resolve.
-    localStorage.setItem(
-      PINS_KEY,
-      JSON.stringify([
-        { type: "path", subfolder: "/etc" },
-        { type: "temp", subfolder: "" },
-      ]),
-    );
+    // would send type=path with a subfolder the backend cannot resolve. The
+    // store rejects one (pins_store.normalize_pin / tests/test_pins_store.py),
+    // but the file is plain JSON that two packs and an ssh session can write,
+    // so the chip row keeps its own filter — an unfiltered chip would render a
+    // control the click handler refuses.
     stubInertObserver();
-    stubFetchRecording();
+    stubFetchRecording({
+      pins: [{ kind: "dir", type: "path", subfolder: "/etc", exists: true }, dirPin("temp", "")],
+    });
     await openWith();
 
     const labels = [...document.querySelectorAll(".ip-pin-go")].map((b) => b.textContent);
     expect(labels).toEqual(["📌 temp"]);
   });
 
-  it("survives corrupt stored pins", async () => {
-    localStorage.setItem(PINS_KEY, "{not json");
+  // Only FILE pins reach the grid; a dir pin stays a chip. Keeping the two
+  // apart is what lets the pinned tab render through the ordinary renderGrid.
+  it("renders a dir pin as a chip, never as a card", async () => {
     stubInertObserver();
-    stubFetchRecording();
+    stubFetchRecording({ pins: [dirPin("output", "keep")] });
+    await openWith();
+
+    expect(document.querySelectorAll(".ip-pin-chip")).toHaveLength(1);
+    const names = [...document.querySelectorAll(".ip-card.is-file")].map((c) => c.dataset.name);
+    expect(names).not.toContain("keep");
+  });
+
+  // A store that 500s or is unreachable must degrade to "no chips" — never
+  // throw out of a render and leave the picker half-painted.
+  it("survives an unreachable pin store", async () => {
+    stubInertObserver();
+    stubFetchRecording({ pinsFail: true });
     await expect(openWith()).resolves.toBeTruthy();
     expect(document.querySelectorAll(".ip-pin-chip")).toHaveLength(0);
+    expect(document.querySelectorAll(".ip-card.is-file").length).toBeGreaterThan(0);
   });
 
   it("omits the pin control for a path picker", async () => {

@@ -1535,30 +1535,79 @@ function markFlatPending(pending) {
       localStorage.removeItem(VIEW_PENDING_KEY);
   } catch {}
 }
-var PINS_STORAGE_KEY = "comfyui-gallery-loader:pins";
-function pinKey(p) {
-  return `${p.type}:${p.subfolder}`;
+var PINS_URL = "/gallery_loader/pins";
+var PINNED_TYPE = "pinned";
+function pinKeyOf(p) {
+  return `${p.kind ?? ""}:${p.type ?? ""}:${p.subfolder ?? ""}:${p.name ?? ""}`;
 }
 function pinLabel(p) {
-  return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
+  return `${p.type ?? ""}${p.subfolder ? `/${p.subfolder}` : ""}`;
 }
-function loadPins() {
-  try {
-    const raw = localStorage.getItem(PINS_STORAGE_KEY);
-    if (!raw)
-      return [];
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr))
-      return [];
-    return arr.filter((p) => !!p && typeof p.subfolder === "string" && SANDBOXED_TYPES.includes(p.type));
-  } catch {
-    return [];
-  }
+function pinsOfResponse(data) {
+  return Array.isArray(data.pins) ? data.pins : [];
 }
-function savePins(pins) {
+async function fetchPins() {
+  const r = await fetch(PINS_URL);
+  const data = await r.json();
+  if (!r.ok || !data?.ok)
+    throw new Error(data?.error || `HTTP ${r.status}`);
+  return pinsOfResponse(data);
+}
+async function postPinDelta(op, item) {
+  const body = { op };
+  if (item)
+    body.item = item;
+  const r = await fetch(PINS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  let data = {};
   try {
-    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+    data = await r.json();
   } catch {}
+  if (!r.ok || !data.ok)
+    throw new Error(data.error || `HTTP ${r.status}`);
+  return pinsOfResponse(data);
+}
+var LEGACY_PINS_STORAGE_KEY = "comfyui-gallery-loader:pins";
+var legacyPinMigration = null;
+async function runLegacyPinMigration() {
+  let raw = null;
+  try {
+    raw = localStorage.getItem(LEGACY_PINS_STORAGE_KEY);
+  } catch {
+    return;
+  }
+  if (!raw)
+    return;
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      for (const p of arr) {
+        const pin = p;
+        if (typeof pin?.subfolder !== "string")
+          continue;
+        if (!SANDBOXED_TYPES.includes(pin.type))
+          continue;
+        await postPinDelta("add", {
+          kind: "dir",
+          type: pin.type,
+          subfolder: pin.subfolder
+        });
+      }
+    }
+  } catch (e) {
+    console.warn(`[${EXT_NAME2}] pin migration failed — will retry next load`, e);
+    return;
+  }
+  try {
+    localStorage.removeItem(LEGACY_PINS_STORAGE_KEY);
+  } catch {}
+}
+function migrateLegacyPins() {
+  legacyPinMigration ??= runLegacyPinMigration();
+  return legacyPinMigration;
 }
 function loadSavedSort2() {
   try {
@@ -1973,6 +2022,12 @@ async function openImagePicker(widget, node, opts) {
     const base = state.subfolder.replace(/\/+$/, "");
     return base ? `${base}/${sp}` : sp;
   }
+  function fileType(f) {
+    return f.pinType ?? state.type;
+  }
+  function isPinned() {
+    return state.type === PINNED_TYPE;
+  }
   let initialSnapshot;
   if (kind === "loadimage") {
     state.extensionsParam = mode === "directory" ? [".__none__"] : extensions?.length ? extensions.map((e) => e.startsWith(".") ? e : `.${e}`) : null;
@@ -2036,12 +2091,13 @@ async function openImagePicker(widget, node, opts) {
   if (kind === "loadimage") {
     tabsEl = document.createElement("div");
     tabsEl.className = "ip-tabs";
-    for (const t of ["input", "output", "temp"]) {
+    const tabTypes = mode === "directory" ? [...SANDBOXED_TYPES] : [...SANDBOXED_TYPES, PINNED_TYPE];
+    for (const t of tabTypes) {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "ip-tab";
       b.dataset.type = t;
-      b.textContent = t;
+      b.textContent = t === PINNED_TYPE ? "\uD83D\uDCCC pinned" : t;
       tabsEl.appendChild(b);
     }
     modal.toolbarEl.appendChild(tabsEl);
@@ -2068,39 +2124,103 @@ async function openImagePicker(widget, node, opts) {
   }
   let pinToggleEl = null;
   let pinsEl = null;
+  let pruneEl = null;
   if (kind === "loadimage") {
     pinToggleEl = document.createElement("button");
     pinToggleEl.type = "button";
     pinToggleEl.className = "ip-control ip-icon ip-pin-toggle";
     pinToggleEl.title = "Pin this folder";
     pinToggleEl.textContent = "\uD83D\uDCCC";
+    pruneEl = document.createElement("button");
+    pruneEl.type = "button";
+    pruneEl.className = "ip-control ip-prune";
+    pruneEl.title = "Drop every pin that no longer resolves";
+    pruneEl.textContent = "Prune missing";
+    pruneEl.style.display = "none";
     pinsEl = document.createElement("div");
     pinsEl.className = "ip-pins";
   }
-  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], ...pinToggleEl ? [pinToggleEl] : [], sortEl, refreshEl, ...pinsEl ? [pinsEl] : []);
+  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], ...pinToggleEl ? [pinToggleEl] : [], ...pruneEl ? [pruneEl] : [], sortEl, refreshEl, ...pinsEl ? [pinsEl] : []);
+  let pinEntries = [];
+  let pinKeys = new Set;
+  function adoptPins(entries) {
+    pinEntries = entries;
+    pinKeys = new Set(entries.map(pinKeyOf));
+  }
+  async function refreshPins() {
+    try {
+      await migrateLegacyPins();
+      adoptPins(await fetchPins());
+    } catch (e) {
+      console.warn(`[${EXT_NAME2}] pin list unavailable`, e);
+      adoptPins([]);
+    }
+  }
+  async function applyPinDelta(op, item) {
+    try {
+      adoptPins(await postPinDelta(op, item));
+    } catch (e) {
+      console.warn(`[${EXT_NAME2}] pin ${op} failed`, e);
+      notify({
+        severity: "warn",
+        summary: op === "remove" ? "Pin not removed" : "Pin not saved",
+        detail: String(e?.message ?? e)
+      });
+      return false;
+    }
+    renderPins();
+    return true;
+  }
+  function filePinItem(f) {
+    return { kind: "file", type: fileType(f), subfolder: fileSub(f), name: f.name };
+  }
+  function isFilePinned(f) {
+    return pinKeys.has(pinKeyOf(filePinItem(f)));
+  }
+  async function toggleFilePin(f, btn) {
+    const item = filePinItem(f);
+    if (!await applyPinDelta(pinKeys.has(pinKeyOf(item)) ? "remove" : "add", item))
+      return;
+    if (isPinned()) {
+      applyPinnedListing();
+      renderGrid();
+      return;
+    }
+    const nowPinned = pinKeys.has(pinKeyOf(item));
+    btn.classList.toggle("is-pinned", nowPinned);
+    btn.title = nowPinned ? "Unpin this file" : "Pin this file";
+    btn.setAttribute("aria-pressed", String(nowPinned));
+  }
   function renderPins() {
     if (!pinToggleEl || !pinsEl)
       return;
-    const pins = loadPins();
+    const dirs = pinEntries.filter((p) => p.kind === "dir" && SANDBOXED_TYPES.includes(p.type ?? ""));
     const canPin = SANDBOXED_TYPES.includes(state.type);
     pinToggleEl.style.display = canPin ? "" : "none";
-    const herePinned = canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+    const herePinned = canPin && pinKeys.has(pinKeyOf({ kind: "dir", type: state.type, subfolder: state.subfolder }));
     pinToggleEl.classList.toggle("is-active", herePinned);
     pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    if (pruneEl) {
+      const anyMissing = pinEntries.some((p) => p.exists === false);
+      pruneEl.style.display = isPinned() && anyMissing ? "" : "none";
+    }
     pinsEl.innerHTML = "";
-    pinsEl.style.display = pins.length ? "" : "none";
-    for (const p of pins) {
+    pinsEl.style.display = dirs.length ? "" : "none";
+    for (const p of dirs) {
       const chip = document.createElement("span");
       chip.className = "ip-pin-chip";
-      chip.dataset.pinType = p.type;
-      chip.dataset.pinSub = p.subfolder;
-      if (p.type === state.type && p.subfolder === state.subfolder) {
+      chip.dataset.pinType = p.type ?? "";
+      chip.dataset.pinSub = p.subfolder ?? "";
+      if (p.type === state.type && (p.subfolder ?? "") === state.subfolder) {
         chip.classList.add("is-current");
+      }
+      if (p.exists === false) {
+        chip.classList.add("is-missing");
       }
       const go = document.createElement("button");
       go.type = "button";
       go.className = "ip-pin-go";
-      go.title = `Go to ${pinLabel(p)}`;
+      go.title = p.exists === false ? `${pinLabel(p)} — folder is missing` : `Go to ${pinLabel(p)}`;
       go.textContent = `\uD83D\uDCCC ${pinLabel(p)}`;
       const x = document.createElement("button");
       x.type = "button";
@@ -2160,13 +2280,8 @@ async function openImagePicker(widget, node, opts) {
   pinToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type))
       return;
-    const cur = { type: state.type, subfolder: state.subfolder };
-    const pins = loadPins();
-    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
-    if (next.length === pins.length)
-      next.push(cur);
-    savePins(next);
-    renderPins();
+    const item = { kind: "dir", type: state.type, subfolder: state.subfolder };
+    applyPinDelta(pinKeys.has(pinKeyOf(item)) ? "remove" : "add", item);
   });
   pinsEl?.addEventListener("click", (e) => {
     const t = e.target;
@@ -2176,17 +2291,24 @@ async function openImagePicker(widget, node, opts) {
     const type = chip.dataset.pinType;
     if (!SANDBOXED_TYPES.includes(type))
       return;
-    const pin = { type, subfolder: chip.dataset.pinSub || "" };
+    const item = { kind: "dir", type, subfolder: chip.dataset.pinSub || "" };
     if (t.closest(".ip-pin-x")) {
-      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
-      renderPins();
+      applyPinDelta("remove", item);
       return;
     }
-    if (pin.type === state.type && pin.subfolder === state.subfolder)
+    if (item.type === state.type && item.subfolder === state.subfolder)
       return;
-    state.type = pin.type;
-    state.subfolder = pin.subfolder;
+    state.type = item.type;
+    state.subfolder = item.subfolder;
     loadAndRender();
+  });
+  pruneEl?.addEventListener("click", () => {
+    applyPinDelta("prune").then((ok) => {
+      if (ok && isPinned()) {
+        applyPinnedListing();
+        renderGrid();
+      }
+    });
   });
   viewToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type))
@@ -2234,8 +2356,21 @@ async function openImagePicker(widget, node, opts) {
     setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
   });
   gridEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".ip-pin-file");
+    if (!btn)
+      return;
+    e.stopPropagation();
+    const card = btn.closest(".ip-card");
+    if (!card)
+      return;
+    const f = fileOfCard(card);
+    if (!f)
+      return;
+    toggleFilePin(f, btn);
+  });
+  gridEl.addEventListener("click", (e) => {
     const target = e.target;
-    if (target.closest(".ip-star"))
+    if (target.closest(".ip-star") || target.closest(".ip-pin-file"))
       return;
     const card = target.closest(".ip-card");
     if (!card)
@@ -2263,13 +2398,24 @@ async function openImagePicker(widget, node, opts) {
         e.stopPropagation();
         state.viewMode = "folder";
         saveView("folder");
+        if (subEl.dataset.pinType)
+          state.type = subEl.dataset.pinType;
         state.subfolder = subEl.dataset.sub || "";
         loadAndRender();
         return;
       }
       const f = fileOfCard(card);
-      if (f)
-        commitFile(f);
+      if (!f)
+        return;
+      if (f.pinExists === false) {
+        notify({
+          severity: "warn",
+          summary: "That file is gone",
+          detail: `${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}${f.name} no longer resolves. Unpin it with \uD83D\uDCCC, or use "Prune missing".`
+        });
+        return;
+      }
+      commitFile(f);
     }
   });
   const copyFeedback = new WeakMap;
@@ -2319,7 +2465,7 @@ async function openImagePicker(widget, node, opts) {
     ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
     let data;
     try {
-      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+      data = await fetchMetadata(fileType(f), fileSub(f), f.name, state.absPath);
     } catch (e) {
       close();
       console.error(`[${EXT_NAME2}] metadata read failed:`, e);
@@ -2383,7 +2529,7 @@ async function openImagePicker(widget, node, opts) {
     applyStars(row, next);
     f.rating = next;
     const addr = {
-      type: state.type,
+      type: fileType(f),
       subfolder: fileSub(f),
       absDir: state.absPath,
       name: f.name
@@ -2478,6 +2624,31 @@ async function openImagePicker(widget, node, opts) {
     }
     return `${LIST_URL2}?${p.toString()}`;
   }
+  function numOr0(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  function pinToListingFile(p) {
+    const name = String(p.name ?? "");
+    const dot = name.lastIndexOf(".");
+    return {
+      name,
+      ext: (p.ext ?? (dot > 0 ? name.slice(dot) : "")).toLowerCase(),
+      mtime: numOr0(p.mtime),
+      size: numOr0(p.size),
+      width: numOr0(p.width),
+      height: numOr0(p.height),
+      rating: numOr0(p.rating),
+      subpath: p.subfolder ?? "",
+      pinType: p.type ?? "",
+      pinExists: p.exists !== false
+    };
+  }
+  function applyPinnedListing() {
+    state.dirs = [];
+    state.files = pinEntries.filter((p) => p.kind === "file").map(pinToListingFile);
+    modal.setStatus("");
+  }
   async function loadAndRender() {
     renderTabs();
     renderCrumbs();
@@ -2486,36 +2657,48 @@ async function openImagePicker(widget, node, opts) {
     modal.setBusy(true);
     modal.setStatus("Loading…");
     markFlatPending(isFlat());
-    try {
-      const r = await fetch(buildListingURL());
-      if (!r.ok)
-        throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      if (!data.ok)
-        throw new Error(data.error || "listing failed");
-      state.dirs = data.dirs || [];
-      state.files = data.files || [];
-      modal.setStatus(data.exists ? "" : "Directory not found.");
-      if (data.truncated) {
-        notify({
-          severity: "warn",
-          summary: `Showing the newest ${state.files.length}`,
-          detail: "This folder has more files than the listing returns; older ones are not shown."
-        });
+    const pinsDone = refreshPins();
+    if (isPinned()) {
+      await pinsDone;
+      applyPinnedListing();
+    } else {
+      try {
+        const r = await fetch(buildListingURL());
+        if (!r.ok)
+          throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (!data.ok)
+          throw new Error(data.error || "listing failed");
+        state.dirs = data.dirs || [];
+        state.files = data.files || [];
+        modal.setStatus(data.exists ? "" : "Directory not found.");
+        if (data.truncated) {
+          notify({
+            severity: "warn",
+            summary: `Showing the newest ${state.files.length}`,
+            detail: "This folder has more files than the listing returns; older ones are not shown."
+          });
+        }
+      } catch (e) {
+        console.error(`[${EXT_NAME2}] list failed:`, e);
+        modal.setStatus(`Error: ${e.message}`);
+        state.dirs = [];
+        state.files = [];
       }
-    } catch (e) {
-      console.error(`[${EXT_NAME2}] list failed:`, e);
-      modal.setStatus(`Error: ${e.message}`);
-      state.dirs = [];
-      state.files = [];
+      await pinsDone;
     }
     modal.setBusy(false);
+    renderPins();
     renderGrid();
     markFlatPending(false);
   }
   function thumbForFile(f) {
     const ext = (f.ext || "").toLowerCase();
-    if (state.type === "path") {
+    if (f.pinExists === false) {
+      return { kind: "icon", text: "⚠" };
+    }
+    const type = fileType(f);
+    if (type === "path") {
       if (IMG_EXTS.has(ext)) {
         return { kind: "img", src: imageThumbURLAbs(state.absPath, f) };
       }
@@ -2526,10 +2709,10 @@ async function openImagePicker(widget, node, opts) {
     }
     const sub = fileSub(f);
     if (IMG_EXTS.has(ext)) {
-      return { kind: "img", src: imageThumbURL(state.type, sub, f) };
+      return { kind: "img", src: imageThumbURL(type, sub, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
-      return { kind: "video", src: videoSrcURL(state.type, sub, f.name) };
+      return { kind: "video", src: videoSrcURL(type, sub, f.name) };
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
@@ -2537,6 +2720,7 @@ async function openImagePicker(widget, node, opts) {
     const q = state.query;
     gridEl.innerHTML = "";
     const flat = isFlat();
+    const pinnedView = isPinned();
     const showUp = !flat && (state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder);
     if (showUp) {
       const up = document.createElement("div");
@@ -2586,7 +2770,7 @@ async function openImagePicker(widget, node, opts) {
       c.dataset.idx = String(i);
       c.dataset.name = f.name;
       c.dataset.ext = (f.ext || "").toLowerCase();
-      const selected = flat ? state.type === initialSnapshot.type && fileSub(f) === initialSnapshot.subfolder && f.name === initialSnapshot.name : inSameLocation && f.name === initialSnapshot.name;
+      const selected = flat || pinnedView ? fileType(f) === initialSnapshot.type && fileSub(f) === initialSnapshot.subfolder && f.name === initialSnapshot.name : inSameLocation && f.name === initialSnapshot.name;
       if (selected) {
         c.classList.add("is-selected");
       }
@@ -2596,6 +2780,10 @@ async function openImagePicker(widget, node, opts) {
       if (mode === "directory") {
         c.classList.add("is-inert");
       }
+      const missing = f.pinExists === false;
+      if (missing) {
+        c.classList.add("is-missing");
+      }
       const t = thumbForFile(f);
       const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
       const when = new Date(f.mtime * 1000).toLocaleString();
@@ -2604,12 +2792,19 @@ ${dims}
 ${when}` : `${f.name}
 ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ip-thumb-icon">${t.text}</div>`;
-      const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
-      const infoBtn = mode !== "directory" && IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>` : "";
-      const subLabel = flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
+      const stars = mode === "directory" || missing ? "" : starsHTML("ip", ratingOf(f));
+      const pinned = isFilePinned(f);
+      const pinBtn = mode !== "directory" && SANDBOXED_TYPES.includes(fileType(f)) ? `<button type="button" class="ip-pin-file${pinned ? " is-pinned" : ""}" aria-pressed="${pinned}" title="${pinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
+      const infoBtn = mode !== "directory" && !missing && IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>` : "";
+      const subLabel = pinnedView ? (() => {
+        const ft = fileType(f);
+        const sub = fileSub(f);
+        const label = sub ? `${ft}/${sub}` : `${ft}/`;
+        return `<button type="button" class="ip-subpath" data-sub="${escapeHTML(sub)}" data-pin-type="${escapeHTML(ft)}" title="Go to ${escapeHTML(label)}">${escapeHTML(label)}</button>`;
+      })() : flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
                 ${subLabel}
-                <div class="ip-thumb">${thumbInner}${infoBtn}</div>
+                <div class="ip-thumb">${thumbInner}${infoBtn}${pinBtn}</div>
                 <div class="ip-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
@@ -2629,7 +2824,7 @@ ${when}`;
     if (empty) {
       const el = document.createElement("div");
       el.className = "ip-empty";
-      el.textContent = mode === "directory" ? "No subfolders here." : "No matching files in this directory.";
+      el.textContent = mode === "directory" ? "No subfolders here." : pinnedView ? "Nothing pinned yet — tap \uD83D\uDCCC on a card to pin it." : "No matching files in this directory.";
       gridEl.appendChild(el);
     }
     if (useFolderEl) {
@@ -2664,10 +2859,11 @@ ${when}`;
   }
   function commitFile(f) {
     let value;
-    if (state.type === "path") {
+    const type = fileType(f);
+    if (type === "path") {
       value = joinAbs(state.absPath, f.name);
     } else {
-      value = buildLoadImageValue(state.type, fileSub(f), f.name);
+      value = buildLoadImageValue(type, fileSub(f), f.name);
       const values = widget.options?.values;
       if (Array.isArray(values) && !values.includes(value)) {
         values.push(value);
@@ -2756,6 +2952,35 @@ var PICKER_CSS = `
     font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit;
 }
 .ip-info:hover { background: #2f3a52; color: #9ec6ff; }
+/* \uD83D\uDCCC file-pin toggle, mirroring ⓘ in the thumbnail's other corner. */
+.ip-pin-file {
+    position: absolute; top: 4px; left: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #6a6a76;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;
+    filter: grayscale(1); opacity: 0.75;
+}
+.ip-pin-file:hover { background: #2f3a52; filter: none; opacity: 1; }
+.ip-pin-file.is-pinned {
+    background: #3a3320; border-color: #78683a; filter: none; opacity: 1;
+}
+/* A pin whose file no longer resolves: dimmed, and inert to a commit — the tap
+   handler refuses it and points at \uD83D\uDCCC / "Prune missing" instead. Asserted
+   through getComputedStyle in tests/js/pins.test.js, so it must stay a class
+   rule with no min()/calc() (jsdom drops those values). */
+.ip-card.is-missing {
+    opacity: 0.45;
+    cursor: default;
+    border-style: dashed;
+}
+.ip-card.is-missing:hover { border-color: #2a2a32; transform: none; }
+.ip-pin-chip.is-missing .ip-pin-go { opacity: 0.5; text-decoration: line-through; }
+.ip-prune {
+    color: #c8a95c;
+    border-color: #5a4a2a;
+}
+.ip-prune:hover { background: #3a3320; color: #ffd866; }
 
 /* Metadata overlay (in-dialog — a nested modal shell would dismiss the picker). */
 .ip-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }

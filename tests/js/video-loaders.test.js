@@ -41,6 +41,12 @@ function stubFetchRecording() {
           json: async () => ({ ok: true, base_path: "/", input_dir: "", output_dir: "" }),
         };
       }
+      // The pin list is fetched on every load (the chips show on every tab).
+      // Kept out of `calls.list` so a listing assertion reading .at(-1) is not
+      // silently reading the pin request instead.
+      if (s.includes("/gallery_loader/pins")) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins: [] }) };
+      }
       calls.list.push(s);
       return {
         ok: true,
@@ -85,8 +91,10 @@ async function openVia(node) {
   const btn = node.buttons.at(-1);
   if (!btn) throw new Error("no button widget was appended");
   btn.callback();
+  // `.ip-grid` exists the instant the shell opens, so waiting on it alone
+  // returns before the listing has painted — wait for the grid's CONTENT.
   await vi.waitFor(() => {
-    if (!document.querySelector(".ip-grid")) throw new Error("picker did not open");
+    if (!document.querySelector(".ip-card, .ip-empty")) throw new Error("grid did not paint");
   });
   return btn;
 }
@@ -173,7 +181,14 @@ describe("core LoadVideo", () => {
     const widget = videoWidget();
     await openVia(fakeNode("LoadVideo", widget));
 
-    expect(document.querySelectorAll(".ip-tab").length).toBe(3);
+    // Input / Output / Temp, plus the pinned view (a file picker, so it is
+    // offered here too).
+    expect([...document.querySelectorAll(".ip-tab")].map((b) => b.dataset.type)).toEqual([
+      "input",
+      "output",
+      "temp",
+      "pinned",
+    ]);
     document.querySelector('.ip-tab[data-type="output"]').click();
     await vi.waitFor(() => {
       if (!document.querySelector(".ip-card.is-file")) throw new Error("grid not repainted");

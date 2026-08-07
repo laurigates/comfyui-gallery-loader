@@ -8,6 +8,10 @@ export default defineConfig({
   test: {
     include: ["tests/js/**/*.test.js"],
     environment: "node",
+    // Restores `localStorage` in the jsdom files — Node 22+ shadows jsdom's own
+    // with an accessor that is undefined without --localstorage-file. See the
+    // file's header for the full mechanism.
+    setupFiles: ["tests/js/setup-jsdom.js"],
   },
   resolve: {
     alias: {

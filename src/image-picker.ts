@@ -145,47 +145,154 @@ function markFlatPending(pending: boolean): void {
   }
 }
 
-// Pinned directories — quick-nav chips in the toolbar, for hopping between the
-// few folders you actually pick from. Sandboxed roots only; a path-mode picker
-// has no stable "type" to pin against.
-const PINS_STORAGE_KEY = "comfyui-gallery-loader:pins";
+// ---- Pins ------------------------------------------------------------
+//
+// Folders AND individual media, in ONE list that lives on the SERVER
+// (<user_dir>/comfy-pins.json via pins_store.py), not in localStorage. Two
+// reasons the browser cannot own this list: a phone and a desktop are two
+// browsers against one ComfyUI and localStorage structurally cannot span them,
+// and comfyui-image-browser reads the same file so a pin set in either pack
+// shows up in the other.
+//
+// The write API is a DELTA (add / remove / prune), never a whole-list PUT — two
+// browsers with the picker open would each send their own full list and the
+// second write would silently discard the first's pin. Both verbs answer with
+// the whole freshly-resolved list, so a caller never needs a follow-up GET.
+//
+// Sandboxed roots only: a path-mode picker has no stable "type" to pin against,
+// and the store rejects `type: "path"` outright.
+//
+// Staleness: there is NO watcher and we are not adding one. A file deleted or
+// moved out of band is noticed the next time the list is fetched, which is
+// every picker open and every navigation — the entry comes back with
+// `exists: false` (never dropped: "the file moved" and "you never pinned it"
+// are different facts), renders dimmed and inert, and "Prune missing" drops the
+// whole set of them in one delta.
+const PINS_URL = "/gallery_loader/pins";
 
-interface Pin {
+// The synthetic tab that renders the pinned MEDIA. Deliberately not in
+// SANDBOXED_TYPES: it is a view over several roots at once, not a root, so
+// every "is this a sandboxed location?" gate (flat view, pin-this-folder,
+// `recursive`) must stay false for it.
+const PINNED_TYPE = "pinned";
+
+// One pin's identity, as the store defines it. `name` is present iff
+// kind === "file".
+interface PinItem {
+  kind: "dir" | "file";
   type: string;
   subfolder: string;
+  name?: string;
 }
 
-function pinKey(p: Pin): string {
-  return `${p.type}:${p.subfolder}`;
+// A pin as the endpoint answers it: the stored pin, plus `exists`, plus (for a
+// resolvable file) the same per-file keys /list emits — which is what lets the
+// pinned view render through the ordinary grid with no special-casing.
+interface PinEntry {
+  kind?: string;
+  type?: string;
+  subfolder?: string;
+  name?: string;
+  exists?: boolean;
+  ext?: string;
+  mtime?: number;
+  size?: number;
+  width?: number;
+  height?: number;
+  rating?: number;
 }
 
-function pinLabel(p: Pin): string {
-  return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
+// Must match pins_store.pin_key: (kind, type, subfolder, name), with name ""
+// for a folder pin — so a folder and a file at the same address are different
+// pins and cannot collide.
+function pinKeyOf(p: PinEntry | PinItem): string {
+  return `${p.kind ?? ""}:${p.type ?? ""}:${p.subfolder ?? ""}:${p.name ?? ""}`;
 }
 
-function loadPins(): Pin[] {
+function pinLabel(p: PinEntry | PinItem): string {
+  return `${p.type ?? ""}${p.subfolder ? `/${p.subfolder}` : ""}`;
+}
+
+function pinsOfResponse(data: Record<string, unknown>): PinEntry[] {
+  return Array.isArray(data.pins) ? (data.pins as PinEntry[]) : [];
+}
+
+async function fetchPins(): Promise<PinEntry[]> {
+  const r = await fetch(PINS_URL);
+  const data = await r.json();
+  if (!r.ok || !data?.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+  return pinsOfResponse(data);
+}
+
+async function postPinDelta(op: "add" | "remove" | "prune", item?: PinItem): Promise<PinEntry[]> {
+  const body: Record<string, unknown> = { op };
+  if (item) body.item = item;
+  const r = await fetch(PINS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data: Record<string, unknown> = {};
   try {
-    const raw = localStorage.getItem(PINS_STORAGE_KEY);
-    if (!raw) return [];
+    data = await r.json();
+  } catch {
+    // fall through to the status-based error below
+  }
+  // The cap refusal ("pin limit reached (max 200)") arrives this way rather
+  // than being clamped silently — an add that vanishes reads as a dead button.
+  if (!r.ok || !data.ok) throw new Error((data.error as string) || `HTTP ${r.status}`);
+  return pinsOfResponse(data);
+}
+
+// ---- One-shot migration off the old localStorage list -----------------
+//
+// The key is read here and nowhere else — there is no localStorage pin store
+// any more, only this drain. Every old entry was a FOLDER pin, replayed as an
+// `add` delta; `add_pin` treats an already-present pin as a successful no-op,
+// so a second device migrating the same list (or a retry) is harmless.
+const LEGACY_PINS_STORAGE_KEY = "comfyui-gallery-loader:pins";
+
+let legacyPinMigration: Promise<void> | null = null;
+
+async function runLegacyPinMigration(): Promise<void> {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(LEGACY_PINS_STORAGE_KEY);
+  } catch {
+    return; // private mode / disabled storage — nothing to migrate
+  }
+  if (!raw) return;
+  try {
     const arr: unknown = JSON.parse(raw);
-    if (!Array.isArray(arr)) return [];
-    return arr.filter(
-      (p): p is Pin =>
-        !!p &&
-        typeof (p as Pin).subfolder === "string" &&
-        SANDBOXED_TYPES.includes((p as Pin).type),
-    );
+    if (Array.isArray(arr)) {
+      for (const p of arr) {
+        const pin = p as { type?: unknown; subfolder?: unknown };
+        if (typeof pin?.subfolder !== "string") continue;
+        if (!SANDBOXED_TYPES.includes(pin.type as string)) continue;
+        await postPinDelta("add", {
+          kind: "dir",
+          type: pin.type as string,
+          subfolder: pin.subfolder,
+        });
+      }
+    }
+  } catch (e) {
+    // Leave the key in place so the next page load retries. A migration
+    // failure must never keep the picker from opening.
+    console.warn(`[${EXT_NAME}] pin migration failed — will retry next load`, e);
+    return;
+  }
+  try {
+    localStorage.removeItem(LEGACY_PINS_STORAGE_KEY);
   } catch {
-    return [];
+    // Non-fatal.
   }
 }
 
-function savePins(pins: Pin[]): void {
-  try {
-    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
-  } catch {
-    // Private mode / disabled storage — non-fatal.
-  }
+/** Idempotent per page: concurrent pickers share one migration run. */
+function migrateLegacyPins(): Promise<void> {
+  legacyPinMigration ??= runLegacyPinMigration();
+  return legacyPinMigration;
 }
 
 // ============================================================
@@ -267,6 +374,15 @@ interface ListingFile {
   // folder listing omits the key entirely. Never address a file with this
   // directly — go through fileSub(), which joins it onto state.subfolder.
   subpath?: string;
+  // Pinned view only. Pins span ROOTS, so a pinned card cannot inherit
+  // state.type the way a folder/flat card does — every per-file address goes
+  // through fileType(), which reads this. Undefined outside the pinned view.
+  pinType?: string;
+  // Pinned view only: false when the pin no longer resolves. Such a card is
+  // dimmed and inert (committing it would write a path that no longer exists);
+  // it is not dropped, because "the file moved" and "you never pinned it" are
+  // different facts.
+  pinExists?: boolean;
 }
 
 // "loadimage" is the SANDBOXED flavour — Input/Output/Temp tabs over
@@ -942,6 +1058,21 @@ export async function openImagePicker(
     return base ? `${base}/${sp}` : sp;
   }
 
+  // Sibling of fileSub(). In folder/flat view every card lives under
+  // state.type; in the pinned view each card carries its own root, because pins
+  // span roots. Every per-file address (thumbnail, rating, metadata, committed
+  // value, the subpath label's target) pairs this with fileSub(), never
+  // state.type — which is the VIEW's location, not the file's.
+  function fileType(f: ListingFile): string {
+    return f.pinType ?? state.type;
+  }
+
+  // The pinned view is a listing of several roots at once, so it is not a
+  // sandboxed location: flat view, `recursive` and pin-this-folder all stay off.
+  function isPinned(): boolean {
+    return state.type === PINNED_TYPE;
+  }
+
   let initialSnapshot: InitialSnapshot;
   if (kind === "loadimage") {
     // Directory mode wants no files at all; the backend intersects this
@@ -1048,12 +1179,18 @@ export async function openImagePicker(
   if (kind === "loadimage") {
     tabsEl = document.createElement("div");
     tabsEl.className = "ip-tabs";
-    for (const t of ["input", "output", "temp"]) {
+    // The pinned tab is a MEDIA view, so it has nothing to offer a directory
+    // picker (file cards are inert there and the modal commits a folder) — it
+    // is not created at all rather than created-then-hidden, same discipline as
+    // the flat toggle.
+    const tabTypes =
+      mode === "directory" ? [...SANDBOXED_TYPES] : [...SANDBOXED_TYPES, PINNED_TYPE];
+    for (const t of tabTypes) {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "ip-tab";
       b.dataset.type = t;
-      b.textContent = t;
+      b.textContent = t === PINNED_TYPE ? "📌 pinned" : t;
       tabsEl.appendChild(b);
     }
     modal.toolbarEl.appendChild(tabsEl);
@@ -1095,12 +1232,19 @@ export async function openImagePicker(
   // toggle: sandboxed roots only, so it is not created for a path picker.
   let pinToggleEl: HTMLButtonElement | null = null;
   let pinsEl: HTMLElement | null = null;
+  let pruneEl: HTMLButtonElement | null = null;
   if (kind === "loadimage") {
     pinToggleEl = document.createElement("button");
     pinToggleEl.type = "button";
     pinToggleEl.className = "ip-control ip-icon ip-pin-toggle";
     pinToggleEl.title = "Pin this folder";
     pinToggleEl.textContent = "📌";
+    pruneEl = document.createElement("button");
+    pruneEl.type = "button";
+    pruneEl.className = "ip-control ip-prune";
+    pruneEl.title = "Drop every pin that no longer resolves";
+    pruneEl.textContent = "Prune missing";
+    pruneEl.style.display = "none";
     pinsEl = document.createElement("div");
     pinsEl.className = "ip-pins";
   }
@@ -1109,34 +1253,119 @@ export async function openImagePicker(
     crumbsEl,
     ...(viewToggleEl ? [viewToggleEl] : []),
     ...(pinToggleEl ? [pinToggleEl] : []),
+    ...(pruneEl ? [pruneEl] : []),
     sortEl,
     refreshEl,
     ...(pinsEl ? [pinsEl] : []),
   );
 
+  // ---- Pin cache --------------------------------------------------
+  //
+  // The whole list, refreshed from every GET *and* every POST (both answer with
+  // it), so render-time "is this pinned?" is synchronous — a per-card GET would
+  // be one request per thumbnail. A failed request degrades to an empty cache,
+  // i.e. "no chips", rather than throwing out of a render.
+  let pinEntries: PinEntry[] = [];
+  let pinKeys = new Set<string>();
+
+  function adoptPins(entries: PinEntry[]): void {
+    pinEntries = entries;
+    pinKeys = new Set(entries.map(pinKeyOf));
+  }
+
+  async function refreshPins(): Promise<void> {
+    try {
+      await migrateLegacyPins();
+      adoptPins(await fetchPins());
+    } catch (e) {
+      console.warn(`[${EXT_NAME}] pin list unavailable`, e);
+      adoptPins([]);
+    }
+  }
+
+  /** Apply one delta and adopt the list it answers with. False on refusal. */
+  async function applyPinDelta(op: "add" | "remove" | "prune", item?: PinItem): Promise<boolean> {
+    try {
+      adoptPins(await postPinDelta(op, item));
+    } catch (e) {
+      console.warn(`[${EXT_NAME}] pin ${op} failed`, e);
+      notify({
+        severity: "warn",
+        summary: op === "remove" ? "Pin not removed" : "Pin not saved",
+        detail: String((e as Error)?.message ?? e),
+      });
+      return false;
+    }
+    renderPins();
+    return true;
+  }
+
+  function filePinItem(f: ListingFile): PinItem {
+    return { kind: "file", type: fileType(f), subfolder: fileSub(f), name: f.name };
+  }
+
+  function isFilePinned(f: ListingFile): boolean {
+    return pinKeys.has(pinKeyOf(filePinItem(f)));
+  }
+
+  async function toggleFilePin(f: ListingFile, btn: HTMLButtonElement): Promise<void> {
+    const item = filePinItem(f);
+    if (!(await applyPinDelta(pinKeys.has(pinKeyOf(item)) ? "remove" : "add", item))) return;
+    if (isPinned()) {
+      // Unpinning from the pinned tab removes the card, so the grid repaints.
+      applyPinnedListing();
+      renderGrid();
+      return;
+    }
+    // Elsewhere only this one button changed — repainting the whole grid would
+    // throw away the user's scroll position mid-browse.
+    const nowPinned = pinKeys.has(pinKeyOf(item));
+    btn.classList.toggle("is-pinned", nowPinned);
+    btn.title = nowPinned ? "Unpin this file" : "Pin this file";
+    btn.setAttribute("aria-pressed", String(nowPinned));
+  }
+
   function renderPins(): void {
     if (!pinToggleEl || !pinsEl) return;
-    const pins = loadPins();
+    // Chips are the FOLDER pins; the file pins live in the pinned tab's grid.
+    // The SANDBOXED_TYPES filter is belt-and-braces over pins_store's own
+    // rejection of `type: "path"`: a chip whose type the click handler refuses
+    // would render as a dead control, and the store is a plain JSON file two
+    // packs and a human with ssh can write.
+    const dirs = pinEntries.filter(
+      (p) => p.kind === "dir" && SANDBOXED_TYPES.includes(p.type ?? ""),
+    );
     const canPin = SANDBOXED_TYPES.includes(state.type);
     pinToggleEl.style.display = canPin ? "" : "none";
     const herePinned =
-      canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+      canPin &&
+      pinKeys.has(pinKeyOf({ kind: "dir", type: state.type, subfolder: state.subfolder }));
     pinToggleEl.classList.toggle("is-active", herePinned);
     pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    if (pruneEl) {
+      // Only offered where the stale pins are visible, and only when there is
+      // something to prune.
+      const anyMissing = pinEntries.some((p) => p.exists === false);
+      pruneEl.style.display = isPinned() && anyMissing ? "" : "none";
+    }
     pinsEl.innerHTML = "";
-    pinsEl.style.display = pins.length ? "" : "none";
-    for (const p of pins) {
+    // The chip row stays visible on the pinned tab — it is how you leave.
+    pinsEl.style.display = dirs.length ? "" : "none";
+    for (const p of dirs) {
       const chip = document.createElement("span");
       chip.className = "ip-pin-chip";
-      chip.dataset.pinType = p.type;
-      chip.dataset.pinSub = p.subfolder;
-      if (p.type === state.type && p.subfolder === state.subfolder) {
+      chip.dataset.pinType = p.type ?? "";
+      chip.dataset.pinSub = p.subfolder ?? "";
+      if (p.type === state.type && (p.subfolder ?? "") === state.subfolder) {
         chip.classList.add("is-current");
+      }
+      if (p.exists === false) {
+        chip.classList.add("is-missing");
       }
       const go = document.createElement("button");
       go.type = "button";
       go.className = "ip-pin-go";
-      go.title = `Go to ${pinLabel(p)}`;
+      go.title = p.exists === false ? `${pinLabel(p)} — folder is missing` : `Go to ${pinLabel(p)}`;
       go.textContent = `📌 ${pinLabel(p)}`;
       const x = document.createElement("button");
       x.type = "button";
@@ -1212,13 +1441,8 @@ export async function openImagePicker(
 
   pinToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
-    const cur: Pin = { type: state.type, subfolder: state.subfolder };
-    const pins = loadPins();
-    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
-    // Nothing was removed ⇒ this folder wasn't pinned ⇒ pin it.
-    if (next.length === pins.length) next.push(cur);
-    savePins(next);
-    renderPins();
+    const item: PinItem = { kind: "dir", type: state.type, subfolder: state.subfolder };
+    void applyPinDelta(pinKeys.has(pinKeyOf(item)) ? "remove" : "add", item);
   });
 
   pinsEl?.addEventListener("click", (e) => {
@@ -1227,16 +1451,26 @@ export async function openImagePicker(
     if (!chip) return;
     const type = chip.dataset.pinType as string;
     if (!SANDBOXED_TYPES.includes(type)) return;
-    const pin: Pin = { type, subfolder: chip.dataset.pinSub || "" };
+    const item: PinItem = { kind: "dir", type, subfolder: chip.dataset.pinSub || "" };
     if (t.closest(".ip-pin-x")) {
-      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
-      renderPins();
+      void applyPinDelta("remove", item);
       return;
     }
-    if (pin.type === state.type && pin.subfolder === state.subfolder) return;
-    state.type = pin.type;
-    state.subfolder = pin.subfolder;
+    if (item.type === state.type && item.subfolder === state.subfolder) return;
+    state.type = item.type;
+    state.subfolder = item.subfolder;
     loadAndRender();
+  });
+
+  pruneEl?.addEventListener("click", () => {
+    void applyPinDelta("prune").then((ok) => {
+      // The pinned grid IS the pruned list, so it has to repaint; elsewhere the
+      // chips renderPins() already refreshed are the only visible change.
+      if (ok && isPinned()) {
+        applyPinnedListing();
+        renderGrid();
+      }
+    });
   });
 
   viewToggleEl?.addEventListener("click", () => {
@@ -1284,9 +1518,23 @@ export async function openImagePicker(
     setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
   });
 
+  // Card 📌 toggles a FILE pin. Same shape as the star handler above: it stops
+  // propagation and the card handler below early-returns, so a pin tap never
+  // commits the value and closes the modal.
+  gridEl.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest(".ip-pin-file") as HTMLButtonElement | null;
+    if (!btn) return;
+    e.stopPropagation();
+    const card = btn.closest(".ip-card") as HTMLElement | null;
+    if (!card) return;
+    const f = fileOfCard(card);
+    if (!f) return;
+    void toggleFilePin(f, btn);
+  });
+
   gridEl.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
-    if (target.closest(".ip-star")) return;
+    if (target.closest(".ip-star") || target.closest(".ip-pin-file")) return;
     const card = target.closest(".ip-card") as HTMLElement | null;
     if (!card) return;
     if (card.classList.contains("is-up")) {
@@ -1305,18 +1553,34 @@ export async function openImagePicker(
         if (info) void openMetadata(info);
         return;
       }
-      // Flat view: the subpath label jumps to that folder in folder view.
+      // The subpath label jumps to that folder in folder view. In the pinned
+      // view it also carries the pin's own ROOT, because the label there is a
+      // full address (`output/2026-08-04/`) rather than a subpath under the
+      // current tab.
       const subEl = target.closest(".ip-subpath") as HTMLElement | null;
       if (subEl?.dataset.sub !== undefined) {
         e.stopPropagation();
         state.viewMode = "folder";
         saveView("folder");
+        if (subEl.dataset.pinType) state.type = subEl.dataset.pinType;
         state.subfolder = subEl.dataset.sub || "";
         loadAndRender();
         return;
       }
       const f = fileOfCard(card);
-      if (f) commitFile(f);
+      if (!f) return;
+      // A pin whose file no longer resolves must not commit: the value would
+      // address a path that isn't there. Say so and leave the modal open, with
+      // the card's own 📌 as the unpin affordance.
+      if (f.pinExists === false) {
+        notify({
+          severity: "warn",
+          summary: "That file is gone",
+          detail: `${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}${f.name} no longer resolves. Unpin it with 📌, or use "Prune missing".`,
+        });
+        return;
+      }
+      commitFile(f);
     }
   });
 
@@ -1382,7 +1646,7 @@ export async function openImagePicker(
 
     let data: ImageMetadata;
     try {
-      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+      data = await fetchMetadata(fileType(f), fileSub(f), f.name, state.absPath);
     } catch (e) {
       // Close FIRST, then report: the toast stack is a body-level child above
       // the dialog, so its ✕ would land on the overlay's own controls.
@@ -1478,7 +1742,7 @@ export async function openImagePicker(
     applyStars(row, next);
     f.rating = next;
     const addr: RatingAddress = {
-      type: state.type,
+      type: fileType(f),
       subfolder: fileSub(f),
       absDir: state.absPath,
       name: f.name,
@@ -1583,6 +1847,42 @@ export async function openImagePicker(
     return `${LIST_URL}?${p.toString()}`;
   }
 
+  function numOr0(v: unknown): number {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // One pin entry as a grid file. An `exists: false` entry carries no stats at
+  // all, so every numeric field is normalised to 0 — a bare `Number(undefined)`
+  // is NaN, and one NaN mtime makes sortFiles produce an arbitrary ordering for
+  // the WHOLE list, not just that card.
+  function pinToListingFile(p: PinEntry): ListingFile {
+    const name = String(p.name ?? "");
+    const dot = name.lastIndexOf(".");
+    return {
+      name,
+      ext: (p.ext ?? (dot > 0 ? name.slice(dot) : "")).toLowerCase(),
+      mtime: numOr0(p.mtime),
+      size: numOr0(p.size),
+      width: numOr0(p.width),
+      height: numOr0(p.height),
+      rating: numOr0(p.rating),
+      // fileSub() joins this onto state.subfolder, which is "" on the pinned
+      // tab — so a card's effective subfolder is exactly its pin's.
+      subpath: p.subfolder ?? "",
+      pinType: p.type ?? "",
+      pinExists: p.exists !== false,
+    };
+  }
+
+  // Renders straight out of the pin cache: the GET already resolved every entry
+  // and a file pin carries the same per-file keys /list emits.
+  function applyPinnedListing(): void {
+    state.dirs = [];
+    state.files = pinEntries.filter((p) => p.kind === "file").map(pinToListingFile);
+    modal.setStatus("");
+  }
+
   async function loadAndRender(): Promise<void> {
     renderTabs();
     renderCrumbs();
@@ -1591,28 +1891,42 @@ export async function openImagePicker(
     modal.setBusy(true);
     modal.setStatus("Loading…");
     markFlatPending(isFlat());
-    try {
-      const r = await fetch(buildListingURL());
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      if (!data.ok) throw new Error(data.error || "listing failed");
-      state.dirs = data.dirs || [];
-      state.files = data.files || [];
-      modal.setStatus(data.exists ? "" : "Directory not found.");
-      if (data.truncated) {
-        notify({
-          severity: "warn",
-          summary: `Showing the newest ${state.files.length}`,
-          detail: "This folder has more files than the listing returns; older ones are not shown.",
-        });
+    // In flight alongside the listing: the chips are shown on every tab, so the
+    // list is refreshed on every load rather than only when the pinned tab is
+    // open — that is also what keeps a pin made on another device visible here.
+    const pinsDone = refreshPins();
+    if (isPinned()) {
+      await pinsDone;
+      applyPinnedListing();
+    } else {
+      try {
+        const r = await fetch(buildListingURL());
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (!data.ok) throw new Error(data.error || "listing failed");
+        state.dirs = data.dirs || [];
+        state.files = data.files || [];
+        modal.setStatus(data.exists ? "" : "Directory not found.");
+        if (data.truncated) {
+          notify({
+            severity: "warn",
+            summary: `Showing the newest ${state.files.length}`,
+            detail:
+              "This folder has more files than the listing returns; older ones are not shown.",
+          });
+        }
+      } catch (e) {
+        console.error(`[${EXT_NAME}] list failed:`, e);
+        modal.setStatus(`Error: ${(e as Error).message}`);
+        state.dirs = [];
+        state.files = [];
       }
-    } catch (e) {
-      console.error(`[${EXT_NAME}] list failed:`, e);
-      modal.setStatus(`Error: ${(e as Error).message}`);
-      state.dirs = [];
-      state.files = [];
+      await pinsDone;
     }
     modal.setBusy(false);
+    // Re-run now that the pin cache has landed — the call at the top of this
+    // function painted the PREVIOUS list.
+    renderPins();
     renderGrid();
     // Cleared only once the grid has actually painted — that is what makes a
     // still-set flag at open time mean "the last flat load never finished".
@@ -1621,7 +1935,13 @@ export async function openImagePicker(
 
   function thumbForFile(f: ListingFile): ThumbDescriptor {
     const ext = (f.ext || "").toLowerCase();
-    if (state.type === "path") {
+    // A pin that no longer resolves has no thumbnail to fetch — every URL we
+    // could build 404s, so say so rather than firing a request per dead card.
+    if (f.pinExists === false) {
+      return { kind: "icon", text: "⚠" };
+    }
+    const type = fileType(f);
+    if (type === "path") {
       if (IMG_EXTS.has(ext)) {
         return { kind: "img", src: imageThumbURLAbs(state.absPath, f) };
       }
@@ -1632,10 +1952,10 @@ export async function openImagePicker(
     }
     const sub = fileSub(f);
     if (IMG_EXTS.has(ext)) {
-      return { kind: "img", src: imageThumbURL(state.type, sub, f) };
+      return { kind: "img", src: imageThumbURL(type, sub, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
-      return { kind: "video", src: videoSrcURL(state.type, sub, f.name) };
+      return { kind: "video", src: videoSrcURL(type, sub, f.name) };
     }
     return { kind: "icon", text: "📄" };
   }
@@ -1648,6 +1968,7 @@ export async function openImagePicker(
     // folder cards (the backend returns dirs:[] recursively anyway). A ".."
     // here would silently drop out of flat view.
     const flat = isFlat();
+    const pinnedView = isPinned();
     const showUp =
       !flat && (state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder);
     if (showUp) {
@@ -1718,11 +2039,15 @@ export async function openImagePicker(
       c.dataset.idx = String(i);
       c.dataset.name = f.name; // display/debug only — never an identity
       c.dataset.ext = (f.ext || "").toLowerCase();
-      const selected = flat
-        ? state.type === initialSnapshot.type &&
-          fileSub(f) === initialSnapshot.subfolder &&
-          f.name === initialSnapshot.name
-        : inSameLocation && f.name === initialSnapshot.name;
+      // Both the flat and the pinned view mix locations within one grid, so the
+      // match has to be against the CARD's own address (fileType + fileSub),
+      // not the view's — state.type is "pinned" here and matches nothing.
+      const selected =
+        flat || pinnedView
+          ? fileType(f) === initialSnapshot.type &&
+            fileSub(f) === initialSnapshot.subfolder &&
+            f.name === initialSnapshot.name
+          : inSameLocation && f.name === initialSnapshot.name;
       if (selected) {
         c.classList.add("is-selected");
       }
@@ -1731,6 +2056,10 @@ export async function openImagePicker(
       }
       if (mode === "directory") {
         c.classList.add("is-inert");
+      }
+      const missing = f.pinExists === false;
+      if (missing) {
+        c.classList.add("is-missing");
       }
       const t = thumbForFile(f);
       const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
@@ -1742,13 +2071,25 @@ export async function openImagePicker(
           : t.kind === "video"
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
             : `<div class="ip-thumb-icon">${t.text}</div>`;
-      const stars = mode === "directory" ? "" : starsHTML("ip", ratingOf(f));
+      // No stars on a missing pin: the rating write would address a file that
+      // isn't there, and the optimistic repaint would make the failure look
+      // like it had worked until the response came back.
+      const stars = mode === "directory" || missing ? "" : starsHTML("ip", ratingOf(f));
+      // 📌 pins the FILE. Sandboxed roots only — a path picker has no stable
+      // type to pin against and the store rejects `type: "path"` — and never in
+      // directory mode, where file cards are inert. Reads fileType(f) so a card
+      // in the pinned view pins/unpins under its OWN root.
+      const pinned = isFilePinned(f);
+      const pinBtn =
+        mode !== "directory" && SANDBOXED_TYPES.includes(fileType(f))
+          ? `<button type="button" class="ip-pin-file${pinned ? " is-pinned" : ""}" aria-pressed="${pinned}" title="${pinned ? "Unpin this file" : "Pin this file"}">📌</button>`
+          : "";
       // ⓘ opens the embedded generation metadata. Gated on the card being an
       // IMAGE, not on the tab: /metadata is a read and accepts type=path, so
       // it renders on a path picker too — the one control that isn't scoped to
       // sandboxed roots. Video cards get none (the endpoint is IMG_EXTS-gated).
       const infoBtn =
-        mode !== "directory" && IMG_EXTS.has((f.ext || "").toLowerCase())
+        mode !== "directory" && !missing && IMG_EXTS.has((f.ext || "").toLowerCase())
           ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>`
           : "";
       // Flat view: show the file's folder above the thumbnail. It's a button —
@@ -1757,14 +2098,25 @@ export async function openImagePicker(
       // one (where the tap goes); they differ whenever flat view is entered
       // from a non-root subfolder, so a root-only test cannot see a mix-up.
       // Top-level files get a muted "/" so the row height stays consistent.
-      const subLabel = flat
-        ? f.subpath
-          ? `<button type="button" class="ip-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>`
-          : `<div class="ip-subpath is-root" title="Top level">/</div>`
-        : "";
+      // The pinned view reuses the same row, but shows the FULL address
+      // (`output/2026-08-04/`) because pins span roots — a bare subpath there
+      // would not say which root the file is in. Its target carries the pin's
+      // own type alongside the subfolder.
+      const subLabel = pinnedView
+        ? (() => {
+            const ft = fileType(f);
+            const sub = fileSub(f);
+            const label = sub ? `${ft}/${sub}` : `${ft}/`;
+            return `<button type="button" class="ip-subpath" data-sub="${escHTML(sub)}" data-pin-type="${escHTML(ft)}" title="Go to ${escHTML(label)}">${escHTML(label)}</button>`;
+          })()
+        : flat
+          ? f.subpath
+            ? `<button type="button" class="ip-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>`
+            : `<div class="ip-subpath is-root" title="Top level">/</div>`
+          : "";
       c.innerHTML = `
                 ${subLabel}
-                <div class="ip-thumb">${thumbInner}${infoBtn}</div>
+                <div class="ip-thumb">${thumbInner}${infoBtn}${pinBtn}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
@@ -1790,7 +2142,11 @@ export async function openImagePicker(
       const el = document.createElement("div");
       el.className = "ip-empty";
       el.textContent =
-        mode === "directory" ? "No subfolders here." : "No matching files in this directory.";
+        mode === "directory"
+          ? "No subfolders here."
+          : pinnedView
+            ? "Nothing pinned yet — tap 📌 on a card to pin it."
+            : "No matching files in this directory.";
       gridEl.appendChild(el);
     }
 
@@ -1850,10 +2206,15 @@ export async function openImagePicker(
   // navigation would have produced.
   function commitFile(f: ListingFile): void {
     let value: string;
-    if (state.type === "path") {
+    // fileType(f), not state.type: on the pinned tab the view's "location" is
+    // the pinned list, while the file's own root is what the value must name.
+    // A pinned output/2026-08-04/a.png commits "2026-08-04/a.png [output]" with
+    // no navigation to its folder at all — the point of the whole feature.
+    const type = fileType(f);
+    if (type === "path") {
       value = joinAbs(state.absPath, f.name);
     } else {
-      value = buildLoadImageValue(state.type, fileSub(f), f.name);
+      value = buildLoadImageValue(type, fileSub(f), f.name);
       // The native LiteGraph combo validates against options.values;
       // append so re-renders treat the new value as valid.
       const values = widget.options?.values;
@@ -1960,6 +2321,35 @@ const PICKER_CSS = `
     font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit;
 }
 .ip-info:hover { background: #2f3a52; color: #9ec6ff; }
+/* 📌 file-pin toggle, mirroring ⓘ in the thumbnail's other corner. */
+.ip-pin-file {
+    position: absolute; top: 4px; left: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #6a6a76;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;
+    filter: grayscale(1); opacity: 0.75;
+}
+.ip-pin-file:hover { background: #2f3a52; filter: none; opacity: 1; }
+.ip-pin-file.is-pinned {
+    background: #3a3320; border-color: #78683a; filter: none; opacity: 1;
+}
+/* A pin whose file no longer resolves: dimmed, and inert to a commit — the tap
+   handler refuses it and points at 📌 / "Prune missing" instead. Asserted
+   through getComputedStyle in tests/js/pins.test.js, so it must stay a class
+   rule with no min()/calc() (jsdom drops those values). */
+.ip-card.is-missing {
+    opacity: 0.45;
+    cursor: default;
+    border-style: dashed;
+}
+.ip-card.is-missing:hover { border-color: #2a2a32; transform: none; }
+.ip-pin-chip.is-missing .ip-pin-go { opacity: 0.5; text-decoration: line-through; }
+.ip-prune {
+    color: #c8a95c;
+    border-color: #5a4a2a;
+}
+.ip-prune:hover { background: #3a3320; color: #ffd866; }
 
 /* Metadata overlay (in-dialog — a nested modal shell would dismiss the picker). */
 .ip-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }

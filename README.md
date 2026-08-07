@@ -108,6 +108,37 @@ the card scrolls into view — the same treatment the VHS path loaders
 already got. There is no `ⓘ` metadata button on a video card; the
 metadata endpoint reads image formats only.
 
+## Pins
+
+Two kinds of pin, one list:
+
+- **`📌` in the toolbar** pins the folder you're in. Pinned folders render as
+  chips on their own toolbar row — tap to jump there, `✕` to unpin.
+- **`📌` on an image card** pins that single file. The **`📌 pinned`** tab then
+  shows every pinned file, from every root, in one grid — each labelled with its
+  full address (`output/2026-08-04/`). Tapping the label navigates there;
+  **tapping the card commits the value immediately**, so a favourite image is one
+  tap from any `LoadImage` node with no navigation at all.
+
+The list lives on the **server**, in `<user_dir>/comfy-pins.json` — not in the
+browser. That is what makes it work across devices (your phone and your desktop
+are two browsers against one ComfyUI, which `localStorage` structurally cannot
+span) and across packs: [comfyui-image-browser](https://github.com/laurigates/comfyui-image-browser)
+reads and writes the same file, so a pin made in either shows up in the other.
+An older browser-side pin list is migrated into it once, automatically.
+
+Because the store is a file on the ComfyUI host, pins are **per-install, not
+per-user** — a second person using that same ComfyUI shares the list.
+
+A pin whose file has been deleted or moved is not silently dropped ("the file
+moved" and "you never pinned it" are different facts): it renders dimmed,
+refuses to commit, and can be cleared individually with `📌` or in bulk with
+**Prune missing**.
+
+The pinned tab is offered on file pickers only — a directory picker commits a
+folder, so a pinned-media view has nothing to offer there — and pins address the
+three sandboxed roots only, never a VHS absolute path.
+
 ## VHS path-loader integration
 
 VHS path widgets are detected via `widget.options.vhs_path_extensions`.
@@ -135,6 +166,8 @@ the current absolute path.
 | `GET /gallery_loader/base`    | Returns `base_path`, `input_dir`, `output_dir`, `temp_dir`, `user_dir`. Used by the modal to default VHS path-mode to the ComfyUI install root. |
 | `GET /gallery_loader/thumb`   | Webp 512px thumbnail for images at an arbitrary absolute path. Managed-type listings use core `/api/view` directly. |
 | `GET /gallery_loader/file`    | Streams a whitelisted-extension file (images + common video formats) at an absolute path. Used for video posters in path-mode where core `/api/view` doesn't apply. |
+| `GET /gallery_loader/pins`    | The pin list, every entry resolved: `{ok, max, pins}`, each pin carrying `exists` plus (for a live file pin) the same per-file keys `/list` emits. An unresolvable pin is returned with `exists: false`, never dropped. |
+| `POST /gallery_loader/pins`   | One **delta** — `{op: "add"\|"remove"\|"prune", item?}` — never a whole-list PUT (two open browsers would each send their own list and the second write would discard the first's pin). Answers with the same whole list as the GET. `add` on an existing pin is a successful no-op. |
 
 ## Compatibility
 
