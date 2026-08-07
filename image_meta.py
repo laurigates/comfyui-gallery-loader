@@ -18,7 +18,11 @@ Two halves, deliberately separate so each is testable on its own:
    embedded text it carries, keyed exactly as the writer stored it
    (``prompt`` / ``workflow`` / ``parameters`` / ``UserComment`` / ``XMP`` …).
    PNG ``tEXt``/``zTXt``/``iTXt``, JPEG EXIF ``UserComment`` + ``COM`` + XMP
-   APP1, WebP ``EXIF``/``XMP `` RIFF chunks.
+   APP1, WebP ``EXIF``/``XMP `` RIFF chunks, MP4/MOV ``moov/udta/meta/ilst``
+   boxes (both the indexed ``keys`` form and the bare ``©cmt`` atom form), and
+   Matroska/WebM ``SimpleTag`` elements. The video walks descend structurally,
+   seeking past media by declared size, so a ``moov`` parked after a
+   multi-megabyte ``mdat`` is reached in a handful of seeks.
 2. ``parse_generation_meta(raw)`` — pure dict/JSON work over that mapping,
    mapping a ComfyUI graph or an A1111/Forge parameter block onto a small
    ``summary`` of the fields a user actually wants to copy.
@@ -46,7 +50,7 @@ import os
 import struct
 import zlib
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 log = logging.getLogger("comfyui-image-meta")
@@ -59,6 +63,7 @@ JPEG_EXIF_PREFIX = b"Exif\x00\x00"  # APP1 EXIF marker, 6 bytes
 JPEG_XMP_PREFIX = b"http://ns.adobe.com/xap/1.0/\x00"  # 29 bytes
 RIFF_SIG = b"RIFF"
 WEBP_SIG = b"WEBP"
+EBML_SIG = b"\x1a\x45\xdf\xa3"  # Matroska/WebM magic — an EBML header element ID
 
 # Extension -> reported container label. The label is derived from the
 # extension (not from sniffed magic bytes) so it stays the single source of
@@ -66,7 +71,23 @@ WEBP_SIG = b"WEBP"
 # ext field). Each parser re-validates its own magic before reading anything,
 # so a mislabelled file simply has no readable metadata rather than yielding
 # garbage from the wrong parser.
-FORMAT_EXTS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "webp"}
+#
+# The video entries name the *container family*, not the extension: ``.mov``
+# and ``.m4v`` are ISOBMFF exactly as ``.mp4`` is, and ``.webm`` is a Matroska
+# profile. ``.avi``/``.mpg``/``.mpeg`` are deliberately absent — no ComfyUI
+# writer emits them, and an entry here is what makes the ⓘ / ⤓ buttons appear,
+# so listing a container we cannot read would ship two dead controls.
+FORMAT_EXTS = {
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".webp": "webp",
+    ".mp4": "mp4",
+    ".m4v": "mp4",
+    ".mov": "mp4",
+    ".webm": "matroska",
+    ".mkv": "matroska",
+}
 
 # --- limits -----------------------------------------------------------
 MAX_VALUE_BYTES = 512 * 1024  # cap on ONE metadata value
@@ -96,6 +117,22 @@ MAX_WALK_CHUNKS = 20_000
 # 100k iterations would be 100M syscalls. Metadata always precedes SOS, which
 # ends that walk anyway, so a handful of hundreds of segments is plenty.
 MAX_JPEG_SEGMENTS = 512
+
+# --- video container backstops ----------------------------------------
+# A `keys` box declares its own entry count; a hostile one can declare four
+# billion. Only the entries an `ilst` item can actually reference matter, and
+# ffmpeg writes a handful.
+MAX_MP4_KEYS = 256
+# One `ilst` item name and one Matroska `TagName` are identifiers, not payload
+# — a writer's longest is `creation_time`. Reading a declared-megabyte name
+# would spend the value budget on a key nobody can use.
+MAX_TAG_NAME_BYTES = 256
+# Depth cap on the EBML descent (Segment -> Tags -> Tag -> SimpleTag is 4, and
+# SimpleTag nests legally). EBML is self-describing with no structural end
+# marker, so a crafted file can otherwise recurse until the interpreter's own
+# stack gives out — which surfaces as a RecursionError on the event loop, not
+# as the empty read this module promises.
+MAX_EBML_DEPTH = 8
 
 # Inputs that carry a prompt as a plain string. The prompt terminator is
 # structural (see _text_of) rather than class-based, so this tuple is the
@@ -245,8 +282,14 @@ def read_raw_metadata(path: str) -> tuple[dict[str, str], bool]:
                 _read_png(f, c)
             elif fmt == "jpeg":
                 _read_jpeg(f, c)
+            elif fmt == "mp4":
+                _read_isobmff(f, c)
+            elif fmt == "matroska":
+                _read_matroska(f, c)
             else:
                 _read_webp(f, c)
+            if fmt in ("mp4", "matroska"):
+                _unwrap_comment_envelope(c)
     except Exception as exc:
         # Best-effort read, same posture as xmp_meta.read_rating: a corrupt
         # container degrades to "whatever we got", but log so it's diagnosable.
@@ -604,6 +647,384 @@ def _read_webp(f: io.BufferedReader, c: _Collector) -> None:
 
 
 # ---------------------------------------------------------------------------
+# MP4 / MOV — ISOBMFF box walk (all lengths big-endian)
+# ---------------------------------------------------------------------------
+#
+# Layout, verified by dumping the box tree of real outputs on the GPU box
+# rather than from the spec, because the two writers differ structurally:
+#
+#   moov -> udta -> meta -> [keys] + ilst
+#
+# * Core ``SaveVideo`` (PyAV/ffmpeg mdta path) writes a ``keys`` box mapping
+#   1-based indices to names (``prompt``, ``workflow``, …) and an ``ilst``
+#   whose items are typed by that index (``\x00\x00\x00\x01``).
+# * kijai's ``WanVideoWrapper.save_video`` writes **no ``keys`` box at all** —
+#   its ``ilst`` items are classic iTunes fourcc atoms (``©cmt``), holding the
+#   double-encoded ``{"prompt": …, "workflow": …}`` envelope unwrapped below.
+#
+# Both forms are read here. ComfyUI's own frontend parser handles only the
+# first (it returns early when the ``keys`` box is missing), which is why the
+# ⤓ button hands videos to `app.loadGraphData` with the graph this module
+# parsed instead of letting `handleFile` re-read the container — see
+# browser.ts's loadWorkflow.
+#
+# ``moov`` sits AFTER a multi-megabyte ``mdat`` in most of these files, so the
+# walk seeks by declared box size rather than scanning a prefix: the metadata
+# is reached in a handful of seeks no matter how large the video is.
+
+# ilst fourcc atoms worth naming. The leading byte is 0xA9 — MacRoman "©" —
+# and ffmpeg maps these onto the same metadata keys it exposes by name.
+ILST_ATOM_NAMES = {
+    b"\xa9cmt": "comment",
+    b"\xa9nam": "title",
+    b"\xa9des": "description",
+    b"desc": "description",
+    b"\xa9ART": "artist",
+    b"\xa9too": "encoder",
+    b"\xa9swr": "encoder",
+}
+
+
+def _iter_boxes(f: io.BufferedReader, start: int, end: int) -> Iterator[tuple[bytes, int, int]]:
+    """Yield ``(type, body_start, box_end)`` for each box in ``[start, end)``.
+
+    Skips each box by its declared size, so a payload is only ever read when a
+    caller asks for it. A size that runs past ``end`` stops the walk: as in the
+    PNG/RIFF walks, a length that does not fit means these are not box headers
+    we found but bytes that happen to look like some.
+    """
+    pos = start
+    for _ in range(MAX_WALK_CHUNKS):
+        if pos + 8 > end:
+            return
+        f.seek(pos)
+        hdr = f.read(8)
+        if len(hdr) < 8:
+            return  # the file shrank under us
+        size = int.from_bytes(hdr[0:4], "big")
+        btype = hdr[4:8]
+        head = 8
+        if size == 1:
+            # 64-bit largesize, for a box above 4 GiB.
+            ext = f.read(8)
+            if len(ext) < 8:
+                return
+            size = int.from_bytes(ext, "big")
+            head = 16
+        elif size == 0:
+            size = end - pos  # "extends to the end of the container"
+        if size < head or pos + size > end:
+            return
+        yield btype, pos + head, pos + size
+        pos += size
+
+
+def _find_box(f: io.BufferedReader, start: int, end: int, btype: bytes) -> tuple[int, int] | None:
+    """First ``btype`` box directly inside ``[start, end)``, as (body, end)."""
+    for found, bstart, bend in _iter_boxes(f, start, end):
+        if found == btype:
+            return bstart, bend
+    return None
+
+
+def _parse_keys_box(f: io.BufferedReader, start: int, end: int) -> dict[int, str]:
+    """The ``keys`` box's 1-based index -> name map (empty when unreadable)."""
+    f.seek(start)
+    head = f.read(8)  # version/flags (4) + entry_count (4)
+    if len(head) < 8:
+        return {}
+    count = min(int.from_bytes(head[4:8], "big"), MAX_MP4_KEYS)
+    out: dict[int, str] = {}
+    pos = start + 8
+    for index in range(1, count + 1):
+        if pos + 8 > end:
+            break
+        f.seek(pos)
+        entry = f.read(8)  # size (4) + namespace (4, e.g. "mdta")
+        if len(entry) < 8:
+            break
+        size = int.from_bytes(entry[0:4], "big")
+        if size < 8 or pos + size > end:
+            break
+        name = _decode(f.read(min(size - 8, MAX_TAG_NAME_BYTES))).strip()
+        if name:
+            out[index] = name
+        pos += size
+    return out
+
+
+def _ilst_item_name(btype: bytes, keys: dict[int, str]) -> str | None:
+    """Resolve an ``ilst`` item's type to a metadata key name.
+
+    Two disjoint schemes, discriminated by the type bytes themselves: a small
+    integer indexes the ``keys`` box, anything else is a fourcc atom. They
+    cannot collide — an index is bounded by MAX_MP4_KEYS while a printable
+    fourcc is at least 0x20202020.
+    """
+    index = int.from_bytes(btype, "big")
+    if index in keys:
+        return keys[index]
+    named = ILST_ATOM_NAMES.get(btype)
+    if named:
+        return named
+    # An unrecognised atom still belongs in the raw view — but only if its name
+    # is actually printable. Anything else is a binary type we would be
+    # inventing a name for.
+    text = btype.lstrip(b"\xa9").decode("latin-1", "replace").strip()
+    if text and all(32 <= ord(ch) <= 126 for ch in text):
+        return text
+    return None
+
+
+def _read_isobmff(f: io.BufferedReader, c: _Collector) -> None:
+    """Collect ``moov/udta/meta/ilst`` metadata out of an MP4/MOV file."""
+    end = _stream_size(f)
+    # `ftyp` need not be first in theory, but every writer puts it there, and
+    # requiring it keeps a mislabelled file from being walked as boxes.
+    f.seek(0)
+    if f.read(8)[4:8] != b"ftyp":
+        return
+    udta = None
+    moov = _find_box(f, 0, end, b"moov")
+    if moov:
+        udta = _find_box(f, moov[0], moov[1], b"udta")
+    if not udta:
+        udta = _find_box(f, 0, end, b"udta")  # some muxers hoist it
+    if not udta:
+        return
+    meta = _find_box(f, udta[0], udta[1], b"meta")
+    if not meta:
+        return
+    # `meta` is a FullBox (4 bytes of version/flags before its children) in
+    # every ffmpeg-written file, but QuickTime writes it as a plain box. Try
+    # the fullbox reading first and fall back, rather than guessing: a wrong
+    # offset by 4 makes the whole box tree unparseable, which would look
+    # exactly like "this file has no metadata".
+    for skip in (4, 0):
+        ilst = _find_box(f, meta[0] + skip, meta[1], b"ilst")
+        if ilst:
+            keys_box = _find_box(f, meta[0] + skip, meta[1], b"keys")
+            keys = _parse_keys_box(f, *keys_box) if keys_box else {}
+            _read_ilst(f, ilst[0], ilst[1], keys, c)
+            return
+
+
+def _read_ilst(
+    f: io.BufferedReader, start: int, end: int, keys: dict[int, str], c: _Collector
+) -> None:
+    """Collect each ``ilst`` item's ``data`` payload under its resolved name."""
+    items = 0
+    for btype, bstart, bend in _iter_boxes(f, start, end):
+        items += 1
+        if items > MAX_TEXT_CHUNKS:
+            c.truncated = True
+            return
+        name = _ilst_item_name(btype, keys)
+        if not name:
+            continue
+        data = _find_box(f, bstart, bend, b"data")
+        if not data:
+            continue
+        # data box body: type indicator (4) + locale (4) + the value.
+        vstart = data[0] + 8
+        if vstart >= data[1]:
+            continue
+        f.seek(vstart)
+        want = data[1] - vstart
+        buf = f.read(min(want, c.budget()))
+        # Lowercased for the same reason ComfyUI's own mp4/webm parsers
+        # lowercase: the case is a container convention (Matroska tag names are
+        # conventionally upper), not something the writer chose, and the graph
+        # lookup downstream keys on `prompt`/`workflow`.
+        c.add(name.lower(), _decode(buf), clipped=len(buf) < want)
+
+
+# ---------------------------------------------------------------------------
+# WebM / MKV — EBML element walk
+# ---------------------------------------------------------------------------
+#
+# Segment -> Tags -> Tag -> SimpleTag -> {TagName, TagString}. Core ComfyUI
+# writes ``WORKFLOW``/``PROMPT`` tags; kijai/MMAudio write a single
+# ``COMMENT`` holding the same envelope the MP4 side unwraps.
+#
+# Like the ISOBMFF walk this descends structurally, skipping each Cluster by
+# its declared size — so tags written after the media data are still found,
+# which a bounded prefix scan (what the frontend does) would miss.
+
+EBML_ID_SEGMENT = 0x18538067
+EBML_ID_TAGS = 0x1254C367
+EBML_ID_TAG = 0x7373
+EBML_ID_SIMPLE_TAG = 0x67C8
+EBML_ID_TAG_NAME = 0x45A3
+EBML_ID_TAG_STRING = 0x4487
+
+
+def _read_vint(f: io.BufferedReader, keep_marker: bool) -> tuple[int | None, int]:
+    """Read one EBML variable-length integer. Returns (value, bytes consumed).
+
+    Element **IDs** keep their length-marker bits (that is what makes
+    ``0x1254C367`` the literal Tags ID); element **sizes** have them stripped.
+    A size whose data bits are all ones means "unknown length", reported here
+    as ``None`` — legal for a Segment in a streamed file.
+    """
+    first = f.read(1)
+    if not first:
+        return None, 0
+    byte = first[0]
+    if byte == 0:
+        return None, 0  # no marker bit in the first byte: not a valid vint
+    length = 1
+    mask = 0x80
+    while not byte & mask:
+        mask >>= 1
+        length += 1
+    rest = f.read(length - 1)
+    if len(rest) < length - 1:
+        return None, 0
+    if keep_marker:
+        return int.from_bytes(first + rest, "big"), length
+    value = byte & (0xFF >> length)
+    for b in rest:
+        value = (value << 8) | b
+    if value == (1 << (7 * length)) - 1:
+        return None, length  # unknown-size element
+    return value, length
+
+
+def _ebml_children(f: io.BufferedReader, start: int, end: int) -> Iterator[tuple[int, int, int]]:
+    """Yield ``(id, body_start, body_end)`` for each element in ``[start, end)``."""
+    pos = start
+    for _ in range(MAX_WALK_CHUNKS):
+        if pos >= end:
+            return
+        f.seek(pos)
+        elem_id, id_len = _read_vint(f, True)
+        if elem_id is None:
+            return
+        size, size_len = _read_vint(f, False)
+        if size_len == 0:
+            return
+        body = pos + id_len + size_len
+        if size is None:
+            # Unknown length — the element runs to the end of its parent. It
+            # cannot be skipped, so this is necessarily the last one here.
+            yield elem_id, body, end
+            return
+        if size < 0 or body + size > end:
+            return
+        yield elem_id, body, body + size
+        pos = body + size
+
+
+def _read_matroska(f: io.BufferedReader, c: _Collector) -> None:
+    """Collect the SimpleTag name/value pairs out of a WebM/MKV file."""
+    f.seek(0)
+    if f.read(4) != EBML_SIG:
+        return
+    end = _stream_size(f)
+    for elem_id, start, stop in _ebml_children(f, 0, end):
+        if elem_id != EBML_ID_SEGMENT:
+            continue
+        for seg_id, tstart, tstop in _ebml_children(f, start, stop):
+            # Not `return` on the first Tags element: Matroska permits several,
+            # and ffmpeg writes a second one when tags are added after muxing.
+            if seg_id == EBML_ID_TAGS:
+                _read_ebml_tags(f, tstart, tstop, c, 0)
+
+
+def _read_ebml_tags(f: io.BufferedReader, start: int, end: int, c: _Collector, depth: int) -> None:
+    """Walk Tag/SimpleTag elements, collecting each TagName -> TagString."""
+    if depth > MAX_EBML_DEPTH:
+        c.truncated = True
+        return
+    for elem_id, estart, eend in _ebml_children(f, start, end):
+        if elem_id == EBML_ID_TAG:
+            _read_ebml_tags(f, estart, eend, c, depth + 1)
+        elif elem_id == EBML_ID_SIMPLE_TAG:
+            _read_simple_tag(f, estart, eend, c, depth)
+
+
+def _read_simple_tag(
+    f: io.BufferedReader, start: int, end: int, c: _Collector, depth: int
+) -> None:
+    """Collect one SimpleTag's name/value, recursing into any nested tags.
+
+    The depth guard is repeated here, not just in ``_read_ebml_tags``: a
+    SimpleTag nests *directly* inside a SimpleTag, so a chain of them never
+    passes back through that function and would recurse once per level with
+    nothing stopping it. Caught by the 200-deep regression test, which read the
+    innermost value happily before this check existed.
+    """
+    if depth > MAX_EBML_DEPTH:
+        c.truncated = True
+        return
+    name: str | None = None
+    value: str | None = None
+    clipped = False
+    for elem_id, estart, eend in _ebml_children(f, start, end):
+        if elem_id == EBML_ID_TAG_NAME:
+            f.seek(estart)
+            name = _decode(f.read(min(eend - estart, MAX_TAG_NAME_BYTES))).strip("\x00 ")
+        elif elem_id == EBML_ID_TAG_STRING:
+            f.seek(estart)
+            want = eend - estart
+            buf = f.read(min(want, c.budget()))
+            value = _decode(buf).rstrip("\x00")
+            clipped = len(buf) < want
+        elif elem_id == EBML_ID_SIMPLE_TAG:
+            # A nested SimpleTag qualifies its parent (per-language variants).
+            # Recurse into the CHILD's range — passing the parent's would
+            # re-walk this same element until the depth cap fired.
+            _read_simple_tag(f, estart, eend, c, depth + 1)
+    if name and value is not None:
+        c.add(name.lower(), value, clipped=clipped)
+
+
+# ---------------------------------------------------------------------------
+# The kijai `comment` envelope
+# ---------------------------------------------------------------------------
+
+
+def _unwrap_comment_envelope(c: _Collector) -> None:
+    """Promote a ``{"prompt": …, "workflow": …}`` comment to top-level keys.
+
+    kijai's video writers park both graphs inside a single ``comment`` tag as
+    *double-encoded* JSON — an object whose two values are themselves JSON
+    strings. Left wrapped, the graph is invisible to everything downstream:
+    ``parse_generation_meta`` looks for a graph *at* a GRAPH_KEYS slot, and the
+    frontend's workflow gate reads ``raw.workflow``/``raw.prompt``. 26% of the
+    videos on the reference install are written this way, so this is the
+    difference between the ⓘ card working for three quarters of a library and
+    all of it.
+
+    The envelope is kept alongside the unwrapped keys rather than replaced:
+    ``comment`` is genuinely what the writer stored, and the raw view is a
+    verbatim report. Only a *string* value is promoted as-is; an already-parsed
+    object is re-serialised, because the graph parsers take text.
+    """
+    text = c.raw.get("comment")
+    if not text:
+        return
+    try:
+        envelope = json.loads(text)
+    except (ValueError, TypeError):
+        return  # a plain human comment — nothing to unwrap, not an error
+    if not isinstance(envelope, dict):
+        return
+    for key in ("prompt", "workflow"):
+        if key in c.raw:
+            continue  # a native tag already carries it; never override
+        value = envelope.get(key)
+        if isinstance(value, str):
+            c.add(key, value)
+        elif isinstance(value, (dict, list)):
+            try:
+                c.add(key, json.dumps(value))
+            except (TypeError, ValueError):
+                continue
+
+
+# ---------------------------------------------------------------------------
 # Public entry — generation-metadata summary
 # ---------------------------------------------------------------------------
 
@@ -628,7 +1049,14 @@ SUMMARY_WIDGETS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
 
 # Checkpoint/UNet loader widgets, in preference order when one node holds
 # several.
-MODEL_KEYS = ("ckpt_name", "unet_name", "model_name", "model_path")
+# Checkpoint/UNet loader widgets, in preference order when one node holds
+# several. ``model`` is last and is deliberately the loosest: it is the key
+# ``WanVideoModelLoader`` (and the MMAudio loaders) use for the filename, but
+# it is also the name of the MODEL *link* every sampler carries. Only
+# ``_scalar`` decides between them — it rejects a ``[node_id, slot]`` list — so
+# a link can never be reported as a model name. Keeping it last means a graph
+# with a real ``ckpt_name``/``unet_name`` still prefers that.
+MODEL_KEYS = ("ckpt_name", "unet_name", "model_name", "model_path", "model")
 
 # Raw keys that can hold a Comfy graph. ``prompt``/``workflow`` are the PNG text
 # chunks ComfyUI core writes, but they are the *only* place a PNG writer has —
@@ -920,6 +1348,36 @@ def _cond_inputs(graph: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any
     return inputs
 
 
+# Nodes that hold BOTH prompts as plain strings on one node, rather than as
+# two conditioning links. kijai's WanVideoTextEncode is the case that matters
+# (1215 files on the reference install): the sampler reaches it through a
+# ``text_embeds`` link, and the two roles are named on the node itself.
+#
+# This is the same guarantee _prompt_summary demands of the link path — both
+# roles read off ONE node, so they stay distinguishable — expressed as widget
+# names instead of links. It is emphatically NOT the forbidden fallback of
+# picking whichever text node looks prompt-shaped.
+PAIRED_PROMPT_WIDGETS = (("positive", "positive_prompt"), ("negative", "negative_prompt"))
+
+
+def _paired_prompts(graph: dict[str, Any], inputs: dict[str, Any]) -> dict[str, str]:
+    """Prompts from a single node naming both roles as widgets (Wan-style)."""
+
+    def pick(node_inputs: dict[str, Any]) -> dict[str, str] | None:
+        found = {
+            role: node_inputs[key]
+            for role, key in PAIRED_PROMPT_WIDGETS
+            if isinstance(node_inputs.get(key), str)
+        }
+        return found or None
+
+    for ref in inputs.values():
+        found = _walk(graph, ref, pick)
+        if isinstance(found, dict):
+            return found
+    return {}
+
+
 def _prompt_summary(graph: dict[str, Any], inputs: dict[str, Any]) -> dict[str, str]:
     """Resolve positive/negative for one sampler's inputs. Roles come from links.
 
@@ -939,7 +1397,36 @@ def _prompt_summary(graph: dict[str, Any], inputs: dict[str, Any]) -> dict[str, 
         prompt = _resolve(graph, cond.get(key), (), want_text=True)
         if prompt is not None:
             summary[key] = prompt
-    return summary
+    if summary:
+        return summary
+    # No conditioning links resolved. Two more shapes, both role-determined:
+    # a node naming both prompts as widgets (Wan), or an unguided single
+    # conditioning (BasicGuider — MiniMax H3, and the core Flux/SD3 path).
+    paired = _paired_prompts(graph, inputs)
+    if paired:
+        return paired
+    single = _resolve(graph, _single_conditioning(graph, inputs), (), want_text=True)
+    return {"positive": single} if single is not None else {}
+
+
+def _single_conditioning(graph: dict[str, Any], inputs: dict[str, Any]) -> Any:
+    """The lone conditioning link of an unguided guider, or None.
+
+    ``BasicGuider`` takes one ``conditioning`` and no negative, because CFG
+    does not apply on that path — so its single link is unambiguously the
+    positive. The role comes from the node's contract (there is nothing else it
+    could be), not from choosing between two candidates, which is what
+    _prompt_summary's no-fallback rule forbids. A node exposing ``positive`` or
+    ``negative`` is excluded so this can never pre-empt the link path above.
+    """
+
+    def pick(node_inputs: dict[str, Any]) -> Any:
+        if "positive" in node_inputs or "negative" in node_inputs:
+            return None
+        ref = node_inputs.get("conditioning")
+        return ref if _is_link(ref) else None
+
+    return _walk(graph, inputs.get("guider"), pick)
 
 
 def _from_api_graph(text: Any) -> tuple[str, dict[str, str]]:
