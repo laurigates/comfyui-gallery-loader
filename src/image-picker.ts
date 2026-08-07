@@ -1,8 +1,13 @@
 // image-picker.ts — opens a modal gallery picker on click of either:
-//   - any LoadImage-family `image` combo widget (stock LoadImage,
-//     LoadImageMask, LoadImageOutput) — Input/Output/Temp tabs, writes
-//     annotated values like "foo.png [output]" that core LoadImage's
-//     folder_paths.get_annotated_filepath resolves transparently.
+//   - any upload-flag combo widget — stock LoadImage / LoadImageMask /
+//     LoadImageOutput (`image_upload`) and core LoadVideo (`video_upload`) —
+//     Input/Output/Temp tabs, writes annotated values like "foo.png [output]"
+//     that folder_paths.get_annotated_filepath resolves transparently.
+//   - VHS's *upload* combo loaders (VHS_LoadVideo, VHS_LoadVideoFFmpeg,
+//     VHS_LoadImages), matched by class name because VHS builds those widgets
+//     from its own JS and leaves no marker on the input spec. Same sandboxed
+//     tabs and same annotated values — VHS resolves them through
+//     get_annotated_filepath too. VHS_LoadImages opens in directory mode.
 //   - any VHS path-loader's STRING widget (VHS_LoadImagePath,
 //     VHS_LoadImagesPath, VHS_LoadVideoPath, VHS_LoadVideoFFmpegPath) —
 //     opens in path-mode rooted at folder_paths.base_path; commits a
@@ -199,7 +204,7 @@ interface PickerWidget {
     values?: unknown;
     tooltip?: string;
     vhs_path_extensions?: unknown;
-    _origImageUpload?: boolean;
+    _origUploadFlag?: UploadFlag;
   } & Record<string, unknown>;
   callback?: (value: unknown, ...rest: unknown[]) => unknown;
   onPointerDown?: (pointer: unknown, node: PickerNode, canvas: unknown) => boolean | undefined;
@@ -223,6 +228,7 @@ interface PickerNode {
   setDirtyCanvas?: (fg: boolean, bg: boolean) => void;
   _galleryPickerEnhanced?: boolean;
   _vhsGalleryEnhanced?: boolean;
+  _vhsComboEnhanced?: boolean;
 }
 
 interface NodeDataInput {
@@ -263,6 +269,10 @@ interface ListingFile {
   subpath?: string;
 }
 
+// "loadimage" is the SANDBOXED flavour — Input/Output/Temp tabs over
+// folder_paths' three roots, committing annotated values. The name predates
+// video support; every node in this file that isn't a VHS *path* loader uses
+// it, images and videos alike.
 type PickerKind = "loadimage" | "vhs-path";
 type PickerMode = "file" | "directory";
 
@@ -270,6 +280,8 @@ interface OpenOpts {
   kind: PickerKind;
   mode?: PickerMode;
   extensions?: string[];
+  /** Modal heading. Defaults to a kind/mode-derived label. */
+  title?: string;
 }
 
 interface SavedSort {
@@ -307,6 +319,79 @@ const VHS_PATH_LOADERS = new Set([
   "VHS_LoadVideoFFmpegPath",
 ]);
 
+// VHS's *upload* loaders: plain combos over the input dir. Unlike the path
+// loaders there is no `vhs_path_extensions` marker to detect — VHS builds
+// these widgets from its own JS — so they are matched by class name.
+//
+// Each resolves its value with folder_paths.get_annotated_filepath (after
+// VHS's strip_path), so the picker's `foo.mp4 [output]` form loads exactly
+// like the bare input names the node's native dropdown offers.
+interface VHSComboSpec {
+  widget: string;
+  mode: PickerMode;
+  extensions?: string[];
+  title: string;
+  button: string;
+}
+
+// Mirrors VHS's own `video_extensions`
+// (videohelpersuite/load_video_nodes.py) so the grid offers precisely what
+// the node's native dropdown does — `.gif` included, which thumbForFile
+// renders as an <img> because it is in IMG_EXTS. If VHS widens its list this
+// goes stale silently; the symptom is a loadable file the grid won't show.
+const VHS_VIDEO_EXTS = [".webm", ".mp4", ".mkv", ".gif", ".mov"];
+
+const VHS_COMBO_LOADERS = new Map<string, VHSComboSpec>([
+  [
+    "VHS_LoadVideo",
+    {
+      widget: "video",
+      mode: "file",
+      extensions: VHS_VIDEO_EXTS,
+      title: "Choose video",
+      button: "📁 Browse videos",
+    },
+  ],
+  [
+    "VHS_LoadVideoFFmpeg",
+    {
+      widget: "video",
+      mode: "file",
+      extensions: VHS_VIDEO_EXTS,
+      title: "Choose video",
+      button: "📁 Browse videos",
+    },
+  ],
+  // Loads every image in a directory, so the picker runs in directory mode:
+  // files are inert and the footer commits the folder.
+  [
+    "VHS_LoadImages",
+    { widget: "directory", mode: "directory", title: "Choose folder", button: "📁 Browse folders" },
+  ],
+]);
+
+// Upload flags a combo may declare. Core LoadVideo declares `video_upload`
+// (io.UploadType.video); the frontend's WidgetSelect keys on the same flag to
+// mount its Vue asset browser, which is why the defang below must strip both.
+const UPLOAD_FLAGS = ["image_upload", "video_upload"] as const;
+type UploadFlag = (typeof UPLOAD_FLAGS)[number];
+type MediaKind = "image" | "video";
+
+const MEDIA_OF_FLAG: Record<UploadFlag, MediaKind> = {
+  image_upload: "image",
+  video_upload: "video",
+};
+
+// Fallbacks for when the defang never ran — an older frontend, or a node
+// registered before our beforeRegisterNodeDef hook. Keyed on the widget the
+// core node declares.
+const CORE_LOADERS = new Map<string, { widget: string; media: MediaKind }>([
+  ["LoadImage", { widget: "image", media: "image" }],
+  ["LoadImageMask", { widget: "image", media: "image" }],
+  ["LoadImageOutput", { widget: "image", media: "image" }],
+  ["LoadVideo", { widget: "file", media: "video" }],
+]);
+
 // Cached /gallery_loader/base response. Set once on first picker open.
 let BASE_PATHS: BasePaths | null = null;
 
@@ -328,31 +413,36 @@ async function fetchBasePaths(): Promise<BasePaths> {
 }
 
 // ============================================================
-// image_upload defang (stock LoadImage path) — unchanged
+// Upload-flag defang (core LoadImage / LoadVideo path)
 // ============================================================
 //
 // Modern ComfyUI mounts a Vue WidgetSelect / Asset Browser component on any
-// combo with `image_upload: true` and routes the click through Vue — so
-// widget.onPointerDown never fires. We work around that by stripping the
-// `image_upload` flag from the input spec in beforeRegisterNodeDef, before
-// the widget is constructed. With the flag gone the widget falls back to a
-// plain LiteGraph canvas combo, which calls widget.onPointerDown as
-// expected.
+// combo carrying an upload flag and routes the click through Vue — so
+// widget.onPointerDown never fires. We work around that by stripping the flag
+// from the input spec in beforeRegisterNodeDef, before the widget is
+// constructed. With the flag gone the widget falls back to a plain LiteGraph
+// canvas combo, which calls widget.onPointerDown as expected.
 //
-// Trade-off: the native "Upload image" button is tied to the same flag, so
-// it disappears too. The modal can grow its own upload action later.
+// WidgetSelect keys on `image_upload`, `video_upload`, `animated_image_upload`,
+// `audio_upload` and `mesh_upload`; we strip only the two the picker can serve
+// (see UPLOAD_FLAGS), so an audio or mesh combo keeps its native control.
+//
+// Trade-off: the native "Upload" button is tied to the same flag, so it
+// disappears too. The modal can grow its own upload action later.
 
-function isImageUploadEntry(entry: unknown): boolean {
-  if (Array.isArray(entry) && entry.length >= 2) {
-    const opts = entry[1];
-    return (
-      !!opts && typeof opts === "object" && (opts as Record<string, unknown>).image_upload === true
-    );
+function uploadFlagOfEntry(entry: unknown): UploadFlag | null {
+  const opts =
+    Array.isArray(entry) && entry.length >= 2
+      ? entry[1]
+      : entry && typeof entry === "object" && !Array.isArray(entry)
+        ? entry
+        : null;
+  if (!opts || typeof opts !== "object") return null;
+  const bag = opts as Record<string, unknown>;
+  for (const flag of UPLOAD_FLAGS) {
+    if (bag[flag] === true) return flag;
   }
-  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    return (entry as Record<string, unknown>).image_upload === true;
-  }
-  return false;
+  return null;
 }
 
 function defangNodeData(nodeData: NodeData | null | undefined): boolean {
@@ -363,84 +453,134 @@ function defangNodeData(nodeData: NodeData | null | undefined): boolean {
     const block = inputs[group];
     if (!block) continue;
     for (const [name, entry] of Object.entries(block)) {
-      if (!isImageUploadEntry(entry)) continue;
-      if (Array.isArray(entry)) {
-        (entry[1] as Record<string, unknown>).image_upload = false;
-        (entry[1] as Record<string, unknown>)._origImageUpload = true;
-      } else {
-        (entry as Record<string, unknown>).image_upload = false;
-        (entry as Record<string, unknown>)._origImageUpload = true;
-      }
+      const flag = uploadFlagOfEntry(entry);
+      if (!flag) continue;
+      const opts = (Array.isArray(entry) ? entry[1] : entry) as Record<string, unknown>;
+      opts[flag] = false;
+      // Records WHICH flag was stripped, not merely that one was: it is the
+      // only thing left on the widget that says whether this combo lists
+      // images or videos, and the two want different extension sets.
+      opts._origUploadFlag = flag;
       touched = true;
-      debug(`defanged image_upload on ${nodeData?.name}.${name}`);
+      debug(`defanged ${flag} on ${nodeData?.name}.${name}`);
     }
   }
   return touched;
 }
 
-function findImageWidget(node: PickerNode): PickerWidget | null {
-  if (!node?.widgets) return null;
-  for (const w of node.widgets) {
-    if (w?.options?._origImageUpload === true) return w;
-  }
-  const looksLikeLoader =
-    node.comfyClass === "LoadImage" ||
-    node.comfyClass === "LoadImageMask" ||
-    node.comfyClass === "LoadImageOutput" ||
-    node.type === "LoadImage" ||
-    node.type === "LoadImageMask" ||
-    node.type === "LoadImageOutput";
-  if (!looksLikeLoader) return null;
-  for (const w of node.widgets) {
-    if (w?.name === "image") return w;
-  }
-  return null;
+interface UploadWidget {
+  w: PickerWidget;
+  media: MediaKind;
 }
 
-function enhanceLoadImageNode(node: PickerNode): void {
-  if (!node?.widgets) return;
-  if (node._galleryPickerEnhanced) return;
-  const w = findImageWidget(node);
-  if (!w) return;
-  node._galleryPickerEnhanced = true;
+function widgetNamed(node: PickerNode, name: string): PickerWidget | null {
+  return node.widgets?.find((w) => w?.name === name) ?? null;
+}
 
-  // If the loaded value is an annotated output/temp form, the combo's
-  // values list (rebuilt from input/) won't contain it — the canvas
-  // shows the literal text but the dropdown looks empty. Append so the
-  // value validates against the combo's options.
-  const v = (typeof w.value === "string" ? w.value : "").trim();
-  if (/\[(output|temp)\]\s*$/.test(v)) {
-    const values = w.options?.values;
-    if (Array.isArray(values) && !values.includes(v)) values.push(v);
+function findUploadWidget(node: PickerNode): UploadWidget | null {
+  if (!node?.widgets) return null;
+  for (const w of node.widgets) {
+    const flag = w?.options?._origUploadFlag;
+    if (flag) return { w, media: MEDIA_OF_FLAG[flag] };
   }
+  // Defang didn't run (older frontend, or the node was registered before our
+  // hook) — fall back to the core loaders by class name.
+  const core = CORE_LOADERS.get(node.comfyClass || "") ?? CORE_LOADERS.get(node.type || "");
+  if (!core) return null;
+  const w = widgetNamed(node, core.widget);
+  return w ? { w, media: core.media } : null;
+}
 
-  debug(`enhancing ${node.comfyClass || node.type}:`, {
-    widgetName: w.name,
-    widgetType: w.type,
-  });
+// An annotated output/temp value isn't in the combo's values list (rebuilt
+// from input/), so the canvas shows the literal text while the dropdown looks
+// empty. Append it so the value validates against the combo's options.
+function seedAnnotatedValue(w: PickerWidget): void {
+  const v = (typeof w.value === "string" ? w.value : "").trim();
+  if (!/\[(output|temp)\]\s*$/.test(v)) return;
+  const values = w.options?.values;
+  if (Array.isArray(values) && !values.includes(v)) values.push(v);
+}
 
+function addPickerHint(w: PickerWidget): void {
   const existing = w.options?.tooltip || "";
   const hint = "Click to open the gallery picker (or use the 📁 button below).";
   if (w.options) {
     w.options.tooltip = existing ? `${existing}\n\n${hint}` : hint;
   }
+}
 
-  // Strategy A — patch widget.onPointerDown via the kit's uniform
-  // chain-then-consume wrapper (falls back to the native control on error).
+// Both click strategies, wired to one widget. A — patch widget.onPointerDown
+// via the kit's chain-then-consume wrapper (falls back to the native control
+// on error). B — an explicit button widget, which works regardless of
+// frontend version and is the safety net if A's hook ever moves.
+function wireOpeners(node: PickerNode, w: PickerWidget, buttonLabel: string, opts: OpenOpts): void {
   patchWidgetPointer(w as unknown as PointerPatchableWidget, (_pointer, ownerNode) => {
-    openImagePicker(w, (ownerNode as PickerNode) || node, { kind: "loadimage" });
+    openImagePicker(w, (ownerNode as PickerNode) || node, opts);
     return true;
   });
-
-  // Strategy B — guaranteed click path via a button widget.
   appendButtonWidget(
     node as ButtonWidgetHost,
-    "📁 Browse gallery",
+    buttonLabel,
     () => {
-      openImagePicker(w, node, { kind: "loadimage" });
+      openImagePicker(w, node, opts);
     },
     { logPrefix: EXT_NAME },
   );
+}
+
+function enhanceUploadComboNode(node: PickerNode): void {
+  if (!node?.widgets) return;
+  if (node._galleryPickerEnhanced) return;
+  const found = findUploadWidget(node);
+  if (!found) return;
+  const { w, media } = found;
+  node._galleryPickerEnhanced = true;
+
+  seedAnnotatedValue(w);
+
+  debug(`enhancing ${node.comfyClass || node.type}:`, {
+    widgetName: w.name,
+    widgetType: w.type,
+    media,
+  });
+
+  addPickerHint(w);
+  wireOpeners(node, w, media === "video" ? "📁 Browse videos" : "📁 Browse gallery", {
+    kind: "loadimage",
+    // Images are the backend's default listing, so only the video flavour
+    // needs to say so.
+    extensions: media === "video" ? [...VIDEO_EXTS] : undefined,
+    title: media === "video" ? "Choose video" : "Choose image",
+  });
+}
+
+// ============================================================
+// VHS upload-combo hook (class-name matched)
+// ============================================================
+
+function enhanceVHSComboNode(node: PickerNode): void {
+  if (!node?.widgets) return;
+  if (node._vhsComboEnhanced) return;
+  const spec = VHS_COMBO_LOADERS.get(node.comfyClass || "");
+  if (!spec) return;
+  const w = widgetNamed(node, spec.widget);
+  if (!w) return;
+  node._vhsComboEnhanced = true;
+
+  seedAnnotatedValue(w);
+
+  debug(`enhancing VHS combo ${node.comfyClass}:`, {
+    widgetName: w.name,
+    mode: spec.mode,
+  });
+
+  addPickerHint(w);
+  wireOpeners(node, w, spec.button, {
+    kind: "loadimage",
+    mode: spec.mode,
+    extensions: spec.extensions,
+    title: spec.title,
+  });
 }
 
 // ============================================================
@@ -524,6 +664,18 @@ function parseLoadImageValue(v: unknown): ParsedLoadImage {
     subfolder: idx >= 0 ? norm.slice(0, idx) : "",
     name: idx >= 0 ? norm.slice(idx + 1) : norm,
   };
+}
+
+// A sandboxed DIRECTORY value (VHS_LoadImages). Same annotated grammar as a
+// file value, but the whole relative part is the folder — so "a/b [output]"
+// opens inside output/a/b rather than treating "b" as a filename. "." means
+// the root itself (see commitFolder).
+function parseLoadImageDirValue(v: unknown): { type: string; subfolder: string } {
+  const s = (typeof v === "string" ? v : "").trim();
+  if (!s) return { type: "input", subfolder: "" };
+  const ann = s.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
+  const rel = (ann ? (ann[1] as string) : s).replace(/\\/g, "/").replace(/^\.?\/*|\/+$/g, "");
+  return { type: ann ? (ann[2] as string) : "input", subfolder: rel };
 }
 
 interface ParsedAbs {
@@ -792,11 +944,26 @@ export async function openImagePicker(
 
   let initialSnapshot: InitialSnapshot;
   if (kind === "loadimage") {
-    const init = parseLoadImageValue(widget.value);
-    state.type = init.type;
-    state.subfolder = init.subfolder;
-    state.currentName = init.name;
-    initialSnapshot = { type: init.type, subfolder: init.subfolder, name: init.name };
+    // Directory mode wants no files at all; the backend intersects this
+    // sentinel with its media set to nothing, leaving only folders.
+    state.extensionsParam =
+      mode === "directory"
+        ? [".__none__"]
+        : extensions?.length
+          ? extensions.map((e) => (e.startsWith(".") ? e : `.${e}`))
+          : null;
+    if (mode === "directory") {
+      const init = parseLoadImageDirValue(widget.value);
+      state.type = init.type;
+      state.subfolder = init.subfolder;
+      initialSnapshot = { type: init.type, subfolder: init.subfolder, name: "" };
+    } else {
+      const init = parseLoadImageValue(widget.value);
+      state.type = init.type;
+      state.subfolder = init.subfolder;
+      state.currentName = init.name;
+      initialSnapshot = { type: init.type, subfolder: init.subfolder, name: init.name };
+    }
   } else {
     // vhs-path mode
     state.type = "path";
@@ -821,7 +988,12 @@ export async function openImagePicker(
   }
 
   const titleByKind =
-    kind === "loadimage" ? "Choose image" : mode === "directory" ? "Choose folder" : "Choose file";
+    opts.title ??
+    (mode === "directory"
+      ? "Choose folder"
+      : kind === "loadimage"
+        ? "Choose image"
+        : "Choose file");
 
   const footerLeftHTML =
     mode === "directory"
@@ -1694,8 +1866,21 @@ export async function openImagePicker(
   }
 
   function commitFolder(): void {
-    const value =
-      state.type === "path" ? state.absPath || "/" : state.subfolder ? state.subfolder : state.type;
+    if (state.type === "path") {
+      applyValue(state.absPath || "/");
+      modal.close();
+      return;
+    }
+    // A sandboxed folder rides the same annotated grammar as a file, with the
+    // whole relative path in the name slot. At a root the relative path is
+    // "." rather than "": get_annotated_filepath joins it onto the base dir
+    // and abspath normalises it away, whereas "" would serialize as a blank
+    // widget value that reads as "nothing chosen".
+    const value = buildLoadImageValue(state.type, "", state.subfolder || ".");
+    const values = widget.options?.values;
+    if (Array.isArray(values) && !values.includes(value)) {
+      values.push(value);
+    }
     applyValue(value);
     modal.close();
   }
@@ -2024,6 +2209,15 @@ const PICKER_CSS = `
 // Extension registration
 // ============================================================
 
+// The three hooks each see the same node classes, so they share one entry
+// point. Each enhancer is idempotent (its own `_…Enhanced` flag) and matches a
+// disjoint set of nodes, so the order is not load-bearing.
+function enhanceNode(node: PickerNode): void {
+  enhanceUploadComboNode(node);
+  enhanceVHSComboNode(node);
+  enhanceVHSPathNode(node);
+}
+
 try {
   app.registerExtension({
     name: "comfy.gallery-loader.image-picker",
@@ -2039,19 +2233,14 @@ try {
       debug("image-picker setup running");
       const nodes = (app?.graph as { _nodes?: unknown[] } | undefined)?._nodes;
       if (Array.isArray(nodes)) {
-        for (const n of nodes) {
-          enhanceLoadImageNode(n as PickerNode);
-          enhanceVHSPathNode(n as PickerNode);
-        }
+        for (const n of nodes) enhanceNode(n as PickerNode);
       }
     },
     nodeCreated(node) {
-      enhanceLoadImageNode(node as unknown as PickerNode);
-      enhanceVHSPathNode(node as unknown as PickerNode);
+      enhanceNode(node as unknown as PickerNode);
     },
     loadedGraphNode(node) {
-      enhanceLoadImageNode(node as unknown as PickerNode);
-      enhanceVHSPathNode(node as unknown as PickerNode);
+      enhanceNode(node as unknown as PickerNode);
     },
   });
 } catch (e) {

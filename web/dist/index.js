@@ -1585,6 +1585,44 @@ var VHS_PATH_LOADERS = new Set([
   "VHS_LoadVideoPath",
   "VHS_LoadVideoFFmpegPath"
 ]);
+var VHS_VIDEO_EXTS = [".webm", ".mp4", ".mkv", ".gif", ".mov"];
+var VHS_COMBO_LOADERS = new Map([
+  [
+    "VHS_LoadVideo",
+    {
+      widget: "video",
+      mode: "file",
+      extensions: VHS_VIDEO_EXTS,
+      title: "Choose video",
+      button: "\uD83D\uDCC1 Browse videos"
+    }
+  ],
+  [
+    "VHS_LoadVideoFFmpeg",
+    {
+      widget: "video",
+      mode: "file",
+      extensions: VHS_VIDEO_EXTS,
+      title: "Choose video",
+      button: "\uD83D\uDCC1 Browse videos"
+    }
+  ],
+  [
+    "VHS_LoadImages",
+    { widget: "directory", mode: "directory", title: "Choose folder", button: "\uD83D\uDCC1 Browse folders" }
+  ]
+]);
+var UPLOAD_FLAGS = ["image_upload", "video_upload"];
+var MEDIA_OF_FLAG = {
+  image_upload: "image",
+  video_upload: "video"
+};
+var CORE_LOADERS = new Map([
+  ["LoadImage", { widget: "image", media: "image" }],
+  ["LoadImageMask", { widget: "image", media: "image" }],
+  ["LoadImageOutput", { widget: "image", media: "image" }],
+  ["LoadVideo", { widget: "file", media: "video" }]
+]);
 var BASE_PATHS = null;
 async function fetchBasePaths() {
   if (BASE_PATHS)
@@ -1605,15 +1643,16 @@ async function fetchBasePaths() {
   BASE_PATHS = resolved;
   return resolved;
 }
-function isImageUploadEntry(entry) {
-  if (Array.isArray(entry) && entry.length >= 2) {
-    const opts = entry[1];
-    return !!opts && typeof opts === "object" && opts.image_upload === true;
+function uploadFlagOfEntry(entry) {
+  const opts = Array.isArray(entry) && entry.length >= 2 ? entry[1] : entry && typeof entry === "object" && !Array.isArray(entry) ? entry : null;
+  if (!opts || typeof opts !== "object")
+    return null;
+  const bag = opts;
+  for (const flag of UPLOAD_FLAGS) {
+    if (bag[flag] === true)
+      return flag;
   }
-  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    return entry.image_upload === true;
-  }
-  return false;
+  return null;
 }
 function defangNodeData(nodeData) {
   const inputs = nodeData?.input;
@@ -1625,56 +1664,44 @@ function defangNodeData(nodeData) {
     if (!block)
       continue;
     for (const [name, entry] of Object.entries(block)) {
-      if (!isImageUploadEntry(entry))
+      const flag = uploadFlagOfEntry(entry);
+      if (!flag)
         continue;
-      if (Array.isArray(entry)) {
-        entry[1].image_upload = false;
-        entry[1]._origImageUpload = true;
-      } else {
-        entry.image_upload = false;
-        entry._origImageUpload = true;
-      }
+      const opts = Array.isArray(entry) ? entry[1] : entry;
+      opts[flag] = false;
+      opts._origUploadFlag = flag;
       touched = true;
-      debug(`defanged image_upload on ${nodeData?.name}.${name}`);
+      debug(`defanged ${flag} on ${nodeData?.name}.${name}`);
     }
   }
   return touched;
 }
-function findImageWidget(node) {
-  if (!node?.widgets)
-    return null;
-  for (const w of node.widgets) {
-    if (w?.options?._origImageUpload === true)
-      return w;
-  }
-  const looksLikeLoader = node.comfyClass === "LoadImage" || node.comfyClass === "LoadImageMask" || node.comfyClass === "LoadImageOutput" || node.type === "LoadImage" || node.type === "LoadImageMask" || node.type === "LoadImageOutput";
-  if (!looksLikeLoader)
-    return null;
-  for (const w of node.widgets) {
-    if (w?.name === "image")
-      return w;
-  }
-  return null;
+function widgetNamed(node, name) {
+  return node.widgets?.find((w) => w?.name === name) ?? null;
 }
-function enhanceLoadImageNode(node) {
+function findUploadWidget(node) {
   if (!node?.widgets)
-    return;
-  if (node._galleryPickerEnhanced)
-    return;
-  const w = findImageWidget(node);
-  if (!w)
-    return;
-  node._galleryPickerEnhanced = true;
-  const v = (typeof w.value === "string" ? w.value : "").trim();
-  if (/\[(output|temp)\]\s*$/.test(v)) {
-    const values = w.options?.values;
-    if (Array.isArray(values) && !values.includes(v))
-      values.push(v);
+    return null;
+  for (const w2 of node.widgets) {
+    const flag = w2?.options?._origUploadFlag;
+    if (flag)
+      return { w: w2, media: MEDIA_OF_FLAG[flag] };
   }
-  debug(`enhancing ${node.comfyClass || node.type}:`, {
-    widgetName: w.name,
-    widgetType: w.type
-  });
+  const core = CORE_LOADERS.get(node.comfyClass || "") ?? CORE_LOADERS.get(node.type || "");
+  if (!core)
+    return null;
+  const w = widgetNamed(node, core.widget);
+  return w ? { w, media: core.media } : null;
+}
+function seedAnnotatedValue(w) {
+  const v = (typeof w.value === "string" ? w.value : "").trim();
+  if (!/\[(output|temp)\]\s*$/.test(v))
+    return;
+  const values = w.options?.values;
+  if (Array.isArray(values) && !values.includes(v))
+    values.push(v);
+}
+function addPickerHint(w) {
   const existing = w.options?.tooltip || "";
   const hint = "Click to open the gallery picker (or use the \uD83D\uDCC1 button below).";
   if (w.options) {
@@ -1682,13 +1709,63 @@ function enhanceLoadImageNode(node) {
 
 ${hint}` : hint;
   }
+}
+function wireOpeners(node, w, buttonLabel, opts) {
   patchWidgetPointer(w, (_pointer, ownerNode) => {
-    openImagePicker(w, ownerNode || node, { kind: "loadimage" });
+    openImagePicker(w, ownerNode || node, opts);
     return true;
   });
-  appendButtonWidget(node, "\uD83D\uDCC1 Browse gallery", () => {
-    openImagePicker(w, node, { kind: "loadimage" });
+  appendButtonWidget(node, buttonLabel, () => {
+    openImagePicker(w, node, opts);
   }, { logPrefix: EXT_NAME2 });
+}
+function enhanceUploadComboNode(node) {
+  if (!node?.widgets)
+    return;
+  if (node._galleryPickerEnhanced)
+    return;
+  const found = findUploadWidget(node);
+  if (!found)
+    return;
+  const { w, media } = found;
+  node._galleryPickerEnhanced = true;
+  seedAnnotatedValue(w);
+  debug(`enhancing ${node.comfyClass || node.type}:`, {
+    widgetName: w.name,
+    widgetType: w.type,
+    media
+  });
+  addPickerHint(w);
+  wireOpeners(node, w, media === "video" ? "\uD83D\uDCC1 Browse videos" : "\uD83D\uDCC1 Browse gallery", {
+    kind: "loadimage",
+    extensions: media === "video" ? [...VIDEO_EXTS] : undefined,
+    title: media === "video" ? "Choose video" : "Choose image"
+  });
+}
+function enhanceVHSComboNode(node) {
+  if (!node?.widgets)
+    return;
+  if (node._vhsComboEnhanced)
+    return;
+  const spec = VHS_COMBO_LOADERS.get(node.comfyClass || "");
+  if (!spec)
+    return;
+  const w = widgetNamed(node, spec.widget);
+  if (!w)
+    return;
+  node._vhsComboEnhanced = true;
+  seedAnnotatedValue(w);
+  debug(`enhancing VHS combo ${node.comfyClass}:`, {
+    widgetName: w.name,
+    mode: spec.mode
+  });
+  addPickerHint(w);
+  wireOpeners(node, w, spec.button, {
+    kind: "loadimage",
+    mode: spec.mode,
+    extensions: spec.extensions,
+    title: spec.title
+  });
 }
 function findVHSPathWidget(node) {
   if (!node?.widgets)
@@ -1750,6 +1827,14 @@ function parseLoadImageValue(v) {
     subfolder: idx >= 0 ? norm.slice(0, idx) : "",
     name: idx >= 0 ? norm.slice(idx + 1) : norm
   };
+}
+function parseLoadImageDirValue(v) {
+  const s = (typeof v === "string" ? v : "").trim();
+  if (!s)
+    return { type: "input", subfolder: "" };
+  const ann = s.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
+  const rel = (ann ? ann[1] : s).replace(/\\/g, "/").replace(/^\.?\/*|\/+$/g, "");
+  return { type: ann ? ann[2] : "input", subfolder: rel };
 }
 function parseAbsPath(v) {
   const s = (typeof v === "string" ? v : "").trim();
@@ -1890,11 +1975,19 @@ async function openImagePicker(widget, node, opts) {
   }
   let initialSnapshot;
   if (kind === "loadimage") {
-    const init = parseLoadImageValue(widget.value);
-    state.type = init.type;
-    state.subfolder = init.subfolder;
-    state.currentName = init.name;
-    initialSnapshot = { type: init.type, subfolder: init.subfolder, name: init.name };
+    state.extensionsParam = mode === "directory" ? [".__none__"] : extensions?.length ? extensions.map((e) => e.startsWith(".") ? e : `.${e}`) : null;
+    if (mode === "directory") {
+      const init = parseLoadImageDirValue(widget.value);
+      state.type = init.type;
+      state.subfolder = init.subfolder;
+      initialSnapshot = { type: init.type, subfolder: init.subfolder, name: "" };
+    } else {
+      const init = parseLoadImageValue(widget.value);
+      state.type = init.type;
+      state.subfolder = init.subfolder;
+      state.currentName = init.name;
+      initialSnapshot = { type: init.type, subfolder: init.subfolder, name: init.name };
+    }
   } else {
     state.type = "path";
     state.extensionsParam = extensions?.length ? extensions.map((e) => e.startsWith(".") ? e : `.${e}`) : mode === "directory" ? [".__none__"] : null;
@@ -1908,7 +2001,7 @@ async function openImagePicker(widget, node, opts) {
     }
     initialSnapshot = { type: "path", subfolder: state.absPath, name: state.currentName };
   }
-  const titleByKind = kind === "loadimage" ? "Choose image" : mode === "directory" ? "Choose folder" : "Choose file";
+  const titleByKind = opts.title ?? (mode === "directory" ? "Choose folder" : kind === "loadimage" ? "Choose image" : "Choose file");
   const footerLeftHTML = mode === "directory" ? "<kbd>Esc</kbd> close · click a folder to descend · click <b>Use this folder</b> to commit" : "<kbd>Esc</kbd> close · click a card to select · click a folder to descend";
   const modal = openModalShell({
     title: titleByKind,
@@ -2584,7 +2677,16 @@ ${when}`;
     modal.close();
   }
   function commitFolder() {
-    const value = state.type === "path" ? state.absPath || "/" : state.subfolder ? state.subfolder : state.type;
+    if (state.type === "path") {
+      applyValue(state.absPath || "/");
+      modal.close();
+      return;
+    }
+    const value = buildLoadImageValue(state.type, "", state.subfolder || ".");
+    const values = widget.options?.values;
+    if (Array.isArray(values) && !values.includes(value)) {
+      values.push(value);
+    }
     applyValue(value);
     modal.close();
   }
@@ -2898,6 +3000,11 @@ var PICKER_CSS = `
     font-weight: 700;
 }
 `;
+function enhanceNode(node) {
+  enhanceUploadComboNode(node);
+  enhanceVHSComboNode(node);
+  enhanceVHSPathNode(node);
+}
 try {
   app2.registerExtension({
     name: "comfy.gallery-loader.image-picker",
@@ -2913,19 +3020,15 @@ try {
       debug("image-picker setup running");
       const nodes = app2?.graph?._nodes;
       if (Array.isArray(nodes)) {
-        for (const n of nodes) {
-          enhanceLoadImageNode(n);
-          enhanceVHSPathNode(n);
-        }
+        for (const n of nodes)
+          enhanceNode(n);
       }
     },
     nodeCreated(node) {
-      enhanceLoadImageNode(node);
-      enhanceVHSPathNode(node);
+      enhanceNode(node);
     },
     loadedGraphNode(node) {
-      enhanceLoadImageNode(node);
-      enhanceVHSPathNode(node);
+      enhanceNode(node);
     }
   });
 } catch (e) {
