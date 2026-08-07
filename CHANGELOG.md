@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.23](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.22...comfyui-gallery-loader-v0.1.23) (2026-08-07)
+
+
+### Features
+
+* take over the video and folder combo loaders ([#89](https://github.com/laurigates/comfyui-gallery-loader/issues/89)) ([710f862](https://github.com/laurigates/comfyui-gallery-loader/commit/710f862222231795fc42c7bcf5625f6997ad174c))
+
+
+### Miscellaneous
+
+* **vendored:** re-sync image_meta.py from comfyui-image-browser ([#90](https://github.com/laurigates/comfyui-gallery-loader/issues/90)) ([f9f7a50](https://github.com/laurigates/comfyui-gallery-loader/commit/f9f7a50f772329bd480802b6b651ffbb906000c6))
+
 ## [0.1.22](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.21...comfyui-gallery-loader-v0.1.22) (2026-08-03)
 
 
