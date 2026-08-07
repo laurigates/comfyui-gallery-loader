@@ -36,11 +36,12 @@ try:
     # ComfyUI imports custom_nodes as packages, so the sibling module must
     # be pulled in relatively — a bare ``import xmp_meta`` raises
     # ModuleNotFoundError at load time because the pack dir isn't on sys.path.
-    from . import image_meta, thumb_cache, xmp_meta
+    from . import image_meta, pins_store, thumb_cache, xmp_meta
 except ImportError:
     # Pytest imports this module flat (pack root on sys.path via pyproject's
     # ``pythonpath = ["."]``); fall back to the absolute import.
     import image_meta
+    import pins_store
     import thumb_cache
     import xmp_meta
 
@@ -725,6 +726,141 @@ async def gallery_set_rating(request: web.Request) -> web.Response:
     if not ok:
         return web.json_response({"ok": False, "error": backend}, status=500)
     return web.json_response({"ok": True, "rating": parsed["rating"], "backend": backend})
+
+
+# ---------------------------------------------------------------------------
+# Pins — folders AND individual media, shared across packs and devices
+# ---------------------------------------------------------------------------
+#
+# The list itself lives in <user_dir>/comfy-pins.json (pins_store.py), which is
+# what makes a pin set on a phone show up on the desktop and a pin set in
+# comfyui-image-browser show up here: both are browsers against ONE ComfyUI, and
+# the localStorage list this replaces structurally could not span either gap.
+#
+# The two handlers below are deliberately near-identical to their twins in
+# comfyui-image-browser — same delta grammar, same response shape — so the two
+# packs cannot drift into disagreeing about a file they share.
+
+
+def _pins_file() -> str:
+    # Resolved lazily (not at import) so a test stub of folder_paths doesn't
+    # break module load — same reason as _thumb_cache_dir above.
+    return pins_store.pins_path(str(folder_paths.get_user_directory()))
+
+
+def _resolve_pin(pin: dict[str, Any]) -> str | None:
+    """Absolute path for a pin, or None when it is not addressable.
+
+    ``pins_store.normalize_pin`` has already guaranteed a sandboxed type, a
+    non-traversing subfolder and (for a file) a bare name, and
+    ``_resolve_listing_base`` re-asserts containment — so the only gate left is
+    the media whitelist, applied for the same reason every other read here
+    applies it. ``type=path`` never reaches this: the store refuses to hold one.
+    """
+    base, err = _resolve_listing_base(pin["type"], pin.get("subfolder", ""), "")
+    if err or base is None:
+        return None
+    if pin["kind"] == "dir":
+        return base
+    name = pin.get("name", "")
+    if not _is_bare_name(name):
+        return None
+    if os.path.splitext(name)[1].lower() not in STREAMABLE_EXTS:
+        return None
+    target = os.path.abspath(os.path.join(base, name))
+    if os.path.commonpath([target, base]) != base:
+        return None
+    return target
+
+
+def _pin_exists(pin: dict[str, Any]) -> bool:
+    target = _resolve_pin(pin)
+    if target is None:
+        return False
+    return os.path.isdir(target) if pin["kind"] == "dir" else os.path.isfile(target)
+
+
+def _pin_entry(pin: dict[str, Any]) -> dict[str, Any]:
+    """One pin, plus ``exists`` and (for a resolvable file) its listing stats.
+
+    An unresolvable pin comes back with ``exists: false`` rather than being
+    dropped: "the file moved" and "you never pinned it" are different facts, and
+    collapsing them would make a stale pin vanish with no way to notice — the
+    same reason /ratings answers ``null`` instead of ``0``. The frontend renders
+    those dimmed with an unpin affordance.
+
+    A file pin carries the SAME shape /list emits per file (``_scan_file_entry``),
+    so the pinned view renders through the ordinary grid with no special-casing.
+    """
+    out: dict[str, Any] = dict(pin)
+    target = _resolve_pin(pin)
+    if target is None:
+        out["exists"] = False
+        return out
+    if pin["kind"] == "dir":
+        out["exists"] = os.path.isdir(target)
+        return out
+    try:
+        st = os.stat(target)
+    except OSError:
+        out["exists"] = False
+        return out
+    if not os.path.isfile(target):
+        out["exists"] = False
+        return out
+    name = str(pin.get("name", ""))
+    out.update(_scan_file_entry(target, name, os.path.splitext(name)[1].lower(), st, IMG_EXTS))
+    out["exists"] = True
+    return out
+
+
+def _pins_response(pins: list[dict[str, Any]]) -> web.Response:
+    return web.json_response(
+        {
+            "ok": True,
+            "pins": [_pin_entry(p) for p in pins],
+            "max": pins_store.MAX_PINS,
+        }
+    )
+
+
+@PromptServer.instance.routes.get("/gallery_loader/pins")
+async def gallery_pins_get(request: web.Request) -> web.Response:
+    """The pin list, each entry resolved (``exists`` + a file's listing stats)."""
+    return _pins_response(pins_store.load_pins(_pins_file()))
+
+
+@PromptServer.instance.routes.post("/gallery_loader/pins")
+async def gallery_pins_post(request: web.Request) -> web.Response:
+    """Apply ONE delta: ``{op: "add"|"remove"|"prune", item?}``.
+
+    Deliberately not a whole-list PUT. Two browsers with the picker open would
+    each send their own full list and the second write would silently discard
+    the first's pin — the classic lost update, and the one thing a plain JSON
+    file would otherwise have needed a database to avoid. A delta read-modify-
+    written inside a single aiohttp handler cannot interleave with another.
+
+    Answers with the whole resolved list so the caller needs no follow-up GET.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"ok": False, "error": "invalid body"}, status=400)
+
+    path = _pins_file()
+    updated, err = pins_store.apply_delta(
+        pins_store.load_pins(path), body.get("op"), body.get("item"), exists=_pin_exists
+    )
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    try:
+        pins_store.save_pins(path, updated)
+    except OSError as exc:
+        log.exception("pin store write failed for %s", path)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+    return _pins_response(updated)
 
 
 NODE_CLASS_MAPPINGS = {"GalleryLoadImage": GalleryLoadImage}
