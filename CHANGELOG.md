@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.24](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.23...comfyui-gallery-loader-v0.1.24) (2026-08-08)
+
+
+### Features
+
+* **pins:** pin individual media, shared across packs and devices ([#93](https://github.com/laurigates/comfyui-gallery-loader/issues/93)) ([96d1821](https://github.com/laurigates/comfyui-gallery-loader/commit/96d182184cfb9c0913551ac5e8d4a53d8edfde57))
+
 ## [0.1.23](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.22...comfyui-gallery-loader-v0.1.23) (2026-08-07)
 
 
