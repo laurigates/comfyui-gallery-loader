@@ -51,7 +51,8 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | Path | Purpose |
 |------|---------|
 | `__init__.py` | Loader stub. Exports `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY="./web/dist"`. |
-| `gallery_loader.py` | `GalleryLoadImage` node + six HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating,metadata}`). `/list` takes **`recursive=1`** (sandboxed roots only) for the flat view: every descendant, `dirs:[]`, each file tagged with a forward-slashed `subpath`. Both listing paths are capped and report `truncated`. |
+| `gallery_loader.py` | `GalleryLoadImage` node + eight HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating,metadata}` plus `GET`/`POST /gallery_loader/pins`). `/list` takes **`recursive=1`** (sandboxed roots only) for the flat view: every descendant, `dirs:[]`, each file tagged with a forward-slashed `subpath`. Both listing paths are capped and report `truncated`. `GET /pins` answers `{ok, max, pins}` with every pin resolved (`exists`, plus a live file pin's `/list` per-file keys); `POST /pins` takes one **delta** — `{op: "add"｜"remove"｜"prune", item?}` — and answers with the same whole list, so a caller never needs a follow-up GET. |
+| `pins_store.py` | **Canonical home** of the shared pin store — `comfyui-image-browser` vendors it verbatim (`just sync-pins-store` there + a CI drift job pull from this repo's `main`), so a change here must be synced downstream. Same direction as `xmp_meta.py` / `thumb_cache.py`, the opposite of `image_meta.py`. Pure-stdlib: normalization, the delta dispatcher, and atomic read/write of `<user_dir>/comfy-pins.json` — the one file both packs and both devices resolve. |
 | `image_meta.py` | **Vendored verbatim** from its canonical home `comfyui-image-browser/image_meta.py` — do not edit here. Re-sync with `just sync-image-meta`; CI fails on drift. Pure-stdlib reader behind `/metadata`. The direction is the REVERSE of `xmp_meta.py` / `thumb_cache.py`, which this pack is canonical for: that pack owns the `/metadata` feature and the parser's attacker-shaped-input suite. Each file still has exactly one home. |
 | `xmp_meta.py` | Pure, stdlib-only XMP star-rating read/write (in-file PNG/JPEG surgery + `.xmp` sidecar fallback). No ComfyUI imports. See ADR-0011. |
 | `src/index.ts` | Lone `bun build` entry. Imports both extension modules for their `app.registerExtension` side-effects. |
@@ -154,6 +155,27 @@ committed value, metadata, subpath-label target) goes through `fileSub()`, which
 joins the file's own `subpath` onto `state.subfolder`. `dataset.name` is
 display/debug only. Reverting either handler to a name lookup fails two tests.
 
+### …and in the pinned view, never address a file by `state.type` either
+
+`fileSub()` has a sibling, **`fileType()`**, and the same law covers both: a
+per-file address takes `fileType(f)` + `fileSub(f)`, never `state.type`. Folder
+and flat view can get away with reading `state.type` because every card there
+lives under one root; **pins span roots**, so on the pinned tab `state.type` is
+the synthetic `"pinned"` and reading it is wrong for every card at once — the
+picker would commit `a.png [pinned]`, fetch `?type=pinned` thumbnails, and offer
+no `📌` at all (`SANDBOXED_TYPES` does not contain it).
+
+The split to keep straight when touching either function:
+
+| Bucket | Reads | Examples |
+|---|---|---|
+| Per-file address | `fileType(f)` | `thumbForFile`, `setStarRating`, `openMetadata`, `commitFile`, the card `📌`, the `is-selected` match, the subpath label's target |
+| Location | `state.type` | which listing to fetch, tab highlight, crumbs, flat-view + pin-this-folder gating, `Use this folder` |
+
+`tests/js/pins.test.js` pins this down; reverting `fileType()` to
+`return state.type;` turns four of its cases red (the observed messages are
+recorded in that file's header).
+
 ### The defang records WHICH upload flag it stripped
 
 `_origUploadFlag` holds `"image_upload"` or `"video_upload"`, not a boolean.
@@ -210,8 +232,11 @@ pre-commit install
 ### Build the frontend
 
 The served frontend is `web/dist/index.js`, emitted from `src/` by bun.
-`web/dist/` is git-ignored — build it after a fresh checkout and after any
-`src/` change before hard-refreshing ComfyUI.
+`web/dist/` is **tracked in git** — rebuild it and commit it in the SAME commit
+as any `src/` change. It is tracked deliberately: ComfyUI-Manager updates over
+git, and a `fetch && merge --ff-only` cannot pull an ignored path, so an ignored
+bundle would report the update as successful while ComfyUI kept serving the
+stale one. CI fails on a `web/dist` that is stale vs `src/`.
 
 ```sh
 bun run build                # bun build src/index.ts → web/dist/ (+ copies web/css)
@@ -251,6 +276,18 @@ Test files live under `tests/js/` and follow `*.test.js`. The
 (aliased on the `/scripts/app.js` specifier) so future picker-module
 tests can import the ComfyUI `app` without a real frontend. The
 fuzzy-matcher tests don't need that hook today.
+
+jsdom suites: `image-picker.test.js` (lazy-thumb root, flat view, folder pins,
+highlighting), `video-loaders.test.js` (node detection), `pins.test.js` (the
+pinned tab + the `fileType()` address sweep) and `pins-migration.test.js` (the
+one-shot localStorage drain — its own file because the migration guard is
+module-level, so a second run in the same registry is a no-op by design).
+
+`tests/js/setup-jsdom.js` (a `setupFiles` entry) restores `localStorage`: Node
+22+ defines its own global accessor that is `undefined` without
+`--localstorage-file`, and vitest skips populating jsdom's real one over a name
+already on `globalThis` — without the shim every jsdom file dies in `beforeEach`
+on `localStorage.clear()`. Seen on Node v26.5.0.
 
 ```sh
 bun run test                 # one-shot run (CI mode)
@@ -323,7 +360,9 @@ After non-trivial frontend changes, verify in browser:
 | Flat view (`≣`) | On a sandboxed tab, folds the current folder's subtree into one newest-first grid; each card labelled with its subpath. Tapping a label drops to folder view there. Picking a nested file commits `sub/dir/foo.png [output]`. Hidden on the path tab and in directory mode. Preference persists; a huge tree toasts "truncated". |
 | Flat view — same-named files | Two subfolders each holding `ComfyUI_00001_.png`: clicking each card commits ITS OWN path, and starring one rates only that one. |
 | Metadata (`ⓘ`) | On an image card (including on a path picker) → in-dialog overlay, painted immediately with "Reading metadata…", then a source line, one row per recognised field with its own Copy, Copy all, and a collapsed raw disclosure. No `ⓘ` on video cards. A read failure closes the overlay FIRST, then toasts. |
-| Pins (`📌`) | Pins the current folder; chips render on their own toolbar row — tap to navigate, ✕ to unpin. Persist across reloads. Hidden on a path picker. |
+| Pins (`📌`) — folders | Toolbar `📌` pins the current folder; chips render on their own toolbar row — tap to navigate, ✕ to unpin. Hidden on a path picker. Persist across reloads **and across browsers**: the list is server-side (`<user_dir>/comfy-pins.json`), not `localStorage`. An old `localStorage` list is drained into it once on first open and the key removed. |
+| Pins (`📌`) — media | `📌` on a file card pins that file (highlighted when already pinned); the tap must NOT commit or close. The **📌 pinned** tab shows every pinned file across roots, each labelled with its full address (`output/2026-08-04/`) — tapping the label navigates there, **tapping the card commits in one tap** (a pinned `output/…/a.png` commits `…/a.png [output]` with no navigation). Tab hidden in directory mode; flat view and the folder-`📌` are hidden while on it. |
+| Pins — stale + cross-device/pack | Delete a pinned file on disk, reopen: the card renders **dimmed**, refuses to commit, and `Prune missing` drops it. Pin on the phone → appears on the desktop after a reopen (and vice versa). Pin in `comfyui-image-browser` → appears here, same file on disk. Pins are **per-install, not per-user**. |
 
 ## Releases
 
