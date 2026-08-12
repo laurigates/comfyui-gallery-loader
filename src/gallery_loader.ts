@@ -37,6 +37,14 @@ import {
   warnRating,
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
+import {
+  hasSensitiveTag,
+  markSensitiveHTML,
+  postTag,
+  sensitiveKeyword,
+  TAG_URL,
+  type TagAddress,
+} from "./safe-tag.js";
 
 const EXT_NAME = "comfyui-gallery-loader";
 const NODE = "GalleryLoadImage";
@@ -142,6 +150,9 @@ interface ListingFile {
   width?: number;
   height?: number;
   rating?: number;
+  // `dc:subject` keywords, read from the file's XMP alongside the rating.
+  // Absent (not empty) from a backend older than this key.
+  tags?: string[];
 }
 
 interface ParsedValue {
@@ -483,8 +494,18 @@ export function attachGallery(node: GalleryNode): void {
     loadAndRender();
   });
 
-  // Grid clicks: star rates, dir descends, file selects, ".." goes up.
+  // Grid clicks: 🙈 marks, star rates, dir descends, file selects, ".." up.
   refs.grid.addEventListener("click", (e) => {
+    const mark = (e.target as HTMLElement).closest(
+      ".gl-mark-sensitive",
+    ) as HTMLButtonElement | null;
+    if (mark) {
+      e.stopPropagation();
+      const card = mark.closest(".gl-card") as HTMLElement | null;
+      const f = card ? state.files.find((x) => x.name === card.dataset.name) : undefined;
+      if (f) void toggleSensitiveTag(f, mark);
+      return;
+    }
     const star = (e.target as HTMLElement).closest(".gl-star") as HTMLElement | null;
     if (star) {
       const card = star.closest(".gl-card") as HTMLElement | null;
@@ -681,6 +702,8 @@ export function attachGallery(node: GalleryNode): void {
     grid.innerHTML = "";
     // ONCE per render pass, not once per card.
     const svCfg = readSafeViewConfig();
+    // The keyword 🙈 writes; null (empty keyword list) means no control at all.
+    const safeKeyword = sensitiveKeyword(svCfg);
     const svPath = safeViewPath();
     renderSafeViewToggle();
 
@@ -740,14 +763,20 @@ export function attachGallery(node: GalleryNode): void {
       const stamp = new Date(f.mtime * 1000).toLocaleString();
       const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
       const titleText = dims ? `${f.name}\n${dims}\n${stamp}` : `${f.name}\n${stamp}`;
+      // 🙈 writes the user's first Safe View keyword into the file's
+      // dc:subject — the same control, and the same keyword, as the modal
+      // picker's. Offered only when a keyword is configured.
+      const markBtn = safeKeyword
+        ? markSensitiveHTML("gl", safeKeyword, hasSensitiveTag(f, safeKeyword))
+        : "";
       c.innerHTML = `
-                <div class="gl-thumb"><img loading="lazy" decoding="async" data-src="${url}" alt=""></div>
+                <div class="gl-thumb"><img loading="lazy" decoding="async" data-src="${url}" alt="">${markBtn}</div>
                 <div class="gl-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="gl-dims">${dims}</div>` : ""}
                 ${starsHTML("gl", ratingOf(f))}
             `;
       if (
-        isSensitive({ name: f.name, path: svPath }, svCfg) &&
+        isSensitive({ name: f.name, path: svPath, tags: f.tags }, svCfg) &&
         !revealSet.has(state.type, state.subfolder, f.name)
       ) {
         applySafeView(c, svCfg, () => {
@@ -784,6 +813,37 @@ export function attachGallery(node: GalleryNode): void {
 
   function updateSelectedFooter(): void {
     refs.selected.textContent = (typeof widget.value === "string" ? widget.value : "") || "(none)";
+  }
+
+  /**
+   * Add or remove the Safe View keyword on one file. Mirrors the modal
+   * picker's `toggleSensitiveTag`, including re-rendering on success rather
+   * than patching the button: marking a file is exactly what should make it
+   * blur, and it does, because the reveal set is untouched.
+   */
+  async function toggleSensitiveTag(f: ListingFile, btn: HTMLButtonElement): Promise<void> {
+    const keyword = sensitiveKeyword(readSafeViewConfig());
+    if (!keyword) return; // no configured keyword — the button should not exist
+    const next = !hasSensitiveTag(f, keyword);
+    const addr: TagAddress = {
+      type: state.type,
+      subfolder: state.subfolder,
+      absDir: state.absDir,
+      name: f.name,
+    };
+    btn.disabled = true;
+    try {
+      // The keywords the server read back AFTER writing, not an echo.
+      f.tags = await postTag(TAG_URL, addr, keyword, next);
+      renderGrid();
+    } catch (e) {
+      notify({
+        severity: "warn",
+        summary: next ? "Not marked" : "Not unmarked",
+        detail: String((e as Error)?.message ?? e),
+      });
+      btn.disabled = false;
+    }
   }
 
   function setStarRating(name: string, row: HTMLElement, next: number): void {

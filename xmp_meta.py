@@ -1,4 +1,4 @@
-"""XMP rating read/write for the comfyui-gallery-loader pack.
+"""XMP rating and keyword read/write for the comfyui-gallery-loader pack.
 
 SHARED MODULE — canonical home: ``comfyui-gallery-loader/xmp_meta.py``.
 Other packs (comfyui-image-browser) vendor this file **verbatim** via
@@ -14,6 +14,15 @@ Ratings are stored as the cross-tool-standard ``xmp:Rating`` (integer
 0..5; 0 = unrated) mirrored to ``MicrosoftPhoto:Rating`` (0/1/25/50/75/99
 percent) so Windows Explorer shows them too.
 
+Keywords are stored as ``dc:subject`` — the Dublin Core "Keywords" array
+every photo manager already reads and writes (digiKam, Lightroom, Bridge,
+XnView, ExifTool, Windows Explorer) — mirrored to
+``MicrosoftPhoto:LastKeywordXMP``, exactly as the rating is mirrored.
+There is no canonical XMP "sensitive" property (IPTC 2025.1 defines
+none), so a keyword *is* the interoperable representation: a file this
+pack marks sensitive reads as tagged in digiKam, and a file digiKam
+tagged reads as sensitive here.
+
 Persistence, by priority:
 
 1. **In-file, lossless** for PNG and JPEG via raw chunk/segment surgery —
@@ -25,12 +34,46 @@ Persistence, by priority:
 Reading checks in-file XMP first (so ratings set by Lightroom / Windows
 are honoured), then the sidecar.
 
-Writing is **read-modify-write**: an existing packet is parsed, only
-``xmp:Rating`` / ``MicrosoftPhoto:Rating`` are replaced, and every other
-property (``dc:subject`` keywords, ``dc:description`` captions,
-``dc:creator``, ``dc:rights``, …) is re-serialised untouched under its
-original prefix. A packet we cannot parse safely is never overwritten —
-see :func:`update_xmp_packet`.
+Writing is **read-modify-write**: an existing packet is parsed, only the
+properties this write actually owns are touched, and every other property
+(``dc:description`` captions, ``dc:creator``, ``dc:rights``, …) is
+re-serialised untouched under its original prefix. A packet we cannot
+parse safely is never overwritten — see :func:`update_xmp_packet`.
+
+Two kinds of owned property, and the difference is load-bearing
+---------------------------------------------------------------
+
+``xmp:Rating`` is **scalar**: one value, legal as an attribute on
+``rdf:Description`` or as a child element, and a write replaces it
+wholesale. ``dc:subject`` is an **array** — an ``rdf:Bag`` of ``rdf:li``
+elements — and cannot be an attribute at all:
+
+.. code-block:: xml
+
+    <dc:subject><rdf:Bag><rdf:li>portrait</rdf:li></rdf:Bag></dc:subject>
+
+That difference forces three design choices, each of which prevents a
+data-loss bug of the same family as #97:
+
+1. **``OWNED_PROPERTIES`` is split, and a write strips only its own
+   half.** A rating write strips ``OWNED_SCALAR_PROPERTIES``; a keyword
+   write strips nothing (see 2) and touches ``OWNED_BAG_PROPERTIES``
+   only. Stripping the union on every write would make a star click
+   delete the file's keywords — the #97 bug wearing a different hat.
+2. **A keyword write is a DELTA, not a replacement.** ``update_xmp_packet``
+   takes ``add_tags`` / ``remove_tags`` and edits the existing
+   ``rdf:li`` elements in place, because the existing packet is the only
+   place the file's other keywords live. Rebuilding the bag from a list
+   the caller computed would drop whatever the caller had not read —
+   and the caller cannot read it reliably, since which packet it will
+   write to (in-file or sidecar) is decided *inside* the write.
+   Editing ``rdf:li`` elements rather than re-emitting them is also what
+   keeps an ``xml:lang`` qualifier on a keyword alive.
+3. **Read whichever container is there.** ``dc:subject`` is specified as
+   ``rdf:Bag``, but writers in the wild emit ``rdf:Seq``, ``rdf:Alt``,
+   and even the bare simple-value form ``<dc:subject>x</dc:subject>``.
+   Reading assumes none of them; writing preserves the container it
+   found and only creates an ``rdf:Bag`` when there was nothing at all.
 """
 
 from __future__ import annotations
@@ -40,7 +83,7 @@ import logging
 import os
 import tempfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from xml.etree import ElementTree as ET
 
 log = logging.getLogger("comfyui-xmp")
@@ -49,12 +92,31 @@ log = logging.getLogger("comfyui-xmp")
 NS_XMP = "http://ns.adobe.com/xap/1.0/"
 NS_MS = "http://ns.microsoft.com/photo/1.0/"
 NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+NS_DC = "http://purl.org/dc/elements/1.1/"
 # Bound to the `xml` prefix by the XML spec itself; never declared inline.
 NS_XML = "http://www.w3.org/XML/1998/namespace"
 
-# The two properties this module owns. Everything else in a packet belongs to
+# The properties this module owns. Everything else in a packet belongs to
 # whoever wrote it (digiKam, Lightroom, Bridge, XnView) and is preserved.
-OWNED_PROPERTIES = (f"{{{NS_XMP}}}Rating", f"{{{NS_MS}}}Rating")
+#
+# The split is not cosmetic — see the module docstring. A SCALAR property is
+# replaced wholesale and is stripped in both legal serialisations before the
+# new value is set. A BAG property holds the file's other keywords, so it is
+# never stripped; it is edited element-by-element by _apply_tag_delta. A write
+# only ever touches the half it is for: a rating write must not disturb
+# keywords, and a keyword write must not disturb the rating.
+OWNED_SCALAR_PROPERTIES = (f"{{{NS_XMP}}}Rating", f"{{{NS_MS}}}Rating")
+OWNED_BAG_PROPERTIES = (f"{{{NS_DC}}}subject", f"{{{NS_MS}}}LastKeywordXMP")
+OWNED_PROPERTIES = OWNED_SCALAR_PROPERTIES + OWNED_BAG_PROPERTIES
+
+RDF_LI = f"{{{NS_RDF}}}li"
+# dc:subject is specified as rdf:Bag, but rdf:Seq and rdf:Alt both turn up in
+# the wild. Read any of them; keep whichever one the file already had.
+RDF_CONTAINERS = (f"{{{NS_RDF}}}Bag", f"{{{NS_RDF}}}Seq", f"{{{NS_RDF}}}Alt")
+
+# A keyword longer than this is not a keyword. Bounds what a single write can
+# add to a packet that other tools have to re-read.
+MAX_TAG_LEN = 128
 
 # --- format markers ---------------------------------------------------
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
@@ -113,27 +175,50 @@ def _wrap_packet(body: str, pad: int = XPACKET_PAD) -> bytes:
     return (XPACKET_BEGIN + body + (" " * pad) + "\n" + XPACKET_END).encode("utf-8")
 
 
-def build_xmp_packet(rating: int) -> bytes:
+def build_xmp_packet(rating: int | None = 0, tags: Sequence[str] = ()) -> bytes:
     """Return a complete ``<?xpacket?>``-wrapped XMP packet (UTF-8 bytes).
 
     Used only when a file has **no** existing packet. When one exists, go
     through :func:`update_xmp_packet` instead — this function's output
-    contains nothing but our two rating properties, so writing it over an
+    contains nothing but the properties asked for here, so writing it over an
     existing packet destroys every other property the file carried.
 
-    The only interpolated values are validated ints, so there is no
-    injection surface.
+    ``rating=None`` omits the rating pair entirely (a keyword-only write must
+    not invent a rating of 0 for a file nobody rated). With no tags the output
+    is byte-identical to what shipped before this function grew a second
+    parameter — fresh ComfyUI renders must not change shape.
+
+    Ratings are validated ints; keywords are XML-escaped on the way in, so
+    neither is an injection surface.
     """
-    r = clamp_rating(rating)
-    pct = rating_to_ms_percent(r)
+    attrs = ""
+    ns = ""
+    if rating is not None:
+        r = clamp_rating(rating)
+        ns += '\n    xmlns:xmp="http://ns.adobe.com/xap/1.0/"'
+        ns += '\n    xmlns:MicrosoftPhoto="http://ns.microsoft.com/photo/1.0/"'
+        attrs += f'\n    xmp:Rating="{r}"'
+        attrs += f'\n    MicrosoftPhoto:Rating="{rating_to_ms_percent(r)}"'
+    kept = _dedupe_tags(tags)
+    if kept:
+        if rating is None:
+            ns += '\n    xmlns:MicrosoftPhoto="http://ns.microsoft.com/photo/1.0/"'
+        ns += '\n    xmlns:dc="http://purl.org/dc/elements/1.1/"'
+    if not kept:
+        desc = f'  <rdf:Description rdf:about=""{ns}{attrs}/>\n'
+    else:
+        bags = "".join(
+            f"   <{prop}>\n    <rdf:Bag>\n"
+            + "".join(f"     <rdf:li>{_esc_text(t)}</rdf:li>\n" for t in kept)
+            + "    </rdf:Bag>\n"
+            f"   </{prop}>\n"
+            for prop in ("dc:subject", "MicrosoftPhoto:LastKeywordXMP")
+        )
+        desc = f'  <rdf:Description rdf:about=""{ns}{attrs}>\n{bags}  </rdf:Description>\n'
     body = (
         '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
         ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
-        '  <rdf:Description rdf:about=""\n'
-        '    xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n'
-        '    xmlns:MicrosoftPhoto="http://ns.microsoft.com/photo/1.0/"\n'
-        f'    xmp:Rating="{r}"\n'
-        f'    MicrosoftPhoto:Rating="{pct}"/>\n'
+        f"{desc}"
         " </rdf:RDF>\n"
         "</x:xmpmeta>\n"
     )
@@ -157,7 +242,8 @@ def _packet_is_parseable(xmp_bytes: bytes | None) -> bool:
 def parse_rating_from_xmp(xmp_bytes: bytes | None) -> int | None:
     """Extract a 0..5 rating from an XMP packet, or None.
 
-    Security: see :func:`_packet_is_parseable`.
+    Security: see :func:`_packet_is_parseable`. A caller that wants the
+    keywords too should use :func:`parse_meta_from_xmp`, which parses once.
     """
     if not _packet_is_parseable(xmp_bytes):
         return None
@@ -193,6 +279,116 @@ def _find_rating(root: ET.Element) -> int | None:
         except ValueError:
             pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# dc:subject keywords
+# ---------------------------------------------------------------------------
+
+
+def normalize_tag(tag: object) -> str:
+    """Canonical form of one keyword: trimmed, inner whitespace collapsed.
+
+    Returns ``""`` for anything that is not usable as a keyword (empty, all
+    whitespace, longer than :data:`MAX_TAG_LEN`, or carrying a control
+    character — the latter would serialise into the packet and come back
+    mangled or, in a C0 range XML forbids, unparseable).
+    """
+    if not isinstance(tag, str):
+        return ""
+    collapsed = " ".join(tag.split())
+    if not collapsed or len(collapsed) > MAX_TAG_LEN:
+        return ""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in collapsed):
+        return ""
+    return collapsed
+
+
+def _tag_key(tag: object) -> str:
+    """Comparison key. Keywords are matched case-insensitively so a file does
+    not end up carrying both ``NSFW`` and ``nsfw``; the *stored* casing is
+    always whichever the file (or the caller) already used."""
+    return normalize_tag(tag).casefold()
+
+
+def _dedupe_tags(tags: Sequence[str]) -> list[str]:
+    """Normalized, deduped (case-insensitively), order preserved."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        value = normalize_tag(tag)
+        key = value.casefold()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _property_values(root: ET.Element, name: str) -> list[str] | None:
+    """Every value of array-valued property ``name``, or None if it is absent.
+
+    ``None`` and ``[]`` are different answers: the first means "this file says
+    nothing about keywords" (so a sidecar may), the second means "this file
+    says it has none". Accepts all three shapes seen in the wild — an
+    ``rdf:Bag``/``Seq``/``Alt`` of ``rdf:li``, the bare simple-value form
+    ``<dc:subject>x</dc:subject>``, and the attribute form ``dc:subject="x"``.
+    """
+    found = False
+    values: list[str] = []
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        attr = el.attrib.get(name)
+        if attr is not None:
+            found = True
+            values.append(attr)
+        if el.tag != name:
+            continue
+        found = True
+        container = next((c for c in el if c.tag in RDF_CONTAINERS), None)
+        if container is None:
+            values.append(el.text or "")
+            continue
+        values.extend(li.text or "" for li in container if li.tag == RDF_LI)
+    return _dedupe_tags(values) if found else None
+
+
+def _find_tags(root: ET.Element) -> list[str] | None:
+    """``dc:subject`` if the packet has it, else the ``MicrosoftPhoto`` mirror.
+
+    The mirror exists so Windows shows what we wrote, not as a second source
+    of truth — so it is only ever a fallback for a file tagged somewhere that
+    writes nothing else.
+    """
+    for name in OWNED_BAG_PROPERTIES:
+        values = _property_values(root, name)
+        if values is not None:
+            return values
+    return None
+
+
+def parse_meta_from_xmp(xmp_bytes: bytes | None) -> tuple[int | None, list[str] | None]:
+    """``(rating, keywords)`` from one packet, parsing it ONCE.
+
+    A directory listing reads both for every file, and going through
+    :func:`parse_rating_from_xmp` and :func:`parse_tags_from_xmp` in turn
+    parses the same bytes twice — measured at +40% on the metadata pass over a
+    2000-file directory, for nothing. Both single-property functions delegate
+    here. Security: see :func:`_packet_is_parseable`.
+    """
+    if not _packet_is_parseable(xmp_bytes):
+        return None, None
+    try:
+        root = ET.fromstring(xmp_bytes)
+    except ET.ParseError:
+        return None, None
+    return _find_rating(root), _find_tags(root)
+
+
+def parse_tags_from_xmp(xmp_bytes: bytes | None) -> list[str] | None:
+    """Keywords from an XMP packet, or None when the packet carries none."""
+    return parse_meta_from_xmp(xmp_bytes)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -321,23 +517,125 @@ def _write_element(
     out.append(_esc_text(el.tail or ""))
 
 
-def _strip_owned_properties(parent: ET.Element) -> None:
-    """Remove our two properties wherever they appear, in either legal form."""
-    for name in OWNED_PROPERTIES:
+def _drop_child(parent: ET.Element, child: ET.Element, previous: ET.Element | None) -> None:
+    """Remove ``child``, handing its tail to whatever preceded it so the
+    indentation of the following sibling is unchanged."""
+    if previous is not None:
+        previous.tail = child.tail
+    else:
+        parent.text = child.tail
+    parent.remove(child)
+
+
+def _strip_owned_properties(parent: ET.Element, names: Sequence[str]) -> None:
+    """Remove the named properties wherever they appear, in either legal form.
+
+    ``names`` is always a *subset* of what this module owns — the scalar half
+    for a rating write. Passing the union would delete the file's keywords on
+    every star click; see the module docstring.
+    """
+    for name in names:
         parent.attrib.pop(name, None)
     previous: ET.Element | None = None
     for child in list(parent):
-        if isinstance(child.tag, str) and child.tag in OWNED_PROPERTIES:
-            # Hand the removed node's tail to whatever preceded it, so the
-            # indentation of the following sibling is unchanged.
-            if previous is not None:
-                previous.tail = child.tail
-            else:
-                parent.text = child.tail
-            parent.remove(child)
+        if isinstance(child.tag, str) and child.tag in names:
+            _drop_child(parent, child, previous)
             continue
-        _strip_owned_properties(child)
+        _strip_owned_properties(child, names)
         previous = child
+
+
+def _tag_container(holder: ET.Element) -> ET.Element:
+    """The ``rdf:Bag``/``Seq``/``Alt`` inside a keyword property, creating an
+    ``rdf:Bag`` when there is none.
+
+    A holder carrying a bare simple value (``<dc:subject>x</dc:subject>``) has
+    that value promoted into the new bag rather than dropped — it is one of
+    the file's keywords, written in a shape the spec does not use for arrays
+    but that real files do.
+    """
+    container = next((c for c in holder if c.tag in RDF_CONTAINERS), None)
+    if container is not None:
+        return container
+    seed = normalize_tag(holder.text or "")
+    holder.text = None
+    container = ET.SubElement(holder, RDF_CONTAINERS[0])
+    if seed:
+        ET.SubElement(container, RDF_LI).text = seed
+    return container
+
+
+def _apply_tag_delta(
+    root: ET.Element,
+    desc: ET.Element,
+    name: str,
+    add: Sequence[str],
+    remove: Sequence[str],
+) -> None:
+    """Add/remove keywords on property ``name``, editing ``rdf:li`` in place.
+
+    In place, and not "rebuild the bag from a list", for two reasons. The
+    caller's list can only ever hold what the caller managed to read, and the
+    file's other keywords are exactly what must survive; and an ``rdf:li`` may
+    carry an ``xml:lang`` qualifier, which re-emitting the value as a plain
+    string silently discards.
+    """
+    remove_keys = {_tag_key(t) for t in remove} - {""}
+    holder = next(
+        (el for el in root.iter() if isinstance(el.tag, str) and el.tag == name), None
+    )
+    # The attribute form of an array property is not legal RDF for an array,
+    # but writers emit it. Fold it into the bag (unless it is being removed)
+    # rather than leaving a second, contradictory copy behind.
+    seeds: list[str] = []
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        attr = el.attrib.pop(name, None)
+        if attr is not None and _tag_key(attr) not in remove_keys:
+            seeds.append(attr)
+    wanted = _dedupe_tags([*seeds, *add])
+    if holder is None:
+        if not wanted:
+            return  # nothing to add and nothing there — leave the packet alone
+        holder = ET.SubElement(desc, name)
+        # Take the trailing indentation of the element it now follows, and
+        # hand that element the indentation that separates two siblings.
+        if len(desc) > 1:
+            previous_holder = desc[-2]
+            holder.tail = previous_holder.tail
+            previous_holder.tail = desc.text
+        else:
+            holder.tail = desc.text
+    container = _tag_container(holder)
+
+    present: set[str] = set()
+    previous: ET.Element | None = None
+    for child in list(container):
+        if child.tag != RDF_LI:
+            previous = child
+            continue
+        key = _tag_key(child.text or "")
+        if not key or key in remove_keys or key in present:
+            _drop_child(container, child, previous)
+            continue
+        present.add(key)
+        previous = child
+    for value in wanted:
+        key = value.casefold()
+        if key in present or key in remove_keys:
+            continue
+        li = ET.SubElement(container, RDF_LI)
+        li.text = value
+        # Inherit the indentation of the element it now follows, and give that
+        # element the indentation that used to separate two siblings.
+        if previous is not None:
+            li.tail = previous.tail
+            previous.tail = container.text
+        else:
+            li.tail = container.text
+        present.add(key)
+        previous = li
 
 
 def _primary_description(root: ET.Element) -> ET.Element | None:
@@ -356,24 +654,39 @@ def _primary_description(root: ET.Element) -> ET.Element | None:
 
 
 def update_xmp_packet(
-    existing: bytes | None, rating: int, *, pad: int = XPACKET_PAD
+    existing: bytes | None,
+    rating: int | None = None,
+    *,
+    add_tags: Sequence[str] = (),
+    remove_tags: Sequence[str] = (),
+    pad: int = XPACKET_PAD,
 ) -> bytes | None:
-    """Return ``existing`` with only our two rating properties changed.
+    """Return ``existing`` with only the properties named here changed.
 
-    Every other property — ``dc:subject`` keywords, ``dc:description``
-    captions, ``dc:creator``, ``dc:rights``, anything a photo manager wrote —
-    is carried through untouched, along with the prefix each was declared
-    under. With no existing packet, this is exactly :func:`build_xmp_packet`.
+    Every other property — ``dc:description`` captions, ``dc:creator``,
+    ``dc:rights``, anything a photo manager wrote — is carried through
+    untouched, along with the prefix each was declared under. With no existing
+    packet, this is exactly :func:`build_xmp_packet`.
+
+    ``rating=None`` leaves the rating alone; empty ``add_tags``/``remove_tags``
+    leave the keywords alone. **A rating write must not disturb keywords and a
+    keyword write must not disturb the rating** — that is why each half is
+    opt-in rather than one "here is the new state" argument.
+
+    Keywords are a DELTA because the existing packet is the only place the
+    file's other keywords live, and the caller cannot pre-read them: which
+    packet gets written (in-file or sidecar) is decided inside the write.
 
     Returns **None** to mean *refuse*: the packet is oversize, carries a
     DOCTYPE/ENTITY, does not parse, or is not RDF-shaped. The caller must not
     overwrite it — the safe move is the sidecar, which the same three gates
-    make :func:`read_rating` prefer anyway (an unreadable in-file packet does
-    not mask a sidecar rating).
+    make :func:`read_meta` prefer anyway (an unreadable in-file packet does
+    not mask a sidecar rating or keyword).
     """
-    r = clamp_rating(rating)
+    r = clamp_rating(rating) if rating is not None else None
+    tagging = bool(add_tags) or bool(remove_tags)
     if not existing:
-        return build_xmp_packet(r)
+        return build_xmp_packet(r, _dedupe_tags(add_tags))
     if not _packet_is_parseable(existing):
         return None
     try:
@@ -385,13 +698,25 @@ def update_xmp_packet(
     if desc is None:
         return None
 
-    _strip_owned_properties(root)
-    desc.set(f"{{{NS_XMP}}}Rating", str(r))
-    desc.set(f"{{{NS_MS}}}Rating", str(rating_to_ms_percent(r)))
+    if r is not None:
+        _strip_owned_properties(root, OWNED_SCALAR_PROPERTIES)
+        desc.set(f"{{{NS_XMP}}}Rating", str(r))
+        desc.set(f"{{{NS_MS}}}Rating", str(rating_to_ms_percent(r)))
+    if tagging:
+        # Both properties take the SAME delta rather than the mirror being
+        # rebuilt from dc:subject: rebuilding would drop a keyword some other
+        # tool had written only to the mirror, which is the preservation law
+        # this module exists for, applied one property along.
+        for name in OWNED_BAG_PROPERTIES:
+            _apply_tag_delta(root, desc, name, add_tags, remove_tags)
 
     prefixes = _collect_prefixes(existing)
-    prefixes.setdefault(NS_XMP, _alloc_prefix("xmp", set(prefixes.values())))
-    prefixes.setdefault(NS_MS, _alloc_prefix("MicrosoftPhoto", set(prefixes.values())))
+    if r is not None:
+        prefixes.setdefault(NS_XMP, _alloc_prefix("xmp", set(prefixes.values())))
+    if r is not None or tagging:
+        prefixes.setdefault(NS_MS, _alloc_prefix("MicrosoftPhoto", set(prefixes.values())))
+    if tagging:
+        prefixes.setdefault(NS_DC, _alloc_prefix("dc", set(prefixes.values())))
     _ensure_prefixes(root, prefixes)
 
     out: list[str] = []
@@ -588,6 +913,14 @@ def jpeg_set_xmp(data: bytes, xmp_packet: bytes) -> bytes | None:
 # ---------------------------------------------------------------------------
 
 
+# One packet update, deferred: takes the packet found in whichever backend is
+# about to be written (None when there is none) plus the padding that backend
+# can afford, and returns the replacement — or None to refuse it. Deferred
+# because "which packet" is not known until the write path has picked a
+# backend, and a keyword delta has to be merged against THAT packet.
+_PacketUpdate = Callable[[bytes | None, int], "bytes | None"]
+
+
 def sidecar_path(path: str) -> str:
     return path + ".xmp"
 
@@ -633,6 +966,16 @@ def sidecar_set_rating(path: str, rating: int) -> bool:
     return True
 
 
+def sidecar_apply(path: str, apply: _PacketUpdate) -> bool:
+    """Run one packet update against ``<path>.xmp``. Same refusal contract as
+    :func:`sidecar_set_rating` — False means nothing was written."""
+    packet = apply(sidecar_read_packet(path), XPACKET_PAD)
+    if packet is None:
+        return False
+    _atomic_write(sidecar_path(path), packet)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Atomic write
 # ---------------------------------------------------------------------------
@@ -663,48 +1006,73 @@ def _read_head(path: str, limit: int | None) -> bytes:
         return f.read(limit) if limit else f.read()
 
 
-def read_rating(path: str, *, head_only: bool = True) -> int:
-    """Return 0..5 (0 = unrated). In-file XMP first, then sidecar. Never
-    raises — returns 0 on any error."""
+def _in_file_packet(path: str, ext: str, limit: int | None) -> bytes | None:
+    if ext == ".png":
+        return png_get_xmp(_read_head(path, limit))
+    if ext in (".jpg", ".jpeg"):
+        return jpeg_get_xmp(_read_head(path, limit))
+    return None
+
+
+def read_meta(path: str, *, head_only: bool = True) -> tuple[int, list[str]]:
+    """Return ``(rating, keywords)``. In-file XMP first, then sidecar. Never
+    raises — degrades to ``(0, [])`` on any error.
+
+    ONE pass for both, because the caller (a directory listing) pays for the
+    file open. The two are resolved independently: a file can carry an in-file
+    rating and sidecar keywords, and taking the whole answer from whichever
+    packet happened to hold the rating would silently drop the other.
+    """
     try:
         ext = os.path.splitext(path)[1].lower()
-        limit = PNG_HEAD_SCAN if head_only else None
-        pkt: bytes | None = None
-        if ext == ".png":
-            pkt = png_get_xmp(_read_head(path, limit))
-        elif ext in (".jpg", ".jpeg"):
-            pkt = jpeg_get_xmp(_read_head(path, limit))
-        if pkt is not None:
-            r = parse_rating_from_xmp(pkt)
-            if r is not None:
-                return r
-        sc = sidecar_get_rating(path)
-        return sc if sc is not None else 0
+        pkt = _in_file_packet(path, ext, PNG_HEAD_SCAN if head_only else None)
+        rating, tags = parse_meta_from_xmp(pkt)
+        if rating is None or tags is None:
+            sc_rating, sc_tags = parse_meta_from_xmp(sidecar_read_packet(path))
+            if rating is None:
+                rating = sc_rating
+            if tags is None:
+                tags = sc_tags
+        return (rating or 0), (tags or [])
     except Exception as exc:
-        # Best-effort read: any failure degrades to "unrated" (0), but log
-        # so a corrupt file or XMP packet is diagnosable.
-        log.debug("read_rating failed for %s: %s", path, exc)
-        return 0
+        # Best-effort read: any failure degrades to "unrated, untagged", but
+        # log so a corrupt file or XMP packet is diagnosable.
+        log.debug("read_meta failed for %s: %s", path, exc)
+        return 0, []
 
 
-def write_rating(path: str, rating: int) -> tuple[bool, str]:
-    """Write ``rating`` (clamped 0..5). Returns (ok, backend) where backend
-    is 'png' | 'jpeg' | 'sidecar', or (False, error).
+def read_rating(path: str, *, head_only: bool = True) -> int:
+    """Return 0..5 (0 = unrated). Never raises — returns 0 on any error."""
+    return read_meta(path, head_only=head_only)[0]
 
-    Read-modify-write throughout: an existing packet's other properties are
-    preserved (see :func:`update_xmp_packet`). When that packet cannot be
-    parsed safely the in-file write is **refused** rather than overwritten,
-    and the rating goes to the sidecar — which :func:`read_rating` will read,
-    because the same gate that refused the rewrite also stops the in-file
-    packet from being read.
+
+def read_tags(path: str, *, head_only: bool = True) -> list[str]:
+    """Return the file's ``dc:subject`` keywords (possibly empty). Never
+    raises."""
+    return read_meta(path, head_only=head_only)[1]
+
+
+def _write_xmp(path: str, apply: _PacketUpdate) -> tuple[bool, str]:
+    """Run one packet update against ``path``. Returns (ok, backend) where
+    backend is 'png' | 'jpeg' | 'sidecar', or (False, error).
+
+    Read-modify-write throughout: ``apply`` is handed the packet that is
+    already in the backend being written, so an existing packet's other
+    properties are preserved (see :func:`update_xmp_packet`). When that packet
+    cannot be parsed safely the in-file write is **refused** rather than
+    overwritten, and the write goes to the sidecar — which :func:`read_meta`
+    will read, because the same gate that refused the rewrite also stops the
+    in-file packet from being read.
+
+    Both the rating and the keyword write go through here, so neither can
+    quietly grow a path that rebuilds the packet instead of updating it.
     """
-    r = clamp_rating(rating)
     ext = os.path.splitext(path)[1].lower()
     try:
         if ext == ".png":
             with open(path, "rb") as f:
                 data = f.read()
-            packet = update_xmp_packet(png_get_xmp(data, stop_at_idat=False), r)
+            packet = apply(png_get_xmp(data, stop_at_idat=False), XPACKET_PAD)
             if packet is not None:
                 _atomic_write(path, png_set_xmp(data, packet))
                 _cache_invalidate(path)
@@ -713,12 +1081,12 @@ def write_rating(path: str, rating: int) -> tuple[bool, str]:
             with open(path, "rb") as f:
                 data = f.read()
             existing = jpeg_get_xmp(data)
-            packet = update_xmp_packet(existing, r)
+            packet = apply(existing, XPACKET_PAD)
             out_opt = jpeg_set_xmp(data, packet) if packet is not None else None
             if out_opt is None and packet is not None:
                 # The APP1 length field is 16-bit and we just grew the packet
                 # by preserving it. Retry without the expansion padding.
-                packet = update_xmp_packet(existing, r, pad=0)
+                packet = apply(existing, 0)
                 out_opt = jpeg_set_xmp(data, packet) if packet is not None else None
             if out_opt is not None:
                 _atomic_write(path, out_opt)
@@ -726,19 +1094,19 @@ def write_rating(path: str, rating: int) -> tuple[bool, str]:
                 return True, "jpeg"
             if existing is not None and packet is not None:
                 # A readable in-file packet too large to rewrite: a sidecar
-                # would be shadowed by the stale in-file rating, so say so
+                # would be shadowed by the stale in-file packet, so say so
                 # rather than report a write the reader will never see.
                 return False, "existing XMP packet is too large to update in place"
         # Other formats, an unparseable packet we refuse to clobber, and JPEG
         # overflow with nothing readable in the file → sidecar.
-        if not sidecar_set_rating(path, r):
+        if not sidecar_apply(path, apply):
             return False, "existing XMP sidecar could not be updated safely"
         _cache_invalidate(path)
         return True, "sidecar"
     except (OSError, ValueError) as exc:
         log.warning("in-file XMP write failed for %s; wrote sidecar instead: %s", path, exc)
         try:
-            if not sidecar_set_rating(path, r):
+            if not sidecar_apply(path, apply):
                 return False, "existing XMP sidecar could not be updated safely"
             _cache_invalidate(path)
             return True, "sidecar"
@@ -747,24 +1115,64 @@ def write_rating(path: str, rating: int) -> tuple[bool, str]:
             return False, str(exc)
 
 
+def write_rating(path: str, rating: int) -> tuple[bool, str]:
+    """Write ``rating`` (clamped 0..5). Returns (ok, backend) — see
+    :func:`_write_xmp`.
+
+    Keywords are untouched: this passes no tag delta, so ``dc:subject`` is
+    neither stripped nor rebuilt.
+    """
+    r = clamp_rating(rating)
+    return _write_xmp(path, lambda existing, pad: update_xmp_packet(existing, r, pad=pad))
+
+
+def write_tags(
+    path: str, *, add: Sequence[str] = (), remove: Sequence[str] = ()
+) -> tuple[bool, str]:
+    """Add and/or remove ``dc:subject`` keywords. Returns (ok, backend) — see
+    :func:`_write_xmp`.
+
+    A DELTA, not a replacement: the keywords already on the file survive, and
+    the merge happens against the packet in whichever backend is written. The
+    rating is untouched (no rating argument reaches
+    :func:`update_xmp_packet`), which is the other half of the same law.
+    """
+    adds = _dedupe_tags(add)
+    removes = _dedupe_tags(remove)
+    if not adds and not removes:
+        return False, "no keywords to write"
+    return _write_xmp(
+        path,
+        lambda existing, pad: update_xmp_packet(
+            existing, add_tags=adds, remove_tags=removes, pad=pad
+        ),
+    )
+
+
 # A tiny cache keyed on (path, mtime_ns, size) so re-listing a directory
-# (the common "refresh after rating") doesn't re-read every file.
-_RATING_CACHE: dict[tuple[str, int, int], int] = {}
+# (the common "refresh after rating") doesn't re-read every file. Rating and
+# keywords share one entry because they come from one read — caching them
+# separately would double the file opens the cache exists to avoid.
+_META_CACHE: dict[tuple[str, int, int], tuple[int, list[str]]] = {}
 _CACHE_MAX = 5000
 
 
-def read_rating_cached(path: str, st: os.stat_result) -> int:
+def read_meta_cached(path: str, st: os.stat_result) -> tuple[int, list[str]]:
     key = (path, st.st_mtime_ns, st.st_size)
-    val = _RATING_CACHE.get(key)
+    val = _META_CACHE.get(key)
     if val is not None:
         return val
-    val = read_rating(path, head_only=True)
-    if len(_RATING_CACHE) >= _CACHE_MAX:
-        _RATING_CACHE.clear()
-    _RATING_CACHE[key] = val
+    val = read_meta(path, head_only=True)
+    if len(_META_CACHE) >= _CACHE_MAX:
+        _META_CACHE.clear()
+    _META_CACHE[key] = val
     return val
 
 
+def read_rating_cached(path: str, st: os.stat_result) -> int:
+    return read_meta_cached(path, st)[0]
+
+
 def _cache_invalidate(path: str) -> None:
-    for key in [k for k in _RATING_CACHE if k[0] == path]:
-        _RATING_CACHE.pop(key, None)
+    for key in [k for k in _META_CACHE if k[0] == path]:
+        _META_CACHE.pop(key, None)

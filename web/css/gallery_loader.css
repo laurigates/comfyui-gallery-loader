@@ -197,6 +197,40 @@
     display: block;
 }
 
+/* 🙈 mark-sensitive toggle. Bottom-right, because the kit parks Safe View's
+   reveal button top-left and this control must stay reachable on a card that
+   is currently hidden — it is the only way back. It sits on .gl-thumb, which
+   is NOT the element that gets blurred (.gl-thumb img is), so marking a file
+   never blurs the control that unmarks it. */
+.gl-mark-sensitive {
+    position: absolute;
+    bottom: 4px;
+    right: 4px;
+    z-index: 2;
+    /* >=34px is the family's per-card control floor. */
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    background: rgba(20, 20, 26, 0.78);
+    color: #6a6a76;
+    border: 1px solid #33333f;
+    border-radius: 4px;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    font-family: inherit;
+    filter: grayscale(1);
+    opacity: 0.75;
+}
+.gl-mark-sensitive:hover { background: #2f3a52; filter: none; opacity: 1; }
+.gl-mark-sensitive.is-marked {
+    background: #3a2028;
+    border-color: #7a4a58;
+    filter: none;
+    opacity: 1;
+}
+.gl-mark-sensitive:disabled { cursor: progress; opacity: 0.5; }
+
 .gl-folder { color: var(--p-primary-color, #6cf); }
 
 .gl-name {

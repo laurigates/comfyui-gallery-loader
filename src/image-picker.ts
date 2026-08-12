@@ -66,6 +66,13 @@ import {
   warnRating,
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
+import {
+  hasSensitiveTag,
+  markSensitiveHTML,
+  postTag,
+  sensitiveKeyword,
+  TAG_URL,
+} from "./safe-tag.js";
 
 const EXT_NAME = "comfyui-gallery-loader";
 const LIST_URL = "/gallery_loader/list";
@@ -383,6 +390,9 @@ interface ListingFile {
   width?: number;
   height?: number;
   rating?: number;
+  // The file's `dc:subject` keywords, read from its XMP in the same pass as
+  // the rating. Absent (not empty) from a backend older than this key.
+  tags?: string[];
   // Present only in a recursive ("flat") listing: the file's directory relative
   // to the requested subfolder, forward-slashed, "" for a top-level file. A
   // folder listing omits the key entirely. Never address a file with this
@@ -1198,7 +1208,7 @@ export async function openImagePicker(
 
   /** Whether this card matches the filter AND the user has not revealed it. */
   function isHiddenCard(f: ListingFile, cfg: SafeViewConfig): boolean {
-    if (!isSensitive({ name: f.name, path: safeViewPath(f) }, cfg)) return false;
+    if (!isSensitive({ name: f.name, path: safeViewPath(f), tags: f.tags }, cfg)) return false;
     return !revealSet.has(fileType(f), fileSub(f), f.name);
   }
 
@@ -1652,9 +1662,28 @@ export async function openImagePicker(
     void toggleFilePin(f, btn);
   });
 
+  // 🙈 writes the Safe View keyword into the file's dc:subject. Same shape as
+  // the star and pin handlers: stops propagation so the card handler below
+  // never commits the value and closes the modal on a mark tap.
+  gridEl.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest(".ip-mark-sensitive") as HTMLButtonElement | null;
+    if (!btn) return;
+    e.stopPropagation();
+    const card = btn.closest(".ip-card") as HTMLElement | null;
+    if (!card) return;
+    const f = fileOfCard(card);
+    if (!f) return;
+    void toggleSensitiveTag(f, btn);
+  });
+
   gridEl.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
-    if (target.closest(".ip-star") || target.closest(".ip-pin-file")) return;
+    if (
+      target.closest(".ip-star") ||
+      target.closest(".ip-pin-file") ||
+      target.closest(".ip-mark-sensitive")
+    )
+      return;
     const card = target.closest(".ip-card") as HTMLElement | null;
     if (!card) return;
     if (card.classList.contains("is-up")) {
@@ -1857,17 +1886,26 @@ export async function openImagePicker(
   // first same-named file in the listing, which in flat view is routinely a
   // different file in a different folder — and the optimistic repaint made the
   // wrong write look like it had worked.
-  function setStarRating(f: ListingFile, row: HTMLElement, next: number): void {
-    const prev = Number(row.dataset.rating || "0");
-    applyStars(row, next);
-    f.rating = next;
-    const addr: RatingAddress = {
+  /**
+   * The per-file write address. `fileType`/`fileSub` and never `state.type` —
+   * pins span roots, so a pinned card's own root is the only correct one.
+   * Shared by the rating and keyword writes so the two cannot drift into
+   * addressing the same card differently.
+   */
+  function addressOf(f: ListingFile): RatingAddress {
+    return {
       type: fileType(f),
       subfolder: fileSub(f),
       absDir: state.absPath,
       name: f.name,
     };
-    postRating(RATING_URL, addr, next)
+  }
+
+  function setStarRating(f: ListingFile, row: HTMLElement, next: number): void {
+    const prev = Number(row.dataset.rating || "0");
+    applyStars(row, next);
+    f.rating = next;
+    postRating(RATING_URL, addressOf(f), next)
       .then((confirmed) => {
         if (confirmed !== next) {
           applyStars(row, confirmed);
@@ -1884,6 +1922,39 @@ export async function openImagePicker(
         applyStars(row, prev);
         f.rating = prev;
       });
+  }
+
+  /**
+   * Add or remove the Safe View keyword on one file.
+   *
+   * Takes the file OBJECT for the same reason `setStarRating` does — a name
+   * lookup addresses the wrong file in flat view — and re-renders on success
+   * rather than patching the button: marking a file is exactly the event that
+   * should make it blur, and the reveal set has not been touched, so it does.
+   *
+   * The button is disabled for the duration. It flips the file's state on the
+   * server, so a double tap is a second write racing the first, and the loser
+   * decides what the file ends up carrying.
+   */
+  async function toggleSensitiveTag(f: ListingFile, btn: HTMLButtonElement): Promise<void> {
+    const cfg = readSafeViewConfig();
+    const keyword = sensitiveKeyword(cfg);
+    if (!keyword) return; // no configured keyword — the button should not exist
+    const next = !hasSensitiveTag(f, keyword);
+    btn.disabled = true;
+    try {
+      // The server answers with the keywords it read back AFTER writing, so
+      // this is the file's real state, not an echo of the request.
+      f.tags = await postTag(TAG_URL, addressOf(f), keyword, next);
+      renderGrid();
+    } catch (e) {
+      notify({
+        severity: "warn",
+        summary: next ? "Not marked" : "Not unmarked",
+        detail: String((e as Error)?.message ?? e),
+      });
+      btn.disabled = false;
+    }
   }
 
   function navigateUp(): void {
@@ -2144,6 +2215,9 @@ export async function openImagePicker(
     // is still a walk of the setting store, and a per-card read would also let
     // the config change halfway down a grid.
     const svCfg = readSafeViewConfig();
+    // The keyword 🙈 writes, read from the same snapshot for the same reason.
+    // null (an empty keyword list) means no control on any card this pass.
+    const safeKeyword = sensitiveKeyword(svCfg);
 
     // Flat view collapses the subtree into files only — no ".." card and no
     // folder cards (the backend returns dirs:[] recursively anyway). A ".."
@@ -2286,6 +2360,15 @@ export async function openImagePicker(
         mode !== "directory" && !missing && IMG_EXTS.has((f.ext || "").toLowerCase())
           ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>`
           : "";
+      // 🙈 writes the user's first Safe View keyword into the file's
+      // dc:subject. Offered only when there IS such a keyword (see
+      // sensitiveKeyword), never on a missing pin — the write would address a
+      // file that isn't there — and never in directory mode, where file cards
+      // are inert.
+      const markBtn =
+        mode !== "directory" && !missing && safeKeyword
+          ? markSensitiveHTML("ip", safeKeyword, hasSensitiveTag(f, safeKeyword))
+          : "";
       // Flat view: show the file's folder above the thumbnail. It's a button —
       // tapping it drops back to folder view at that directory. The LABEL is
       // the relative subpath (what the user reads) while data-sub is the joined
@@ -2310,7 +2393,7 @@ export async function openImagePicker(
           : "";
       c.innerHTML = `
                 ${subLabel}
-                <div class="ip-thumb">${thumbInner}${infoBtn}${pinBtn}</div>
+                <div class="ip-thumb">${thumbInner}${infoBtn}${pinBtn}${markBtn}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
@@ -2548,6 +2631,24 @@ const PICKER_CSS = `
 .ip-pin-file.is-pinned {
     background: #3a3320; border-color: #78683a; filter: none; opacity: 1;
 }
+/* 🙈 mark-sensitive toggle. Bottom-RIGHT: ⓘ has top-right, 📌 top-left, and
+   Safe View's reveal button bottom-left (above), so this is the last free
+   corner. It must stay OUT of .cmk-sv-blur's subtree — it sits on .ip-thumb,
+   which is not the blurred element — or marking a file would blur the control
+   that unmarks it. */
+.ip-mark-sensitive {
+    position: absolute; bottom: 4px; right: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #6a6a76;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;
+    filter: grayscale(1); opacity: 0.75;
+}
+.ip-mark-sensitive:hover { background: #2f3a52; filter: none; opacity: 1; }
+.ip-mark-sensitive.is-marked {
+    background: #3a2028; border-color: #7a4a58; filter: none; opacity: 1;
+}
+.ip-mark-sensitive:disabled { cursor: progress; opacity: 0.5; }
 /* A pin whose file no longer resolves: dimmed, and inert to a commit — the tap
    handler refuses it and points at 📌 / "Prune missing" instead. Asserted
    through getComputedStyle in tests/js/pins.test.js, so it must stay a class

@@ -1293,6 +1293,41 @@ function appendButtonWidget(node, label, onClick, opts = {}) {
 
 // src/gallery_loader.ts
 import { app } from "/scripts/app.js";
+
+// src/safe-tag.ts
+var TAG_URL = "/gallery_loader/tag";
+function sensitiveKeyword(cfg) {
+  return cfg.keywords.length ? cfg.keywords[0] : null;
+}
+function hasSensitiveTag(f, keyword) {
+  const want = keyword.toLowerCase();
+  return (f.tags ?? []).some((t) => t.toLowerCase() === want);
+}
+function tagRequestBody(addr, tag, present) {
+  if (addr.type === "path") {
+    return { type: "path", path: addr.absDir, name: addr.name, tag, present };
+  }
+  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, tag, present };
+}
+async function postTag(url, addr, tag, present) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(tagRequestBody(addr, tag, present))
+  });
+  if (!res.ok)
+    throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.ok)
+    throw new Error(data.error || "tag failed");
+  return Array.isArray(data.tags) ? data.tags : [];
+}
+function markSensitiveHTML(prefix, keyword, marked) {
+  const label = marked ? `Unmark sensitive (removes ‘${keyword}’)` : `Mark sensitive (‘${keyword}’)`;
+  return `<button type="button" class="${prefix}-mark-sensitive${marked ? " is-marked" : ""}" aria-pressed="${marked}" title="${label}" aria-label="${label}">\uD83D\uDE48</button>`;
+}
+
+// src/gallery_loader.ts
 var EXT_NAME = "comfyui-gallery-loader";
 var NODE = "GalleryLoadImage";
 var LIST_URL = "/gallery_loader/list";
@@ -1568,6 +1603,15 @@ function attachGallery(node) {
     loadAndRender();
   });
   refs.grid.addEventListener("click", (e) => {
+    const mark = e.target.closest(".gl-mark-sensitive");
+    if (mark) {
+      e.stopPropagation();
+      const card2 = mark.closest(".gl-card");
+      const f = card2 ? state.files.find((x) => x.name === card2.dataset.name) : undefined;
+      if (f)
+        toggleSensitiveTag(f, mark);
+      return;
+    }
     const star = e.target.closest(".gl-star");
     if (star) {
       const card2 = star.closest(".gl-card");
@@ -1737,6 +1781,7 @@ function attachGallery(node) {
     const grid = refs.grid;
     grid.innerHTML = "";
     const svCfg = readSafeViewConfig();
+    const safeKeyword = sensitiveKeyword(svCfg);
     const svPath = safeViewPath();
     renderSafeViewToggle();
     const inSub = state.type === "path" ? state.absDir && state.absDir !== "/" : !!state.subfolder;
@@ -1789,13 +1834,14 @@ function attachGallery(node) {
 ${dims}
 ${stamp}` : `${f.name}
 ${stamp}`;
+      const markBtn = safeKeyword ? markSensitiveHTML("gl", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
       c.innerHTML = `
-                <div class="gl-thumb"><img loading="lazy" decoding="async" data-src="${url}" alt=""></div>
+                <div class="gl-thumb"><img loading="lazy" decoding="async" data-src="${url}" alt="">${markBtn}</div>
                 <div class="gl-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="gl-dims">${dims}</div>` : ""}
                 ${starsHTML("gl", ratingOf(f))}
             `;
-      if (isSensitive({ name: f.name, path: svPath }, svCfg) && !revealSet.has(state.type, state.subfolder, f.name)) {
+      if (isSensitive({ name: f.name, path: svPath, tags: f.tags }, svCfg) && !revealSet.has(state.type, state.subfolder, f.name)) {
         applySafeView(c, svCfg, () => {
           revealSet.reveal(state.type, state.subfolder, f.name);
           renderGrid();
@@ -1823,6 +1869,30 @@ ${stamp}`;
   }
   function updateSelectedFooter() {
     refs.selected.textContent = (typeof widget.value === "string" ? widget.value : "") || "(none)";
+  }
+  async function toggleSensitiveTag(f, btn) {
+    const keyword = sensitiveKeyword(readSafeViewConfig());
+    if (!keyword)
+      return;
+    const next = !hasSensitiveTag(f, keyword);
+    const addr = {
+      type: state.type,
+      subfolder: state.subfolder,
+      absDir: state.absDir,
+      name: f.name
+    };
+    btn.disabled = true;
+    try {
+      f.tags = await postTag(TAG_URL, addr, keyword, next);
+      renderGrid();
+    } catch (e) {
+      notify({
+        severity: "warn",
+        summary: next ? "Not marked" : "Not unmarked",
+        detail: String(e?.message ?? e)
+      });
+      btn.disabled = false;
+    }
   }
   function setStarRating(name, row, next) {
     const prev = Number(row.dataset.rating || "0");
@@ -2477,7 +2547,7 @@ async function openImagePicker(widget, node, opts) {
     return sub ? `${root}/${sub}` : root;
   }
   function isHiddenCard(f, cfg) {
-    if (!isSensitive({ name: f.name, path: safeViewPath(f) }, cfg))
+    if (!isSensitive({ name: f.name, path: safeViewPath(f), tags: f.tags }, cfg))
       return false;
     return !revealSet.has(fileType(f), fileSub(f), f.name);
   }
@@ -2808,8 +2878,21 @@ async function openImagePicker(widget, node, opts) {
     toggleFilePin(f, btn);
   });
   gridEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".ip-mark-sensitive");
+    if (!btn)
+      return;
+    e.stopPropagation();
+    const card = btn.closest(".ip-card");
+    if (!card)
+      return;
+    const f = fileOfCard(card);
+    if (!f)
+      return;
+    toggleSensitiveTag(f, btn);
+  });
+  gridEl.addEventListener("click", (e) => {
     const target = e.target;
-    if (target.closest(".ip-star") || target.closest(".ip-pin-file"))
+    if (target.closest(".ip-star") || target.closest(".ip-pin-file") || target.closest(".ip-mark-sensitive"))
       return;
     const card = target.closest(".ip-card");
     if (!card)
@@ -2963,17 +3046,19 @@ async function openImagePicker(widget, node, opts) {
     const allLabel = allBtn?.textContent || "Copy all";
     allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
   }
-  function setStarRating(f, row, next) {
-    const prev = Number(row.dataset.rating || "0");
-    applyStars(row, next);
-    f.rating = next;
-    const addr = {
+  function addressOf(f) {
+    return {
       type: fileType(f),
       subfolder: fileSub(f),
       absDir: state.absPath,
       name: f.name
     };
-    postRating(RATING_URL2, addr, next).then((confirmed) => {
+  }
+  function setStarRating(f, row, next) {
+    const prev = Number(row.dataset.rating || "0");
+    applyStars(row, next);
+    f.rating = next;
+    postRating(RATING_URL2, addressOf(f), next).then((confirmed) => {
       if (confirmed !== next) {
         applyStars(row, confirmed);
         f.rating = confirmed;
@@ -2988,6 +3073,25 @@ async function openImagePicker(widget, node, opts) {
       applyStars(row, prev);
       f.rating = prev;
     });
+  }
+  async function toggleSensitiveTag(f, btn) {
+    const cfg = readSafeViewConfig();
+    const keyword = sensitiveKeyword(cfg);
+    if (!keyword)
+      return;
+    const next = !hasSensitiveTag(f, keyword);
+    btn.disabled = true;
+    try {
+      f.tags = await postTag(TAG_URL, addressOf(f), keyword, next);
+      renderGrid();
+    } catch (e) {
+      notify({
+        severity: "warn",
+        summary: next ? "Not marked" : "Not unmarked",
+        detail: String(e?.message ?? e)
+      });
+      btn.disabled = false;
+    }
   }
   function navigateUp() {
     if (state.type === "path") {
@@ -3187,6 +3291,7 @@ async function openImagePicker(widget, node, opts) {
     const q = state.query;
     gridEl.innerHTML = "";
     const svCfg = readSafeViewConfig();
+    const safeKeyword = sensitiveKeyword(svCfg);
     const flat = isFlat();
     const pinnedView = isPinned();
     const showUp = !flat && (state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder);
@@ -3270,6 +3375,7 @@ ${when}`;
       const pinned = isFilePinned(f);
       const pinBtn = mode !== "directory" && SANDBOXED_TYPES.includes(fileType(f)) ? `<button type="button" class="ip-pin-file${pinned ? " is-pinned" : ""}" aria-pressed="${pinned}" title="${pinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
       const infoBtn = mode !== "directory" && !missing && IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>` : "";
+      const markBtn = mode !== "directory" && !missing && safeKeyword ? markSensitiveHTML("ip", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
       const subLabel = pinnedView ? (() => {
         const ft = fileType(f);
         const sub = fileSub(f);
@@ -3278,7 +3384,7 @@ ${when}`;
       })() : flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
                 ${subLabel}
-                <div class="ip-thumb">${thumbInner}${infoBtn}${pinBtn}</div>
+                <div class="ip-thumb">${thumbInner}${infoBtn}${pinBtn}${markBtn}</div>
                 <div class="ip-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
@@ -3455,6 +3561,24 @@ var PICKER_CSS = `
 .ip-pin-file.is-pinned {
     background: #3a3320; border-color: #78683a; filter: none; opacity: 1;
 }
+/* \uD83D\uDE48 mark-sensitive toggle. Bottom-RIGHT: ⓘ has top-right, \uD83D\uDCCC top-left, and
+   Safe View's reveal button bottom-left (above), so this is the last free
+   corner. It must stay OUT of .cmk-sv-blur's subtree — it sits on .ip-thumb,
+   which is not the blurred element — or marking a file would blur the control
+   that unmarks it. */
+.ip-mark-sensitive {
+    position: absolute; bottom: 4px; right: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #6a6a76;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;
+    filter: grayscale(1); opacity: 0.75;
+}
+.ip-mark-sensitive:hover { background: #2f3a52; filter: none; opacity: 1; }
+.ip-mark-sensitive.is-marked {
+    background: #3a2028; border-color: #7a4a58; filter: none; opacity: 1;
+}
+.ip-mark-sensitive:disabled { cursor: progress; opacity: 0.5; }
 /* A pin whose file no longer resolves: dimmed, and inert to a commit — the tap
    handler refuses it and points at \uD83D\uDCCC / "Prune missing" instead. Asserted
    through getComputedStyle in tests/js/pins.test.js, so it must stay a class
