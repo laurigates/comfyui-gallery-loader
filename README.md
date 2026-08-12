@@ -141,10 +141,10 @@ three sandboxed roots only, never a VHS absolute path.
 
 ## Safe View
 
-Matches a keyword list against file and folder names and blurs the thumbnails
-that hit, blocks out their names, and — optionally — drops them from the
-listing entirely. It exists for the ordinary case of browsing your own renders
-on a phone with someone else in the room.
+Matches a keyword list against file and folder names **and the file's own XMP
+keywords**, and blurs the thumbnails that hit, blocks out their names, and —
+optionally — drops them from the listing entirely. It exists for the ordinary
+case of browsing your own renders on a phone with someone else in the room.
 
 **This is discretion, not access control.** A CSS blur is one devtools override
 away from gone, and the blurred bytes are still downloaded and still sit in the
@@ -171,6 +171,35 @@ including the root — so `temp` blurs everything under the temp tab. A blurred
 card carries a `👁` that reveals just that card, until you change folder or
 close the picker.
 
+### Marking a file sensitive (`🙈`)
+
+Names and folders are whatever you happened to call them. The third thing a
+keyword is matched against is the file's own **`dc:subject` keywords** — the
+standard "Keywords" field every photo manager reads and writes — so a marked
+file stays marked through a rename, a move, or a copy to another machine.
+
+Every file card carries a `🙈`. Tapping it writes your **first configured
+keyword** into the file's XMP and the card blurs immediately; tapping it again
+removes that keyword. The button says which word it will write, because that
+word is what the file ends up carrying. (With an empty keyword list there is
+nothing it could write that your own filter would match, so the button is not
+shown at all.)
+
+The write is the same read-modify-write the star rating uses: your other
+keywords, your caption, the creator field and every other property already on
+the file are preserved, and a file whose XMP cannot be parsed safely is never
+overwritten — the keyword goes to a `.xmp` sidecar instead. Formats without
+in-file XMP support (WebP, MP4, WebM) always use the sidecar.
+
+**It is interoperable in both directions.** A file you tag `nsfw` in digiKam,
+Lightroom, Bridge, XnView, ExifTool or Windows Explorer is matched here with no
+extra step; a file you mark here shows up tagged in all of them (the keyword is
+mirrored to `MicrosoftPhoto:LastKeywordXMP` too, which is what Windows reads).
+
+Marking is still **discretion, not access control** — it changes what the grid
+blurs and what `/list` returns, and nothing else. Anyone who addresses the file
+directly gets the same bytes as before.
+
 The keywords and every toggle are **shared with
 [comfyui-image-browser](https://github.com/laurigates/comfyui-image-browser)** —
 both packs register the same settings, so one keyword list covers both, and
@@ -185,8 +214,12 @@ Worth reading before relying on it — these are known gaps, not bugs:
 
 - **Folders are matched by name only.** A blandly-named folder full of
   sensitive files is not caught in folder view, because a folder card carries
-  nothing else to match on. Flat view (`≣`) lists the files themselves and does
-  catch them.
+  nothing else to match on — a folder has no XMP. Flat view (`≣`) lists the
+  files themselves and does catch them, keywords included.
+- **A keyword written by `🙈` is a keyword, not a flag.** Anything that reads
+  the file's metadata can see it, and anything that strips metadata (some
+  upload pipelines, some editors' "export") removes it. That is the price of
+  it being interoperable at all.
 - **Confirmations and toasts name files in plain text.** A rating failure or a
   pin error names the file it was about, unblurred.
 - **The metadata panel (`ⓘ`) shows the full prompt**, whether or not the card
@@ -221,10 +254,11 @@ the current absolute path.
 
 | Route                         | Purpose                                                                 |
 |-------------------------------|-------------------------------------------------------------------------|
-| `GET /gallery_loader/list`    | Directory listing. Params: `type=input\|output\|temp\|path`, `subfolder`, `path`, `extensions` (CSV), plus `safe_kw` (CSV keywords) + `safe_hide=1` for Safe View's server-side hide. Both Safe View params are required together; either alone filters nothing. Hiding is applied **above** the newest-N cap, so a mostly-sensitive folder still returns a full page of the rest. Image dims (width/height) are populated for image entries only. |
+| `GET /gallery_loader/list`    | Directory listing. Params: `type=input\|output\|temp\|path`, `subfolder`, `path`, `extensions` (CSV), plus `safe_kw` (CSV keywords) + `safe_hide=1` for Safe View's server-side hide. Both Safe View params are required together; either alone filters nothing. Name/path hiding is applied **above** the newest-N cap, and the `dc:subject` keyword tier (which needs the XMP read) tops the page back up as it probes, so a mostly-sensitive folder still returns a full page of the rest. Every row carries `tags` — the file's `dc:subject` keywords, read in the same pass as the rating. Image dims (width/height) are populated for image entries only. |
 | `GET /gallery_loader/base`    | Returns `base_path`, `input_dir`, `output_dir`, `temp_dir`, `user_dir`. Used by the modal to default VHS path-mode to the ComfyUI install root. |
 | `GET /gallery_loader/thumb`   | Webp 512px thumbnail for images at an arbitrary absolute path. Managed-type listings use core `/api/view` directly. |
 | `GET /gallery_loader/file`    | Streams a whitelisted-extension file (images + common video formats) at an absolute path. Used for video posters in path-mode where core `/api/view` doesn't apply. |
+| `POST /gallery_loader/tag`    | Add or remove ONE `dc:subject` keyword: `{type, subfolder\|path, name, tag, present}`. A delta — the file's other keywords, its rating and every foreign XMP property survive. Answers `{ok, tags, backend}` where `tags` is read back off the file **after** the write, not echoed from the request. |
 | `GET /gallery_loader/pins`    | The pin list, every entry resolved: `{ok, max, pins}`, each pin carrying `exists` plus (for a live file pin) the same per-file keys `/list` emits. An unresolvable pin is returned with `exists: false`, never dropped. |
 | `POST /gallery_loader/pins`   | One **delta** — `{op: "add"\|"remove"\|"prune", item?}` — never a whole-list PUT (two open browsers would each send their own list and the second write would discard the first's pin). Answers with the same whole list as the GET. `add` on an existing pin is a successful no-op. |
 

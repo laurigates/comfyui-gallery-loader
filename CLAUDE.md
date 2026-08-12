@@ -54,10 +54,11 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | `gallery_loader.py` | `GalleryLoadImage` node + eight HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating,metadata}` plus `GET`/`POST /gallery_loader/pins`). `/list` takes **`recursive=1`** (sandboxed roots only) for the flat view: every descendant, `dirs:[]`, each file tagged with a forward-slashed `subpath`. Both listing paths are capped and report `truncated`. `GET /pins` answers `{ok, max, pins}` with every pin resolved (`exists`, plus a live file pin's `/list` per-file keys); `POST /pins` takes one **delta** — `{op: "add"｜"remove"｜"prune", item?}` — and answers with the same whole list, so a caller never needs a follow-up GET. |
 | `pins_store.py` | **Canonical home** of the shared pin store — `comfyui-image-browser` vendors it verbatim (`just sync-pins-store` there + a CI drift job pull from this repo's `main`), so a change here must be synced downstream. Same direction as `xmp_meta.py` / `thumb_cache.py`, the opposite of `image_meta.py`. Pure-stdlib: normalization, the delta dispatcher, and atomic read/write of `<user_dir>/comfy-pins.json` — the one file both packs and both devices resolve. |
 | `image_meta.py` | **Vendored verbatim** from its canonical home `comfyui-image-browser/image_meta.py` — do not edit here. Re-sync with `just sync-image-meta`; CI fails on drift. Pure-stdlib reader behind `/metadata`. The direction is the REVERSE of `xmp_meta.py` / `thumb_cache.py`, which this pack is canonical for: that pack owns the `/metadata` feature and the parser's attacker-shaped-input suite. Each file still has exactly one home. |
-| `xmp_meta.py` | Pure, stdlib-only XMP star-rating read/write (in-file PNG/JPEG surgery + `.xmp` sidecar fallback). No ComfyUI imports. See ADR-0011. |
+| `xmp_meta.py` | Pure, stdlib-only XMP read/write (in-file PNG/JPEG surgery + `.xmp` sidecar fallback). No ComfyUI imports. Two owned vocabularies: the `xmp:Rating` star (ADR-0011) and the `dc:subject` keywords Safe View's tag tier matches, each mirrored to its `MicrosoftPhoto:` twin. Both writes go through `_write_xmp` + `update_xmp_packet`; see the hard rule below for why the two halves must never strip each other's. |
 | `src/index.ts` | Lone `bun build` entry. Imports both extension modules for their `app.registerExtension` side-effects. |
 | `src/gallery_loader.ts` | Inline-grid frontend for the `GalleryLoadImage` node (TS port of the former `web/js/gallery_loader.js`). |
 | `src/image-picker.ts` | Modal picker for stock `LoadImage` + VHS path loaders (TS port; consumes `@laurigates/comfy-modal-kit`). |
+| `src/safe-tag.ts` | The `🙈` mark-sensitive control, shared by both frontends: which keyword it writes, whether a file already carries it, the `/tag` request body, and the button markup. One module because BOTH surfaces carry the control and two hand-written copies of "which keyword" is exactly what drifts. |
 | `src/comfyui-shims.d.ts` | Types the `/scripts/app.js` runtime import via the `tsconfig.json` `paths` shim. |
 | `web/css/gallery_loader.css` | Inline-grid styles, copied into `web/dist/css/` by the build. (The modal injects its own `<style>` from `image-picker.ts`.) |
 | `web/dist/` | **Generated** build output (`bun run build`) — **tracked in git**, and shipped to the registry via `[tool.comfy] includes`. Tracked deliberately: ComfyUI-Manager updates over git, and a `fetch && merge --ff-only` cannot pull an ignored path, so an ignored bundle updates "successfully" while ComfyUI keeps serving the stale one. Rebuild and commit it in the same commit as any `src/` change. |
@@ -85,35 +86,64 @@ from ComfyUI core). `pyproject.toml` declares only
 add `requests`, `httpx`, `pydantic`, etc. If a feature needs a
 non-bundled library, design it as an optional companion pack.
 
-### A rating write is read-modify-write — never rebuild the packet
+### A metadata write is read-modify-write — never rebuild the packet
 
-`xmp_meta.build_xmp_packet()` returns a packet containing **only** our two
-rating properties. Writing it over a file that already has XMP destroys every
-other property that file carried — `dc:subject` keywords, the `dc:description`
+`xmp_meta.build_xmp_packet()` returns a packet containing **only** the
+properties asked for at that call. Writing it over a file that already has XMP
+destroys every other property that file carried — `dc:subject` keywords, the `dc:description`
 caption, `dc:creator`, `dc:rights` — and nothing in this pack reads those, so
 nothing notices. That was the bug fixed in #97: latent for fresh ComfyUI
 renders (no prior XMP), real data loss for anything imported or previously
 tagged in digiKam / Lightroom / Bridge / XnView.
 
-Every write path therefore goes through **`update_xmp_packet()`**, which parses
-the existing packet, replaces only `xmp:Rating` / `MicrosoftPhoto:Rating` (in
-either legal serialisation — attribute *or* child element, on *any*
-`rdf:Description`), and re-serialises everything else under its original
-prefix. `build_xmp_packet` is reachable only when there is no existing packet,
-and that path stays byte-identical to what shipped before.
+Every write path therefore goes through **`_write_xmp()` → `update_xmp_packet()`**,
+which parses the existing packet, touches only the properties that write owns —
+`xmp:Rating` / `MicrosoftPhoto:Rating` for a star, in either legal
+serialisation (attribute *or* child element, on *any* `rdf:Description`) —
+and re-serialises everything else under its original prefix. `build_xmp_packet`
+is reachable only when there is no existing packet, and a rating-only call
+there stays byte-identical to what shipped before.
 
 Two consequences worth keeping straight:
 
 - **A packet we refuse to parse is never overwritten.** Oversize,
   DOCTYPE/ENTITY, unparseable, or not RDF-shaped → `update_xmp_packet` returns
-  None and the rating goes to the sidecar. That is safe precisely because the
-  *same* gate stops `read_rating` from reading the in-file packet, so the
-  sidecar is not shadowed. If you ever relax one gate, relax both.
+  None and the write goes to the sidecar — for a keyword write exactly as for
+  a rating. That is safe precisely because the *same* gate stops `read_meta`
+  from reading the in-file packet, so the sidecar is not shadowed. If you ever
+  relax one gate, relax both.
 - **ElementTree is not the serialiser.** `ET.tostring` re-invents every prefix
   as `ns0:`/`ns1:`, and the fix for that (`ET.register_namespace`) mutates a
   process-global map shared with everything else in ComfyUI. The module
   collects the document's own prefix declarations and writes the XML itself.
   Don't swap it back for `ET.tostring`.
+
+### …and the two owned vocabularies never strip each other
+
+`xmp_meta` owns two things, and they have different *shapes*. `xmp:Rating` is
+scalar: legal as an attribute or a child element, replaced wholesale, stripped
+in both forms before the new value is set. `dc:subject` is an `rdf:Bag` of
+`rdf:li` — it cannot be an attribute, and it is where the file's OTHER keywords
+live. `OWNED_PROPERTIES` is therefore split into `OWNED_SCALAR_PROPERTIES` and
+`OWNED_BAG_PROPERTIES`, and **each write strips only its own half**. Stripping
+the union would make a star click delete every keyword on the file — #97 wearing
+a different hat, and just as invisible.
+
+Three consequences, each pinned by a mutation:
+
+- **A keyword write is a DELTA** (`add_tags` / `remove_tags`), merged against
+  the packet inside the write. It cannot be "here is the new list": the caller
+  cannot pre-read the list, because *which* packet gets written (in-file or
+  sidecar) is decided inside `_write_xmp`. It edits `rdf:li` elements in place
+  rather than re-emitting them, which is also what keeps an `xml:lang`
+  qualifier on a keyword alive.
+- **Read whichever container is there.** `rdf:Seq`, `rdf:Alt`, the bare
+  `<dc:subject>x</dc:subject>` simple value and the (illegal but real)
+  attribute form all occur in the wild. Assuming `rdf:Bag` reads *nothing* off
+  those files, which is indistinguishable from "untagged".
+- **`parse_meta_from_xmp` parses once** and both single-property readers
+  delegate to it. Reading rating and keywords through two `ET.fromstring` calls
+  measured +40% on the metadata pass over a 2000-file directory, for nothing.
 
 `tests/mutations.json` pins all of this — `just mutation-check
 comfyui-gallery-loader` from the workspace root.
@@ -202,11 +232,35 @@ Two things that look like details and are not:
   those segments, kept showing it. `type=path` is the one case where the OS path
   *is* the logical one.
 
+- **A file's `dc:subject` keywords are a third haystack, and each tag is
+  TOKENIZED** — `nsfw art` matches the keyword `nsfw`, `assets` still does not
+  match `ass`. That is exactly what the kit does (`for (const tag of
+  target.tags ?? []) for (const t of tokenize(tag))`); comparing whole tags
+  would make this pack disagree with the browser over the same file.
+
 Hiding is applied inside `_probe_newest`, **above** the newest-N cap, and that
 is why the filter lives in that function rather than at its two call sites:
 filtering after the slice spends the entire budget on rows that are then
 dropped, and the user gets a near-empty grid they cannot tell from an empty
 folder. `tests/test_safe_view.py` fails with `assert 0 == 3` against that bug.
+
+The keyword tier **cannot** run up there: it needs the XMP read, which is the
+expensive probe the cap exists to bound. So the loop probes newest-first and
+TOPS UP — a row dropped for its tags is replaced by probing one more — which
+keeps the full-page property without paying for a whole-tree read, and costs
+exactly the same number of probes as before whenever nothing is tagged.
+`PROBE_BUDGET_FACTOR` bounds the pathological case (a whole tree tagged), where
+the honest answer is a short page marked `truncated`. A mutation that reverts
+the top-up turns a 3-card page into an empty one.
+
+`🙈` (`src/safe-tag.ts`) writes **the user's first configured keyword** through
+`POST /gallery_loader/tag`. Not a hidden constant: the filter matches the user's
+own list, so any other choice could write a mark their filter does not honour —
+and with an empty list the control is not rendered at all rather than writing
+the packaged default. The response carries the keywords read back off the file
+**after** the write, never an echo of the request; the two differ whenever the
+write did not land the way the tap assumed, and painting the guess would show a
+mark the file does not carry.
 
 Safe View is **discretion, not access control** — the blur is CSS and the bytes
 are still served. Say so wherever it is documented; the README carries the

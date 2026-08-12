@@ -7,22 +7,22 @@
   "reporter": "exit-code",
   "mutations": [
     {
-      "label": "PNG rating write rebuilds the packet from scratch (the original data-loss bug)",
+      "label": "PNG write rebuilds the packet from scratch (the original data-loss bug)",
       "file": "xmp_meta.py",
-      "before": "            packet = update_xmp_packet(png_get_xmp(data, stop_at_idat=False), r)",
-      "after": "            packet = build_xmp_packet(r)"
+      "before": "            packet = apply(png_get_xmp(data, stop_at_idat=False), XPACKET_PAD)",
+      "after": "            packet = build_xmp_packet(0)"
     },
     {
       "label": "PNG write stops at IDAT, so a trailing XMP chunk is replaced unread",
       "file": "xmp_meta.py",
-      "before": "            packet = update_xmp_packet(png_get_xmp(data, stop_at_idat=False), r)",
-      "after": "            packet = update_xmp_packet(png_get_xmp(data), r)"
+      "before": "            packet = apply(png_get_xmp(data, stop_at_idat=False), XPACKET_PAD)",
+      "after": "            packet = apply(png_get_xmp(data), XPACKET_PAD)"
     },
     {
-      "label": "JPEG rating write rebuilds the packet from scratch",
+      "label": "JPEG write rebuilds the packet from scratch",
       "file": "xmp_meta.py",
-      "before": "            existing = jpeg_get_xmp(data)\n            packet = update_xmp_packet(existing, r)",
-      "after": "            existing = jpeg_get_xmp(data)\n            packet = build_xmp_packet(r)"
+      "before": "            existing = jpeg_get_xmp(data)\n            packet = apply(existing, XPACKET_PAD)",
+      "after": "            existing = jpeg_get_xmp(data)\n            packet = build_xmp_packet(0)"
     },
     {
       "label": "sidecar rating write rebuilds the packet from scratch",
@@ -39,13 +39,13 @@
     {
       "label": "the element form of our rating is left behind, shadowing the new one",
       "file": "xmp_meta.py",
-      "before": "        if isinstance(child.tag, str) and child.tag in OWNED_PROPERTIES:",
+      "before": "        if isinstance(child.tag, str) and child.tag in names:",
       "after": "        if False:"
     },
     {
       "label": "our rating attribute is never removed (a stale copy on a sibling rdf:Description survives)",
       "file": "xmp_meta.py",
-      "before": "    for name in OWNED_PROPERTIES:\n        parent.attrib.pop(name, None)",
+      "before": "    for name in names:\n        parent.attrib.pop(name, None)",
       "after": "    for name in ():\n        parent.attrib.pop(name, None)"
     },
     {
@@ -67,108 +67,208 @@
       "after": "        .replace(\"\\n\", \"\\n\")"
     },
     {
-      "label": "CONTROL — comment text only; MUST be MISSED, or this harness is lying",
+      "label": "CONTROL \u2014 comment text only; MUST be MISSED, or this harness is lying",
       "file": "xmp_meta.py",
       "before": "# does it correctly. This is also what Adobe's own XMP SDK does on update.",
       "after": "# does it correctly, which is also how Adobe's own XMP SDK handles an update."
     },
-
     {
-      "label": "SAFE VIEW backend — the matcher compares SUBSTRINGS instead of whole tokens",
+      "label": "SAFE VIEW backend \u2014 the matcher compares SUBSTRINGS instead of whole tokens",
       "file": "gallery_loader.py",
-      "before": "    hay = _safe_tokens(name) | _safe_tokens(path)\n    return any(kw in hay for kw in keywords)",
-      "after": "    hay = f\"{name} {path}\".lower()\n    return any(kw in hay for kw in keywords)"
+      "before": "    hay = _safe_tokens(name) | _safe_tokens(path)\n    for tag in tags:\n        hay |= _safe_tokens(tag)\n    return any(kw in hay for kw in keywords)",
+      "after": "    hay = f\"{name} {path} {' '.join(tags)}\".lower()\n    return any(kw in hay for kw in keywords)"
     },
     {
-      "label": "SAFE VIEW backend — hiding runs BELOW the newest-N cap, so a mostly-sensitive folder returns a near-empty page",
+      "label": "SAFE VIEW backend \u2014 hiding runs BELOW the newest-N cap, so a mostly-sensitive folder returns a near-empty page",
       "file": "gallery_loader.py",
-      "before": "    if safe_keywords:\n        found = [\n            entry\n            for entry in found\n            if not _is_sensitive(entry[2], _safe_join(safe_base, entry[1]), safe_keywords)\n        ]\n    found.sort(key=lambda f: (-f[0], f[1], f[2]))\n    truncated = walk_truncated or len(found) > cap\n    files: list[dict[str, Any]] = []\n    for _mtime, subpath, name, ext, path, st in found[:cap]:",
-      "after": "    found.sort(key=lambda f: (-f[0], f[1], f[2]))\n    truncated = walk_truncated or len(found) > cap\n    files: list[dict[str, Any]] = []\n    _capped = found[:cap]\n    if safe_keywords:\n        _capped = [\n            entry\n            for entry in _capped\n            if not _is_sensitive(entry[2], _safe_join(safe_base, entry[1]), safe_keywords)\n        ]\n    for _mtime, subpath, name, ext, path, st in _capped:"
+      "before": "    if safe_keywords:\n        found = [\n            entry\n            for entry in found\n            if not _is_sensitive(entry[2], _safe_join(safe_base, entry[1]), safe_keywords)\n        ]\n    found.sort(key=lambda f: (-f[0], f[1], f[2]))",
+      "after": "    found.sort(key=lambda f: (-f[0], f[1], f[2]))\n    found = found[:cap]\n    if safe_keywords:\n        found = [\n            entry\n            for entry in found\n            if not _is_sensitive(entry[2], _safe_join(safe_base, entry[1]), safe_keywords)\n        ]"
     },
     {
-      "label": "SAFE VIEW backend — a matching DIRECTORY survives as a visible, empty doorway",
+      "label": "SAFE VIEW backend \u2014 a matching DIRECTORY survives as a visible, empty doorway",
       "file": "gallery_loader.py",
       "before": "                            if safe_keywords and _is_sensitive(entry.name, \"\", safe_keywords):\n                                continue",
       "after": "                            if False:\n                                continue"
     },
     {
-      "label": "SAFE VIEW backend — the resolved OS path is matched, so a keyword from the install location hides everything",
+      "label": "SAFE VIEW backend \u2014 the resolved OS path is matched, so a keyword from the install location hides everything",
       "file": "gallery_loader.py",
       "before": "    safe_base = base if type_name == \"path\" else _safe_join(type_name, subfolder)",
       "after": "    safe_base = base"
     },
     {
-      "label": "SAFE VIEW backend — the ROOT segment is dropped from the address, so `output`/`temp` match nothing",
+      "label": "SAFE VIEW backend \u2014 the ROOT segment is dropped from the address, so `output`/`temp` match nothing",
       "file": "gallery_loader.py",
       "before": "    safe_base = base if type_name == \"path\" else _safe_join(type_name, subfolder)",
       "after": "    safe_base = base if type_name == \"path\" else _safe_join(subfolder)"
     },
     {
-      "label": "SAFE VIEW backend — keywords are honoured without the hide flag, dropping rows the frontend meant to blur",
+      "label": "SAFE VIEW backend \u2014 keywords are honoured without the hide flag, dropping rows the frontend meant to blur",
       "file": "gallery_loader.py",
       "before": "    safe_keywords = _parse_safe_keywords(q.get(\"safe_kw\", \"\")) if safe_hide else []",
       "after": "    safe_keywords = _parse_safe_keywords(q.get(\"safe_kw\", \"\"))"
     },
     {
-      "label": "SAFE VIEW backend — punctuation is left on a keyword, which can then never equal a token",
+      "label": "SAFE VIEW backend \u2014 punctuation is left on a keyword, which can then never equal a token",
       "file": "gallery_loader.py",
       "before": "        kw = _SAFE_KEYWORD_STRIP.sub(\"\", piece.lower())",
       "after": "        kw = piece.lower()"
     },
-
     {
-      "label": "SAFE VIEW picker — the thumbnail CONTAINER is blurred, smearing the ⓘ/📌 controls and the reveal button with it",
+      "label": "SAFE VIEW picker \u2014 the thumbnail CONTAINER is blurred, smearing the \u24d8/\ud83d\udccc controls and the reveal button with it",
       "file": "src/image-picker.ts",
       "before": "    const media = safeViewMediaEl(card);",
       "after": "    const media = card.querySelector(\".ip-thumb\");"
     },
     {
-      "label": "SAFE VIEW picker — names are not blocked out, so the title attribute keeps leaking the filename on hover",
+      "label": "SAFE VIEW picker \u2014 names are not blocked out, so the title attribute keeps leaking the filename on hover",
       "file": "src/image-picker.ts",
       "before": "      for (const el of card.querySelectorAll(\".ip-name, .ip-subpath\")) setSpoilered(el, true);",
       "after": "      for (const el of card.querySelectorAll(\".ip-name, .ip-subpath\")) setSpoilered(el, false);"
     },
     {
-      "label": "SAFE VIEW picker — the ROOT segment is dropped from the matched address, disagreeing with the backend",
+      "label": "SAFE VIEW picker \u2014 the ROOT segment is dropped from the matched address, disagreeing with the backend",
       "file": "src/image-picker.ts",
       "before": "    return sub ? `${root}/${sub}` : root;",
       "after": "    return sub;"
     },
     {
-      "label": "SAFE VIEW picker — the reveal set is ignored, so a revealed card re-blurs on the next render",
+      "label": "SAFE VIEW picker \u2014 the reveal set is ignored, so a revealed card re-blurs on the next render",
       "file": "src/image-picker.ts",
       "before": "    return !revealSet.has(fileType(f), fileSub(f), f.name);",
       "after": "    return true;"
     },
     {
-      "label": "SAFE VIEW picker — safe_kw/safe_hide are sent even when hiding is off, dropping rows the user asked to see blurred",
+      "label": "SAFE VIEW picker \u2014 safe_kw/safe_hide are sent even when hiding is off, dropping rows the user asked to see blurred",
       "file": "src/image-picker.ts",
       "before": "    return cfg.hide && isSafeViewActive(cfg) ? cfg.keywords.join(\",\") : \"\";",
       "after": "    return isSafeViewActive(cfg) ? cfg.keywords.join(\",\") : \"\";"
     },
     {
-      "label": "SAFE VIEW picker — the change subscription outlives the modal, repainting a detached grid forever",
+      "label": "SAFE VIEW picker \u2014 the change subscription outlives the modal, repainting a detached grid forever",
       "file": "src/image-picker.ts",
       "before": "      disposeSafeViewSub?.();\n      disposeSafeViewSub = null;",
       "after": "      disposeSafeViewSub = null;"
     },
     {
-      "label": "SAFE VIEW picker — reveals survive a tab/folder change, so navigating away leaves cards unblurred",
+      "label": "SAFE VIEW picker \u2014 reveals survive a tab/folder change, so navigating away leaves cards unblurred",
       "file": "src/image-picker.ts",
       "before": "    if (revealLocation !== null && revealLocation !== here) revealSet.clear();",
       "after": "    if (false) revealSet.clear();"
     },
     {
-      "label": "SAFE VIEW inline grid — the card image is never blurred",
+      "label": "SAFE VIEW inline grid \u2014 the card image is never blurred",
       "file": "src/gallery_loader.ts",
       "before": "    const media = card.querySelector(\".gl-thumb img\");",
       "after": "    const media = null;"
     },
     {
-      "label": "CONTROL — Safe View comment text only; MUST be MISSED, or the Safe View assertions are over-triggering",
+      "label": "CONTROL \u2014 Safe View comment text only; MUST be MISSED, or the Safe View assertions are over-triggering",
       "file": "gallery_loader.py",
       "before": "# permission check and nothing downstream should be written as though it is.",
       "after": "# permission check, and nothing downstream should be written as if it were."
+    },
+    {
+      "label": "TAGS \u2014 a rating write strips the keywords too (a star click deletes every dc:subject keyword)",
+      "file": "xmp_meta.py",
+      "before": "        _strip_owned_properties(root, OWNED_SCALAR_PROPERTIES)",
+      "after": "        _strip_owned_properties(root, OWNED_PROPERTIES)"
+    },
+    {
+      "label": "TAGS \u2014 a keyword write REPLACES the array instead of merging, dropping the file's other keywords",
+      "file": "xmp_meta.py",
+      "before": "    wanted = _dedupe_tags([*seeds, *add])",
+      "after": "    wanted = _dedupe_tags([*seeds, *add])\n    for _stale in list(_tag_container(holder) if holder is not None else ()):\n        _tag_container(holder).remove(_stale)"
+    },
+    {
+      "label": "TAGS \u2014 existing rdf:li elements are re-emitted as plain strings, so an xml:lang qualifier is lost",
+      "file": "xmp_meta.py",
+      "before": "        present.add(key)\n        previous = child",
+      "after": "        child.attrib.clear()\n        present.add(key)\n        previous = child"
+    },
+    {
+      "label": "TAGS \u2014 only rdf:Bag is read, so a file whose dc:subject is an rdf:Seq reads as untagged",
+      "file": "xmp_meta.py",
+      "before": "RDF_CONTAINERS = (f\"{{{NS_RDF}}}Bag\", f\"{{{NS_RDF}}}Seq\", f\"{{{NS_RDF}}}Alt\")",
+      "after": "RDF_CONTAINERS = (f\"{{{NS_RDF}}}Bag\",)"
+    },
+    {
+      "label": "TAGS \u2014 an absent property reads as an empty list, so a sidecar's keywords are shadowed by a file that never mentioned any",
+      "file": "xmp_meta.py",
+      "before": "    return _dedupe_tags(values) if found else None",
+      "after": "    return _dedupe_tags(values)"
+    },
+    {
+      "label": "TAGS \u2014 the MicrosoftPhoto mirror is never written, so Windows shows nothing",
+      "file": "xmp_meta.py",
+      "before": "        for name in OWNED_BAG_PROPERTIES:\n            _apply_tag_delta(root, desc, name, add_tags, remove_tags)",
+      "after": "        for name in OWNED_BAG_PROPERTIES[:1]:\n            _apply_tag_delta(root, desc, name, add_tags, remove_tags)"
+    },
+    {
+      "label": "TAGS \u2014 a keyword write no longer refuses an unparseable packet (it clobbers a packet it would not read)",
+      "file": "xmp_meta.py",
+      "before": "    tagging = bool(add_tags) or bool(remove_tags)\n    if not existing:",
+      "after": "    tagging = bool(add_tags) or bool(remove_tags)\n    if not existing or tagging:"
+    },
+    {
+      "label": "TAGS \u2014 a keyword carrying a control character is written instead of refused",
+      "file": "xmp_meta.py",
+      "before": "    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in collapsed):\n        return \"\"",
+      "after": "    if False:\n        return \"\""
+    },
+    {
+      "label": "TAGS backend \u2014 the matcher ignores a file's keywords, so a tag-only match is never hidden",
+      "file": "gallery_loader.py",
+      "before": "    for tag in tags:\n        hay |= _safe_tokens(tag)",
+      "after": "    for tag in ():\n        hay |= _safe_tokens(tag)"
+    },
+    {
+      "label": "TAGS backend \u2014 keyword tokens are compared whole, so `nsfw art` stops matching `nsfw` (and the frontend keeps matching it)",
+      "file": "gallery_loader.py",
+      "before": "    for tag in tags:\n        hay |= _safe_tokens(tag)",
+      "after": "    for tag in tags:\n        hay.add(tag.lower())"
+    },
+    {
+      "label": "TAGS backend \u2014 the keyword tier does not top the page back up, so a tagged folder returns a near-empty grid",
+      "file": "gallery_loader.py",
+      "before": "        if len(files) >= cap or probed >= budget:",
+      "after": "        if probed >= cap or probed >= budget:"
+    },
+    {
+      "label": "TAGS backend \u2014 /list stops surfacing keywords, so the frontend cannot blur or mark by them",
+      "file": "gallery_loader.py",
+      "before": "        \"rating\": rating,\n        \"tags\": tags,",
+      "after": "        \"rating\": rating,\n        \"tags\": [],"
+    },
+    {
+      "label": "TAGS backend \u2014 /tag answers with the request instead of what was stored",
+      "file": "gallery_loader.py",
+      "before": "            \"tags\": xmp_meta.read_tags(target, head_only=False),",
+      "after": "            \"tags\": [tag] if present else [],"
+    },
+    {
+      "label": "TAGS picker \u2014 the card is matched without its keywords, so a tag-only match is never blurred",
+      "file": "src/image-picker.ts",
+      "before": "    if (!isSensitive({ name: f.name, path: safeViewPath(f), tags: f.tags }, cfg)) return false;",
+      "after": "    if (!isSensitive({ name: f.name, path: safeViewPath(f) }, cfg)) return false;"
+    },
+    {
+      "label": "TAGS picker \u2014 \ud83d\ude48 writes a hardcoded keyword instead of the one the user configured",
+      "file": "src/safe-tag.ts",
+      "before": "  return cfg.keywords.length ? (cfg.keywords[0] as string) : null;",
+      "after": "  return \"nsfw\";"
+    },
+    {
+      "label": "TAGS picker \u2014 the card handler does not skip a mark tap, so \ud83d\ude48 commits the file and closes the modal",
+      "file": "src/image-picker.ts",
+      "before": "      target.closest(\".ip-mark-sensitive\")\n    )\n      return;",
+      "after": "      false\n    )\n      return;"
+    },
+    {
+      "label": "TAGS picker \u2014 the repaint uses the optimistic guess rather than what the server stored",
+      "file": "src/image-picker.ts",
+      "before": "      f.tags = await postTag(TAG_URL, addressOf(f), keyword, next);",
+      "after": "      await postTag(TAG_URL, addressOf(f), keyword, next);\n      f.tags = next ? [...(f.tags ?? []), keyword] : [];"
     }
   ]
 }

@@ -119,8 +119,9 @@ def _safe_join(*parts: str) -> str:
     return "/".join(p.strip("/") for p in parts if p and p.strip("/"))
 
 
-def _is_sensitive(name: str, path: str, keywords: Sequence[str]) -> bool:
-    """Whether ``name`` (in folder ``path``) matches any keyword as a whole token.
+def _is_sensitive(name: str, path: str, keywords: Sequence[str], tags: Sequence[str] = ()) -> bool:
+    """Whether ``name`` (in folder ``path``, carrying ``tags``) matches any
+    keyword as a whole token.
 
     ``path`` must be the LOGICAL address the frontend also sees — for a
     sandboxed root that is ``output/nsfw/2026-08-04``, never the resolved OS
@@ -128,10 +129,17 @@ def _is_sensitive(name: str, path: str, keywords: Sequence[str]) -> bool:
     ``/home/<user>/ComfyUI/output`` into the haystack, so a keyword of
     ``comfyui`` would hide the entire library while the frontend — which never
     sees those segments — kept showing it.
+
+    ``tags`` are the file's ``dc:subject`` keywords. Each is TOKENIZED like any
+    other haystack rather than compared whole, matching the kit's ``isSensitive``
+    exactly: a file tagged ``nsfw art`` in digiKam matches the keyword ``nsfw``,
+    and a file tagged ``assets`` still does not match ``ass``.
     """
     if not keywords:
         return False
     hay = _safe_tokens(name) | _safe_tokens(path)
+    for tag in tags:
+        hay |= _safe_tokens(tag)
     return any(kw in hay for kw in keywords)
 
 
@@ -157,6 +165,11 @@ FLAT_WALK_CAP = 200_000
 # 50k-file directory costs 50k header opens plus 50k rating reads on the event
 # loop, and 50k cards in one grid is well past usable either way.
 DIR_LIST_CAP = 5000
+
+# How far past the cap the keyword tier may keep probing to top a page back up
+# (see _probe_newest). Only applies when Safe View hiding is on: with it off the
+# loop probes exactly `cap` rows, which is what it always did.
+PROBE_BUDGET_FACTOR = 4
 
 # Image-content mimetypes guard for the picker; covers the common cases
 # that mimetypes.guess_type misses on this distro.
@@ -342,19 +355,17 @@ def _resolve_listing_base(type_name: str, subfolder: str, abs_path: str) -> tupl
     return None, f"unknown type: {type_name}"
 
 
-def _validate_rating_request(body: Any) -> tuple[dict[str, Any] | None, str]:
-    """Validate a /gallery_loader/rating POST body. Returns (parsed, error).
+def _validate_media_address(body: Any) -> tuple[dict[str, Any] | None, str]:
+    """Validate the ``{type, subfolder|path, name}`` half of a metadata-write
+    POST body. Returns (parsed, error).
 
-    Enforces an integer 0..5 rating, a bare (traversal-free) filename, and
-    the image/video extension whitelist — the same security perimeter as
-    the /thumb and /file endpoints. Path resolution stays in the handler.
+    Enforces a bare (traversal-free) filename and the image/video extension
+    whitelist — the same security perimeter as the /thumb and /file endpoints.
+    Path resolution stays in the handler. Shared by /rating and /tag so the two
+    writes cannot drift into addressing files differently.
     """
     if not isinstance(body, dict):
         return None, "invalid body"
-    rating = body.get("rating")
-    # bool is an int subclass — reject it explicitly.
-    if isinstance(rating, bool) or not isinstance(rating, int) or not (0 <= rating <= 5):
-        return None, "rating must be an integer 0..5"
     name = body.get("name")
     if not isinstance(name, str) or not name:
         return None, "invalid name"
@@ -370,8 +381,61 @@ def _validate_rating_request(body: Any) -> tuple[dict[str, Any] | None, str]:
         "subfolder": body.get("subfolder") or "",
         "path": body.get("path") or "",
         "name": name,
-        "rating": rating,
     }, ""
+
+
+def _validate_rating_request(body: Any) -> tuple[dict[str, Any] | None, str]:
+    """Validate a /gallery_loader/rating POST body. Returns (parsed, error)."""
+    parsed, err = _validate_media_address(body)
+    if err:
+        return None, err
+    assert parsed is not None
+    rating = body.get("rating")
+    # bool is an int subclass — reject it explicitly.
+    if isinstance(rating, bool) or not isinstance(rating, int) or not (0 <= rating <= 5):
+        return None, "rating must be an integer 0..5"
+    parsed["rating"] = rating
+    return parsed, ""
+
+
+def _validate_tag_request(body: Any) -> tuple[dict[str, Any] | None, str]:
+    """Validate a /gallery_loader/tag POST body. Returns (parsed, error).
+
+    ``{..., tag: "nsfw", present: true}`` — ONE keyword per call, added or
+    removed. The keyword is normalized by ``xmp_meta.normalize_tag`` (the same
+    function the writer uses), so a value that would not survive the round trip
+    is rejected here rather than written and silently lost.
+    """
+    parsed, err = _validate_media_address(body)
+    if err:
+        return None, err
+    assert parsed is not None
+    tag = xmp_meta.normalize_tag(body.get("tag"))
+    if not tag:
+        return None, "invalid tag"
+    present = body.get("present")
+    if not isinstance(present, bool):
+        return None, "present must be a boolean"
+    parsed["tag"] = tag
+    parsed["present"] = present
+    return parsed, ""
+
+
+def _resolve_write_target(parsed: dict[str, Any]) -> tuple[str | None, str, int]:
+    """Absolute path for a validated metadata-write address, or (None, error,
+    status). Shared by /rating and /tag."""
+    base, berr = _resolve_listing_base(parsed["type"], parsed["subfolder"], parsed["path"])
+    if berr:
+        return None, berr, 400
+    assert base is not None
+    target = os.path.abspath(os.path.join(base, parsed["name"]))
+    # Belt-and-braces: the name is already separator-free, but re-assert
+    # containment so the target can't escape the sandboxed root.
+    if parsed["type"] in SANDBOXED_TYPES and os.path.commonpath([target, base]) != base:
+        return None, "name escapes root", 400
+    if not os.path.isfile(target):
+        return None, "file not found", 404
+    return target, "", 200
 
 
 def _scan_file_entry(
@@ -395,10 +459,13 @@ def _scan_file_entry(
         except Exception as exc:
             log.debug("size probe failed for %s: %s", path, exc)
     try:
-        rating = xmp_meta.read_rating_cached(path, st)
+        # ONE XMP read for both. The rating and the dc:subject keywords come
+        # out of the same packet, so asking for them separately would double
+        # the file opens this listing already pays for.
+        rating, tags = xmp_meta.read_meta_cached(path, st)
     except Exception as exc:
-        log.debug("rating read failed for %s: %s", path, exc)
-        rating = 0
+        log.debug("metadata read failed for %s: %s", path, exc)
+        rating, tags = 0, []
     return {
         "name": name,
         "mtime": st.st_mtime,
@@ -407,6 +474,7 @@ def _scan_file_entry(
         "height": height,
         "ext": ext,
         "rating": rating,
+        "tags": tags,
     }
 
 
@@ -444,8 +512,20 @@ def _probe_newest(
     entire newest-N budget on rows that are then dropped, so the user gets a
     near-empty grid and no way to tell it from an empty folder. Filtering first
     means the cap is spent on rows that actually ship: a full page of the rest.
-    ``truncated`` is computed from the filtered count for the same reason — it
-    must describe the listing the caller received, not one it never saw.
+    ``truncated`` is computed from what the caller actually received for the
+    same reason — it must describe the listing that shipped, not one it never
+    saw.
+
+    The filter has TWO TIERS and they cannot both run above the cap. Name and
+    path are free (they are already in hand), so they filter the whole list up
+    front. The ``dc:subject`` keyword tier needs the XMP read, which is the
+    expensive probe the cap exists to bound — so instead of probing everything,
+    the loop below probes in newest-first order and TOPS UP: a row dropped for
+    its tags is replaced by probing one more. That keeps the "a full page of
+    the rest" property of tier one without paying tier one's price, and costs
+    exactly the same number of probes as before whenever nothing is tagged.
+    ``PROBE_BUDGET_FACTOR`` bounds the pathological case (a whole tree tagged),
+    where the honest answer is a short page marked ``truncated``.
     """
     if safe_keywords:
         found = [
@@ -454,13 +534,22 @@ def _probe_newest(
             if not _is_sensitive(entry[2], _safe_join(safe_base, entry[1]), safe_keywords)
         ]
     found.sort(key=lambda f: (-f[0], f[1], f[2]))
-    truncated = walk_truncated or len(found) > cap
+    budget = cap * PROBE_BUDGET_FACTOR if safe_keywords else cap
     files: list[dict[str, Any]] = []
-    for _mtime, subpath, name, ext, path, st in found[:cap]:
+    probed = 0
+    for _mtime, subpath, name, ext, path, st in found:
+        if len(files) >= cap or probed >= budget:
+            break
         fd = _scan_file_entry(path, name, ext, st, image_subset)
+        probed += 1
+        if safe_keywords and _is_sensitive(
+            name, _safe_join(safe_base, subpath), safe_keywords, fd["tags"]
+        ):
+            continue
         if with_subpath:
             fd["subpath"] = subpath
         files.append(fd)
+    truncated = walk_truncated or probed < len(found)
     return files, truncated
 
 
@@ -853,25 +942,62 @@ async def gallery_set_rating(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": err}, status=400)
     assert parsed is not None
 
-    base, berr = _resolve_listing_base(parsed["type"], parsed["subfolder"], parsed["path"])
-    if berr:
-        return web.json_response({"ok": False, "error": berr}, status=400)
-    assert base is not None
-
-    target = os.path.abspath(os.path.join(base, parsed["name"]))
-    # Belt-and-braces: the name is already separator-free, but re-assert
-    # containment so the target can't escape the sandboxed root.
-    if parsed["type"] in ("input", "output", "temp") and (
-        os.path.commonpath([target, base]) != base
-    ):
-        return web.json_response({"ok": False, "error": "name escapes root"}, status=400)
-    if not os.path.isfile(target):
-        return web.json_response({"ok": False, "error": "file not found"}, status=404)
+    target, terr, status = _resolve_write_target(parsed)
+    if target is None:
+        return web.json_response({"ok": False, "error": terr}, status=status)
 
     ok, backend = xmp_meta.write_rating(target, parsed["rating"])
     if not ok:
         return web.json_response({"ok": False, "error": backend}, status=500)
     return web.json_response({"ok": True, "rating": parsed["rating"], "backend": backend})
+
+
+@PromptServer.instance.routes.post("/gallery_loader/tag")
+async def gallery_set_tag(request: web.Request) -> web.Response:
+    """Add or remove ONE ``dc:subject`` keyword on a file's XMP (or sidecar).
+
+    Body: ``{type, subfolder|path, name, tag, present}`` — the same addressing
+    the rating write uses. ``present: true`` adds the keyword, ``false``
+    removes it; the file's other keywords, its rating, and every foreign
+    property are preserved (``xmp_meta.write_tags`` is a delta).
+
+    The response carries the file's keywords AFTER the write, read back from
+    what was actually written rather than echoed from the request: a keyword
+    the writer normalized differently, or one that was already there, must not
+    come back looking like something else got stored.
+
+    This is a keyword write, not an access-control gate. Marking a file
+    sensitive changes what Safe View hides; it does not change what any
+    endpoint will serve to a caller that addresses the file directly.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+
+    parsed, err = _validate_tag_request(body)
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert parsed is not None
+
+    target, terr, status = _resolve_write_target(parsed)
+    if target is None:
+        return web.json_response({"ok": False, "error": terr}, status=status)
+
+    tag = parsed["tag"]
+    present = parsed["present"]
+    ok, backend = xmp_meta.write_tags(
+        target, add=[tag] if present else [], remove=[] if present else [tag]
+    )
+    if not ok:
+        return web.json_response({"ok": False, "error": backend}, status=500)
+    return web.json_response(
+        {
+            "ok": True,
+            "tags": xmp_meta.read_tags(target, head_only=False),
+            "backend": backend,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
