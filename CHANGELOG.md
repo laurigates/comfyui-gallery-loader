@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.28](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.27...comfyui-gallery-loader-v0.1.28) (2026-08-12)
+
+
+### Documentation
+
+* **safe-tag:** point sensitiveKeyword at the cross-pack drift issue ([#104](https://github.com/laurigates/comfyui-gallery-loader/issues/104)) ([05d526e](https://github.com/laurigates/comfyui-gallery-loader/commit/05d526e904d133c8ee3f4bd6535b9589c1085432))
+
 ## [0.1.27](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.26...comfyui-gallery-loader-v0.1.27) (2026-08-12)
 
 
