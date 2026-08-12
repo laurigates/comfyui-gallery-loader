@@ -91,9 +91,9 @@ non-bundled library, design it as an optional companion pack.
 rating properties. Writing it over a file that already has XMP destroys every
 other property that file carried — `dc:subject` keywords, the `dc:description`
 caption, `dc:creator`, `dc:rights` — and nothing in this pack reads those, so
-nothing notices. That was the original bug: latent for fresh ComfyUI renders
-(no prior XMP), real data loss for anything imported or previously tagged in
-digiKam / Lightroom / Bridge / XnView.
+nothing notices. That was the bug fixed in #97: latent for fresh ComfyUI
+renders (no prior XMP), real data loss for anything imported or previously
+tagged in digiKam / Lightroom / Bridge / XnView.
 
 Every write path therefore goes through **`update_xmp_packet()`**, which parses
 the existing packet, replaces only `xmp:Rating` / `MicrosoftPhoto:Rating` (in
