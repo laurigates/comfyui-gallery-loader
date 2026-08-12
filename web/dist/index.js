@@ -10,14 +10,15 @@ function installBackGuard(onBack) {
     history.pushState({ cmpBackGuard: true }, "");
     armed = true;
   };
-  const dispose = () => {
+  const dispose = (opts) => {
     if (disposed)
       return;
     disposed = true;
     window.removeEventListener("popstate", onPop);
     if (armed) {
       armed = false;
-      history.back();
+      if (opts?.pop !== false)
+        history.back();
     }
   };
   function onPop() {
@@ -59,7 +60,11 @@ function getKit() {
       activeModal: null,
       pointerClaim: null,
       modalChrome: [],
-      pointerGuardInstalled: false
+      pointerGuardInstalled: false,
+      hubEntries: [],
+      hubLauncherInstalled: false,
+      hubToggles: [],
+      safeViewListeners: []
     };
     g[KEY] = kit;
   }
@@ -69,6 +74,12 @@ function getKit() {
     kit.modelPickers = [];
   if (!kit.modalChrome)
     kit.modalChrome = [];
+  if (!kit.hubEntries)
+    kit.hubEntries = [];
+  if (!kit.hubToggles)
+    kit.hubToggles = [];
+  if (!kit.safeViewListeners)
+    kit.safeViewListeners = [];
   return kit;
 }
 var SORT_OPTIONS = [
@@ -436,146 +447,6 @@ function notify(opts) {
   }
   return { close, el: toast };
 }
-var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
-function installLazyMedia(container, opts) {
-  const noop = () => {};
-  if (typeof IntersectionObserver === "undefined")
-    return noop;
-  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
-  if (!els.length)
-    return noop;
-  const io = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting)
-        continue;
-      const el = e.target;
-      const src = el.dataset.src;
-      if (src) {
-        if (el.tagName === "VIDEO")
-          el.preload = "metadata";
-        el.src = src;
-        el.removeAttribute("data-src");
-      }
-      io.unobserve(el);
-    }
-  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
-  for (const el of els)
-    io.observe(el);
-  return () => io.disconnect();
-}
-function fuzzyScore(query, target) {
-  if (!query)
-    return { score: 0, matches: [] };
-  if (!target)
-    return null;
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  const matches = [];
-  let qi = 0;
-  let score = 0;
-  let consecutive = 0;
-  let prevMatchIdx = -1;
-  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
-    if (t[ti] !== q[qi]) {
-      consecutive = 0;
-      continue;
-    }
-    let charScore = 1;
-    if (ti === 0) {
-      charScore += 5;
-    } else {
-      const prev = t[ti - 1];
-      const orig = target[ti];
-      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
-        charScore += 4;
-      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
-        charScore += 3;
-      }
-    }
-    if (ti === prevMatchIdx + 1) {
-      consecutive++;
-      charScore += consecutive * 2;
-    } else {
-      consecutive = 0;
-    }
-    score += charScore;
-    matches.push(ti);
-    prevMatchIdx = ti;
-    qi++;
-  }
-  if (qi < q.length)
-    return null;
-  score -= target.length * 0.01;
-  return { score, matches };
-}
-function highlightMatches(target, matchIndices) {
-  const frag = document.createDocumentFragment();
-  if (!target)
-    return frag;
-  const set = new Set(matchIndices || []);
-  if (!set.size) {
-    frag.appendChild(document.createTextNode(target));
-    return frag;
-  }
-  for (let i = 0;i < target.length; i++) {
-    const ch = target[i];
-    if (set.has(i)) {
-      const m = document.createElement("span");
-      m.className = "cmp-match";
-      m.textContent = ch;
-      frag.appendChild(m);
-    } else {
-      frag.appendChild(document.createTextNode(ch));
-    }
-  }
-  return frag;
-}
-var MAX_RATING = 5;
-function ratingOf(f) {
-  const r = f.rating;
-  return typeof r === "number" && r > 0 ? Math.min(MAX_RATING, Math.floor(r)) : 0;
-}
-function nextRating(cur, val) {
-  return val === cur ? 0 : val;
-}
-function ratingRequestBody(addr, rating) {
-  if (addr.type === "path") {
-    return { type: "path", path: addr.absDir, name: addr.name, rating };
-  }
-  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, rating };
-}
-async function postRating(url, addr, rating) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(ratingRequestBody(addr, rating))
-  });
-  if (!res.ok)
-    throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  if (!data.ok)
-    throw new Error(data.error || "rating failed");
-  return typeof data.rating === "number" ? data.rating : rating;
-}
-function starsHTML(prefix, rating) {
-  const r = ratingOf({ rating });
-  let buttons = "";
-  for (let i = 1;i <= MAX_RATING; i++) {
-    const on = i <= r ? " is-on" : "";
-    buttons += `<button type="button" class="${prefix}-star${on}" data-val="${i}" tabindex="-1">★</button>`;
-  }
-  return `<div class="${prefix}-stars" data-rating="${r}" title="Rate (click the active star to clear)">${buttons}</div>`;
-}
-function applyStars(row, rating) {
-  const r = ratingOf({ rating });
-  row.dataset.rating = String(r);
-  for (const s of row.querySelectorAll("[data-val]")) {
-    s.classList.toggle("is-on", Number(s.dataset.val) <= r);
-  }
-}
-function warnRating(extName, e) {
-  console.warn(`[${extName}] rating update failed`, e);
-}
 var STYLE_ID2 = "cmp-shell-style";
 var CSS2 = `
 .cmp-backdrop {
@@ -636,8 +507,11 @@ var CSS2 = `
     color: #aaa;
     border: 1px solid #3a3a44;
     border-radius: 4px;
-    width: 36px;
-    height: 36px;
+    /* 44px, not 36: docs/modal-ux-drift-catalog.md:71 sets the family's D02
+       target at >=44px, and the Touch Tools chooser cannot credibly promise
+       >=44px rows while inheriting a 36px close control. */
+    width: 44px;
+    height: 44px;
     cursor: pointer;
     font-size: 20px;
     line-height: 1;
@@ -797,6 +671,7 @@ function openModalShell(opts = {}) {
       backdrop.remove();
       dialog.remove();
       document.removeEventListener("keydown", onKey, true);
+      bodyEl.removeEventListener("scroll", onBodyScroll);
     } finally {
       try {
         opts.onClose?.();
@@ -830,6 +705,11 @@ function openModalShell(opts = {}) {
   };
   document.addEventListener("keydown", onKey, true);
   document.body.append(backdrop, dialog);
+  let liveScrollTop = 0;
+  const onBodyScroll = () => {
+    liveScrollTop = bodyEl.scrollTop;
+  };
+  bodyEl.addEventListener("scroll", onBodyScroll, { passive: true });
   const controller = {
     backdrop,
     dialog,
@@ -838,12 +718,18 @@ function openModalShell(opts = {}) {
     searchEl,
     statusEl,
     bodyEl,
+    scrollHost: bodyEl,
     footerEl,
     setBusy(b) {
       bodyEl.classList.toggle("is-busy", !!b);
     },
     setStatus(s) {
       statusEl.textContent = s || "";
+    },
+    getScrollTop() {
+      if (bodyEl.isConnected)
+        liveScrollTop = bodyEl.scrollTop;
+      return liveScrollTop;
     },
     close: requestClose,
     _onKey: onKey,
@@ -858,6 +744,198 @@ function openModalShell(opts = {}) {
   }
   return controller;
 }
+var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
+function installLazyMedia(container, opts) {
+  const noop = () => {};
+  if (typeof IntersectionObserver === "undefined")
+    return noop;
+  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
+  if (!els.length)
+    return noop;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting)
+        continue;
+      const el = e.target;
+      const src = el.dataset.src;
+      if (src) {
+        if (el.tagName === "VIDEO")
+          el.preload = "metadata";
+        el.src = src;
+        el.removeAttribute("data-src");
+      }
+      io.unobserve(el);
+    }
+  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
+  for (const el of els)
+    io.observe(el);
+  return () => io.disconnect();
+}
+function fuzzyScore(query, target) {
+  if (!query)
+    return { score: 0, matches: [] };
+  if (!target)
+    return null;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  const matches = [];
+  let qi = 0;
+  let score = 0;
+  let consecutive = 0;
+  let prevMatchIdx = -1;
+  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) {
+      consecutive = 0;
+      continue;
+    }
+    let charScore = 1;
+    if (ti === 0) {
+      charScore += 5;
+    } else {
+      const prev = t[ti - 1];
+      const orig = target[ti];
+      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
+        charScore += 4;
+      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
+        charScore += 3;
+      }
+    }
+    if (ti === prevMatchIdx + 1) {
+      consecutive++;
+      charScore += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+    score += charScore;
+    matches.push(ti);
+    prevMatchIdx = ti;
+    qi++;
+  }
+  if (qi < q.length)
+    return null;
+  score -= target.length * 0.01;
+  return { score, matches };
+}
+function highlightMatches(target, matchIndices) {
+  const frag = document.createDocumentFragment();
+  if (!target)
+    return frag;
+  const set = new Set(matchIndices || []);
+  if (!set.size) {
+    frag.appendChild(document.createTextNode(target));
+    return frag;
+  }
+  for (let i = 0;i < target.length; i++) {
+    const ch = target[i];
+    if (set.has(i)) {
+      const m = document.createElement("span");
+      m.className = "cmp-match";
+      m.textContent = ch;
+      frag.appendChild(m);
+    } else {
+      frag.appendChild(document.createTextNode(ch));
+    }
+  }
+  return frag;
+}
+var MAX_RATING = 5;
+function ratingOf(f) {
+  const r = f.rating;
+  return typeof r === "number" && r > 0 ? Math.min(MAX_RATING, Math.floor(r)) : 0;
+}
+function nextRating(cur, val) {
+  return val === cur ? 0 : val;
+}
+function ratingRequestBody(addr, rating) {
+  if (addr.type === "path") {
+    return { type: "path", path: addr.absDir, name: addr.name, rating };
+  }
+  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, rating };
+}
+async function postRating(url, addr, rating) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(ratingRequestBody(addr, rating))
+  });
+  if (!res.ok)
+    throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.ok)
+    throw new Error(data.error || "rating failed");
+  return typeof data.rating === "number" ? data.rating : rating;
+}
+function starsHTML(prefix, rating) {
+  const r = ratingOf({ rating });
+  let buttons = "";
+  for (let i = 1;i <= MAX_RATING; i++) {
+    const on = i <= r ? " is-on" : "";
+    buttons += `<button type="button" class="${prefix}-star${on}" data-val="${i}" tabindex="-1">★</button>`;
+  }
+  return `<div class="${prefix}-stars" data-rating="${r}" title="Rate (click the active star to clear)">${buttons}</div>`;
+}
+function applyStars(row, rating) {
+  const r = ratingOf({ rating });
+  row.dataset.rating = String(r);
+  for (const s of row.querySelectorAll("[data-val]")) {
+    s.classList.toggle("is-on", Number(s.dataset.val) <= r);
+  }
+}
+function warnRating(extName, e) {
+  console.warn(`[${extName}] rating update failed`, e);
+}
+var SAFE_VIEW_DEFAULT_KEYWORDS = "nsfw";
+var SAFE_VIEW_DEFAULTS = Object.freeze({
+  enabled: true,
+  keywords: Object.freeze([SAFE_VIEW_DEFAULT_KEYWORDS]),
+  hide: false,
+  blurNames: true,
+  matchPrompt: false
+});
+var SAFE_VIEW_BLUR_CLASS = "cmk-sv-blur";
+var SAFE_VIEW_SPOILER_CLASS = "cmk-sv-spoiler";
+var SAFE_VIEW_CSS = `
+.${SAFE_VIEW_BLUR_CLASS} {
+    /* Scale past the edges: a blurred element otherwise fades toward its own
+       border and leaks a readable silhouette of the content at the rim. */
+    filter: blur(18px);
+    transform: scale(1.08);
+}
+.${SAFE_VIEW_SPOILER_CLASS} {
+    /* A SOLID BLOCK, never a text blur — blurred text stays readable at small
+       sizes, which is exactly the size a phone grid renders names at. */
+    background: #3a3a44;
+    color: transparent;
+    border-radius: 3px;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+}
+.cmk-sv-reveal {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 2;
+    /* >=34px is the family's per-card control floor. */
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    line-height: 1;
+    background: rgba(20, 20, 26, 0.82);
+    color: #e8e8ea;
+    border: 1px solid #4a4a58;
+    border-radius: 8px;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.cmk-sv-reveal:hover {
+    background: rgba(40, 40, 52, 0.92);
+}
+`;
 var STYLE_ID3 = "cmp-overlay-style";
 var CSS3 = `
 .cmp-ov-backdrop {
