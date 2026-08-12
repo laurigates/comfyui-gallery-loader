@@ -119,9 +119,7 @@ def _safe_join(*parts: str) -> str:
     return "/".join(p.strip("/") for p in parts if p and p.strip("/"))
 
 
-def _is_sensitive(
-    name: str, path: str, keywords: Sequence[str], tags: Sequence[str] = ()
-) -> bool:
+def _is_sensitive(name: str, path: str, keywords: Sequence[str], tags: Sequence[str] = ()) -> bool:
     """Whether ``name`` (in folder ``path``, carrying ``tags``) matches any
     keyword as a whole token.
 

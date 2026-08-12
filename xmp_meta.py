@@ -581,9 +581,7 @@ def _apply_tag_delta(
     string silently discards.
     """
     remove_keys = {_tag_key(t) for t in remove} - {""}
-    holder = next(
-        (el for el in root.iter() if isinstance(el.tag, str) and el.tag == name), None
-    )
+    holder = next((el for el in root.iter() if isinstance(el.tag, str) and el.tag == name), None)
     # The attribute form of an array property is not legal RDF for an array,
     # but writers emit it. Fold it into the bag (unless it is being removed)
     # rather than leaving a second, contradictory copy behind.

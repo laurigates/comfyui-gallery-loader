@@ -4,6 +4,9 @@ default:
 # Lint Python with ruff (read-only)
 lint-py:
     uv run ruff check .
+    # CI runs BOTH (`ruff check` and `ruff format --check`); running only the
+    # first here is how a formatting-only failure reaches a PR green locally.
+    uv run ruff format --check .
 
 # Lint JavaScript with biome (read-only)
 lint-js:
