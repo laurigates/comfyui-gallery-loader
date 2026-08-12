@@ -13,15 +13,27 @@ import {
   escapeHTML,
   fuzzyScore,
   installLazyMedia,
+  isSafeViewActive,
+  isSensitive,
   isValidSort,
+  makeRevealButton,
+  makeRevealSet,
   nextRating,
   notify,
+  onSafeViewChange,
   postRating,
   type RatingAddress,
   ratingOf,
+  readSafeViewConfig,
+  SAFE_VIEW_GLYPH_OFF,
+  SAFE_VIEW_GLYPH_ON,
+  type SafeViewConfig,
   SORT_OPTIONS,
+  setBlurred,
+  setSpoilered,
   sortFiles,
   starsHTML,
+  toggleSafeView,
   warnRating,
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
@@ -270,6 +282,7 @@ export function attachGallery(node: GalleryNode): void {
             <select class="gl-sort" title="Sort">
                 <!-- options injected from the kit's SORT_OPTIONS below -->
             </select>
+            <button class="gl-icon gl-safe-view"></button>
             <button class="gl-icon gl-refresh" title="Refresh">⟳</button>
         </div>
         <div class="gl-crumbs"></div>
@@ -326,7 +339,91 @@ export function attachGallery(node: GalleryNode): void {
     selected: root.querySelector(".gl-selected") as HTMLElement,
     refresh: root.querySelector(".gl-refresh") as HTMLElement,
     sort: root.querySelector(".gl-sort") as HTMLSelectElement,
+    safeView: root.querySelector(".gl-safe-view") as HTMLButtonElement,
   };
+
+  // ---- Safe View ---------------------------------------------------------
+  //
+  // DISCRETION, NOT ACCESS CONTROL: the blur is a CSS class and the blurred
+  // bytes are still fetched. Same filter, same shared settings and the same
+  // per-session reveal semantics as the modal picker — the two surfaces render
+  // the same files and must agree about which of them are hidden.
+  const revealSet = makeRevealSet();
+
+  /**
+   * The LOGICAL folder address, matching what the backend builds and what the
+   * modal picker sends: `output/nsfw/2026-08-04` for a sandboxed root, the
+   * absolute directory for type=path. The root segment is included, so a
+   * keyword of `output` matches.
+   */
+  function safeViewPath(): string {
+    if (state.type === "path") return state.absDir || "";
+    return state.subfolder ? `${state.type}/${state.subfolder}` : state.type;
+  }
+
+  function renderSafeViewToggle(): void {
+    const on = isSafeViewActive();
+    refs.safeView.textContent = on ? SAFE_VIEW_GLYPH_ON : SAFE_VIEW_GLYPH_OFF;
+    refs.safeView.classList.toggle("is-active", on);
+    refs.safeView.title = on
+      ? "Safe View on — matching thumbnails are blurred. Tap to show everything."
+      : "Safe View off — tap to blur thumbnails matching your keywords.";
+    refs.safeView.setAttribute("aria-pressed", String(on));
+  }
+
+  refs.safeView.addEventListener("click", () => {
+    // Writes through the setting store, which fires onChange → the
+    // subscription below. No repaint here on purpose.
+    toggleSafeView();
+  });
+
+  /**
+   * The keyword string to send for server-side hiding, or "" when hiding is
+   * off. Doubles as the listing signature: a change means the server would
+   * return a different SET of rows, so a repaint is not enough.
+   */
+  function safeHideKeywords(): string {
+    const cfg = readSafeViewConfig();
+    return cfg.hide && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
+  }
+
+  let lastSafeHideKeywords = safeHideKeywords();
+
+  // This grid lives on a node, which can be deleted without any teardown hook
+  // reaching us — so the listener retires itself once its root leaves the
+  // document rather than repainting a detached grid forever. Checking
+  // isConnected is cheap and needs no lifecycle plumbing the pack does not
+  // already have.
+  const disposeSafeViewSub = onSafeViewChange(() => {
+    if (!root.isConnected) {
+      disposeSafeViewSub();
+      return;
+    }
+    renderSafeViewToggle();
+    const kw = safeHideKeywords();
+    if (kw !== lastSafeHideKeywords) {
+      void loadAndRender();
+      return;
+    }
+    renderGrid();
+  });
+
+  /** Paint one card as hidden. See the picker for why the media, not the thumb. */
+  function applySafeView(card: HTMLElement, cfg: SafeViewConfig, onReveal: () => void): void {
+    card.classList.add("is-safe-hidden");
+    // The thumbnail of a FOLDER card is the generic 📁 glyph, which says
+    // nothing about what is hidden — there is no media to blur there, and the
+    // name (spoilered below) is the sensitive part.
+    const media = card.querySelector(".gl-thumb img");
+    if (media) setBlurred(media, true);
+    if (cfg.blurNames) {
+      // Also removes the title attribute — a native tooltip would otherwise
+      // render the full name on hover, whatever the CSS says.
+      for (const el of card.querySelectorAll(".gl-name")) setSpoilered(el, true);
+    }
+    const host = card.querySelector(".gl-thumb") ?? card;
+    host.appendChild(makeRevealButton({ onReveal }));
+  }
   // Options come from the kit so both surfaces offer — and accept — the same
   // ten, which is what makes sharing the :sort key safe.
   refs.sort.innerHTML = SORT_OPTIONS.map(
@@ -523,7 +620,20 @@ export function attachGallery(node: GalleryNode): void {
     }
   }
 
+  // The location the reveal set belongs to. Reveals survive a plain refresh
+  // and a re-render, but a folder or source change is a deliberate change of
+  // context and resets them.
+  let revealLocation: string | null = null;
+
+  function locationKey(): string {
+    return state.type === "path" ? `path:${state.absDir}` : `${state.type}:${state.subfolder}`;
+  }
+
   async function loadAndRender(): Promise<void> {
+    lastSafeHideKeywords = safeHideKeywords();
+    const here = locationKey();
+    if (revealLocation !== null && revealLocation !== here) revealSet.clear();
+    revealLocation = here;
     renderControls();
     refs.status.textContent = "Loading…";
     refs.grid.classList.add("is-loading");
@@ -539,6 +649,13 @@ export function attachGallery(node: GalleryNode): void {
         params.set("path", state.absDir);
       } else {
         params.set("subfolder", state.subfolder || "");
+      }
+      // Sent ONLY when the user asked for hiding and there is something to
+      // match with, so the default request URL is unchanged from before.
+      const kw = safeHideKeywords();
+      if (kw) {
+        params.set("safe_kw", kw);
+        params.set("safe_hide", "1");
       }
       const res = await fetch(`${LIST_URL}?${params.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -562,6 +679,10 @@ export function attachGallery(node: GalleryNode): void {
   function renderGrid(): void {
     const grid = refs.grid;
     grid.innerHTML = "";
+    // ONCE per render pass, not once per card.
+    const svCfg = readSafeViewConfig();
+    const svPath = safeViewPath();
+    renderSafeViewToggle();
 
     const inSub = state.type === "path" ? state.absDir && state.absDir !== "/" : !!state.subfolder;
 
@@ -579,6 +700,17 @@ export function attachGallery(node: GalleryNode): void {
       c.className = "gl-card is-dir";
       c.dataset.name = d.name;
       c.innerHTML = `<div class="gl-thumb gl-folder">📁</div><div class="gl-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>`;
+      // A folder is matched by NAME ONLY — it carries no metadata to read, so a
+      // blandly-named folder full of sensitive files is not caught here.
+      if (
+        isSensitive({ name: d.name }, svCfg) &&
+        !revealSet.has(state.type, state.subfolder, d.name)
+      ) {
+        applySafeView(c, svCfg, () => {
+          revealSet.reveal(state.type, state.subfolder, d.name);
+          renderGrid();
+        });
+      }
       grid.appendChild(c);
     }
 
@@ -614,6 +746,15 @@ export function attachGallery(node: GalleryNode): void {
                 ${dims ? `<div class="gl-dims">${dims}</div>` : ""}
                 ${starsHTML("gl", ratingOf(f))}
             `;
+      if (
+        isSensitive({ name: f.name, path: svPath }, svCfg) &&
+        !revealSet.has(state.type, state.subfolder, f.name)
+      ) {
+        applySafeView(c, svCfg, () => {
+          revealSet.reveal(state.type, state.subfolder, f.name);
+          renderGrid();
+        });
+      }
       grid.appendChild(c);
     }
 

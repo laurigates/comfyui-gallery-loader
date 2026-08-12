@@ -21,6 +21,8 @@ import hashlib
 import logging
 import mimetypes
 import os
+import re
+from collections.abc import Sequence
 from email.utils import formatdate
 from typing import Any
 
@@ -55,6 +57,83 @@ VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"}
 STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS
 
 SANDBOXED_TYPES = ("input", "output", "temp")
+
+# ---------------------------------------------------------------------------
+# Safe View — server-side hide
+# ---------------------------------------------------------------------------
+#
+# DISCRETION, NOT ACCESS CONTROL. This drops matching rows from a listing so
+# they never reach the browser; it is not an authorization boundary. Every
+# other endpoint (/thumb, /file, /metadata, /rating) still serves the file to
+# anyone who addresses it directly, exactly as before. Nothing here is a
+# permission check and nothing downstream should be written as though it is.
+#
+# The three functions below are a DELIBERATE PORT of the frontend's, in
+# @laurigates/comfy-modal-kit `src/safe-view.ts` (`tokenize`, `parseKeywords`,
+# `isSensitive`). The two must agree file-for-file: the frontend blurs what it
+# thinks matches while the backend drops what IT thinks matches, so any
+# divergence shows up as a file that is hidden in one pack and plain in the
+# other — or, worse, as a card blurred here and readable in the sibling pack
+# over the same file on disk. `comfyui-image-browser` carries the identical
+# port; the contract is pinned in both repos' tests.
+#
+# WHOLE TOKENS, NEVER SUBSTRINGS. Every haystack is split on non-alphanumerics
+# and compared as complete tokens, so `nsfw` matches `output/nsfw/pic.png` and
+# `my_nsfw_pic.png` but `ass` does NOT match `assets/` and `nsfw` does NOT
+# match `nsfwish.png`. A substring matcher passes every positive test and
+# silently hides unrelated work, which the user cannot distinguish from a
+# deliberate match — both look like a file that simply is not there.
+_SAFE_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+_SAFE_KEYWORD_SPLIT = re.compile(r"[\s,]+")
+_SAFE_KEYWORD_STRIP = re.compile(r"[^a-z0-9]")
+
+
+def _safe_tokens(value: str) -> set[str]:
+    """Lowercase alphanumeric tokens of ``value``. Port of the kit's ``tokenize``."""
+    if not value:
+        return set()
+    return {t for t in _SAFE_TOKEN_SPLIT.split(value.lower()) if t}
+
+
+def _parse_safe_keywords(raw: str) -> list[str]:
+    """Normalize the ``safe_kw`` parameter. Port of the kit's ``parseKeywords``.
+
+    Commas and/or whitespace separate; each keyword is lowercased and stripped
+    of every non-alphanumeric character, because it is compared against tokens
+    produced by :func:`_safe_tokens` and a keyword carrying punctuation could
+    never equal one of those. Deduped, order preserved.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for piece in _SAFE_KEYWORD_SPLIT.split(raw or ""):
+        kw = _SAFE_KEYWORD_STRIP.sub("", piece.lower())
+        if not kw or kw in seen:
+            continue
+        seen.add(kw)
+        out.append(kw)
+    return out
+
+
+def _safe_join(*parts: str) -> str:
+    """Join non-empty path parts with '/'. Only ever builds a LOGICAL address."""
+    return "/".join(p.strip("/") for p in parts if p and p.strip("/"))
+
+
+def _is_sensitive(name: str, path: str, keywords: Sequence[str]) -> bool:
+    """Whether ``name`` (in folder ``path``) matches any keyword as a whole token.
+
+    ``path`` must be the LOGICAL address the frontend also sees — for a
+    sandboxed root that is ``output/nsfw/2026-08-04``, never the resolved OS
+    path. Feeding the OS path in would put every segment of
+    ``/home/<user>/ComfyUI/output`` into the haystack, so a keyword of
+    ``comfyui`` would hide the entire library while the frontend — which never
+    sees those segments — kept showing it.
+    """
+    if not keywords:
+        return False
+    hay = _safe_tokens(name) | _safe_tokens(path)
+    return any(kw in hay for kw in keywords)
+
 
 # The media a listing may ever enumerate. /list is a read of NAMES only, but a
 # recursive listing turns "enumerate one directory" into "enumerate the whole
@@ -342,6 +421,8 @@ def _probe_newest(
     walk_truncated: bool,
     *,
     with_subpath: bool,
+    safe_keywords: Sequence[str] = (),
+    safe_base: str = "",
 ) -> tuple[list[dict[str, Any]], bool]:
     """Sort newest-first, slice to ``cap``, then probe only the survivors.
 
@@ -356,7 +437,22 @@ def _probe_newest(
     ``with_subpath`` is False for a non-recursive listing, which must omit the
     key ENTIRELY rather than emit an empty string — the frontend distinguishes
     "flat listing, file at top level" from "folder listing" by its presence.
+
+    SAFE VIEW HIDING HAPPENS HERE, ABOVE THE CAP, and that is the whole reason
+    the filter lives in this function rather than at either call site. Applying
+    it after the slice would let a folder of mostly-sensitive files spend the
+    entire newest-N budget on rows that are then dropped, so the user gets a
+    near-empty grid and no way to tell it from an empty folder. Filtering first
+    means the cap is spent on rows that actually ship: a full page of the rest.
+    ``truncated`` is computed from the filtered count for the same reason — it
+    must describe the listing the caller received, not one it never saw.
     """
+    if safe_keywords:
+        found = [
+            entry
+            for entry in found
+            if not _is_sensitive(entry[2], _safe_join(safe_base, entry[1]), safe_keywords)
+        ]
     found.sort(key=lambda f: (-f[0], f[1], f[2]))
     truncated = walk_truncated or len(found) > cap
     files: list[dict[str, Any]] = []
@@ -369,7 +465,13 @@ def _probe_newest(
 
 
 def _walk_files(
-    base: str, exts: set[str], image_subset: set[str], cap: int
+    base: str,
+    exts: set[str],
+    image_subset: set[str],
+    cap: int,
+    *,
+    safe_keywords: Sequence[str] = (),
+    safe_base: str = "",
 ) -> tuple[list[dict[str, Any]], bool]:
     """Recursively collect files under ``base``, newest first, capped.
 
@@ -417,7 +519,15 @@ def _walk_files(
             # permission deep in the tree must not kill the whole listing.
             continue
 
-    return _probe_newest(found, image_subset, cap, walk_truncated, with_subpath=True)
+    return _probe_newest(
+        found,
+        image_subset,
+        cap,
+        walk_truncated,
+        with_subpath=True,
+        safe_keywords=safe_keywords,
+        safe_base=safe_base,
+    )
 
 
 @PromptServer.instance.routes.get("/gallery_loader/list")
@@ -450,10 +560,26 @@ async def gallery_list(request: web.Request) -> web.Response:
         and bool(exts)
     )
 
+    # Safe View: drop matching rows server-side so they never reach the browser.
+    # Only in effect when the caller asks for BOTH — a keyword list and the hide
+    # flag. The frontend omits the pair entirely unless the user turned hiding
+    # on, so the default request URL stays byte-identical to what it has always
+    # been. An unrecognised safe_hide value filters nothing rather than 400ing,
+    # matching how `recursive` above treats its own input.
+    safe_hide = q.get("safe_hide", "") in ("1", "true", "yes")
+    safe_keywords = _parse_safe_keywords(q.get("safe_kw", "")) if safe_hide else []
+
     base, err = _resolve_listing_base(type_name, subfolder, abs_path)
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
     assert base is not None
+
+    # The LOGICAL folder address, which is what the frontend matches against
+    # too: `output/nsfw/2026-08-04` for a sandboxed root, and the absolute
+    # directory for type=path (there the OS path IS the logical path, so both
+    # sides see the same string). Never the resolved OS path for a sandboxed
+    # root — see _is_sensitive.
+    safe_base = base if type_name == "path" else _safe_join(type_name, subfolder)
 
     if not os.path.isdir(base):
         return web.json_response(
@@ -473,7 +599,14 @@ async def gallery_list(request: web.Request) -> web.Response:
     files: list[dict[str, Any]] = []
     if recursive:
         # Flat view: no folder cards, files carry their relative subpath.
-        files, truncated = _walk_files(base, exts, image_subset, FLAT_LIST_CAP)
+        files, truncated = _walk_files(
+            base,
+            exts,
+            image_subset,
+            FLAT_LIST_CAP,
+            safe_keywords=safe_keywords,
+            safe_base=safe_base,
+        )
     else:
         found: list[_FoundEntry] = []
         try:
@@ -485,6 +618,13 @@ async def gallery_list(request: web.Request) -> web.Response:
                         if entry.is_dir(follow_symlinks=False):
                             # Skip clipspace (matches LoadImage convention) and __pycache__
                             if entry.name in ("clipspace", "__pycache__"):
+                                continue
+                            # A folder is matched by NAME ONLY — it carries no
+                            # metadata to read, and the kit documents the same
+                            # rule frontend-side. Without this an `nsfw/` card
+                            # would survive as a visible (and now empty)
+                            # doorway into the thing being hidden.
+                            if safe_keywords and _is_sensitive(entry.name, "", safe_keywords):
                                 continue
                             st = entry.stat(follow_symlinks=False)
                             dirs.append({"name": entry.name, "mtime": st.st_mtime})
@@ -505,7 +645,13 @@ async def gallery_list(request: web.Request) -> web.Response:
         # a huge single directory costs the expensive probes only for the files
         # that ship. Newest first — the common case is "I just rendered this".
         files, truncated = _probe_newest(
-            found, image_subset, DIR_LIST_CAP, False, with_subpath=False
+            found,
+            image_subset,
+            DIR_LIST_CAP,
+            False,
+            with_subpath=False,
+            safe_keywords=safe_keywords,
+            safe_base=safe_base,
         )
 
     dirs.sort(key=lambda d: d["name"].lower())

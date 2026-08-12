@@ -139,6 +139,65 @@ The pinned tab is offered on file pickers only — a directory picker commits a
 folder, so a pinned-media view has nothing to offer there — and pins address the
 three sandboxed roots only, never a VHS absolute path.
 
+## Safe View
+
+Matches a keyword list against file and folder names and blurs the thumbnails
+that hit, blocks out their names, and — optionally — drops them from the
+listing entirely. It exists for the ordinary case of browsing your own renders
+on a phone with someone else in the room.
+
+**This is discretion, not access control.** A CSS blur is one devtools override
+away from gone, and the blurred bytes are still downloaded and still sit in the
+browser cache. It defeats a shoulder, not an adversary. Nothing here is a
+permission boundary: every endpoint still serves any file you address directly,
+exactly as it did before.
+
+The toolbar `👁` / `🙈` toggles it; the eye is also a row in the Touch Tools
+chooser. Settings live under **Settings → Touch Tools → Safe View**:
+
+| Setting | Default | What it does |
+|---|---|---|
+| Safe View | on | Master switch. With no keywords it filters nothing, so "on" is inert until you add one. |
+| Keywords | `nsfw` | Comma- or space-separated. |
+| Remove matches from the listing entirely | off | Drops matches server-side so they never reach the browser. |
+| Block out names too | on | Replaces the name, its folder label and its tooltip with a solid block. |
+| Also match the generation prompt and model | off | Not implemented yet — see below. |
+
+Keywords match **whole words**, never substrings. `nsfw` matches
+`output/nsfw/pic.png` and `my_nsfw_pic.png`; it does **not** match
+`nsfwish.png`, and `ass` does **not** match `assets/`. Matching is
+case-insensitive and runs against the file name plus every folder above it,
+including the root — so `temp` blurs everything under the temp tab. A blurred
+card carries a `👁` that reveals just that card, until you change folder or
+close the picker.
+
+The keywords and every toggle are **shared with
+[comfyui-image-browser](https://github.com/laurigates/comfyui-image-browser)** —
+both packs register the same settings, so one keyword list covers both, and
+because ComfyUI stores settings server-side it follows you across devices. If
+both packs are installed you will see one benign `console.warn` about a
+duplicate setting id at load; that is the sharing mechanism working, not a
+fault.
+
+### What it does not cover
+
+Worth reading before relying on it — these are known gaps, not bugs:
+
+- **Folders are matched by name only.** A blandly-named folder full of
+  sensitive files is not caught in folder view, because a folder card carries
+  nothing else to match on. Flat view (`≣`) lists the files themselves and does
+  catch them.
+- **Confirmations and toasts name files in plain text.** A rating failure or a
+  pin error names the file it was about, unblurred.
+- **The metadata panel (`ⓘ`) shows the full prompt**, whether or not the card
+  is blurred. Prompt/model matching is a later phase; the setting for it is
+  listed above but does nothing yet.
+- **A node's own canvas preview is untouched.** A fresh render appears
+  full-size on the graph, unfiltered — that is ComfyUI's own output preview and
+  nothing in this pack can reach it.
+- **Nothing is encrypted, moved, or access-controlled.** The files stay exactly
+  where they are, readable by anything else on the machine.
+
 ## VHS path-loader integration
 
 VHS path widgets are detected via `widget.options.vhs_path_extensions`.
@@ -162,7 +221,7 @@ the current absolute path.
 
 | Route                         | Purpose                                                                 |
 |-------------------------------|-------------------------------------------------------------------------|
-| `GET /gallery_loader/list`    | Directory listing. Params: `type=input\|output\|temp\|path`, `subfolder`, `path`, `extensions` (CSV). Image dims (width/height) are populated for image entries only. |
+| `GET /gallery_loader/list`    | Directory listing. Params: `type=input\|output\|temp\|path`, `subfolder`, `path`, `extensions` (CSV), plus `safe_kw` (CSV keywords) + `safe_hide=1` for Safe View's server-side hide. Both Safe View params are required together; either alone filters nothing. Hiding is applied **above** the newest-N cap, so a mostly-sensitive folder still returns a full page of the rest. Image dims (width/height) are populated for image entries only. |
 | `GET /gallery_loader/base`    | Returns `base_path`, `input_dir`, `output_dir`, `temp_dir`, `user_dir`. Used by the modal to default VHS path-mode to the ComfyUI install root. |
 | `GET /gallery_loader/thumb`   | Webp 512px thumbnail for images at an arbitrary absolute path. Managed-type listings use core `/api/view` directly. |
 | `GET /gallery_loader/file`    | Streams a whitelisted-extension file (images + common video formats) at an absolute path. Used for video posters in path-mode where core `/api/view` doesn't apply. |

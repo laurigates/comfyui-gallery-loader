@@ -176,6 +176,10 @@
 }
 
 .gl-thumb {
+    /* Positioned so Safe View's per-card reveal button (.cmk-sv-reveal, which
+       the kit styles position:absolute) anchors to the thumbnail. The
+       overflow clip also contains the blur's 1.08 scale-up. */
+    position: relative;
     aspect-ratio: 1 / 1;
     display: flex;
     align-items: center;

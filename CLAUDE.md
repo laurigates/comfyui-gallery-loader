@@ -179,6 +179,40 @@ moving the clamp into it would re-expand an empty intersection and break
 directory mode's `.__none__` sentinel into listing every image. There is a test
 named for that trap; the "cleaner" refactor is the wrong one.
 
+### Safe View: the Python matcher is a PORT, and the address is LOGICAL
+
+`_safe_tokens` / `_parse_safe_keywords` / `_is_sensitive` in `gallery_loader.py`
+are a deliberate port of the kit's `tokenize` / `parseKeywords` / `isSensitive`
+(`comfy-modal-kit/src/safe-view.ts`). The frontend blurs what IT thinks matches
+while the backend drops what IT thinks matches, so any divergence surfaces as a
+file hidden in one pack and plain in the other over the same bytes — including
+across to `comfyui-image-browser`, which carries the identical port. Change one,
+change all three.
+
+Two things that look like details and are not:
+
+- **Whole tokens, never substrings.** A substring matcher passes every positive
+  test; only the controls (`ass` vs `assets/`, `nsfw` vs `nsfwish.png`) tell
+  them apart, and a wrongly-hidden file is indistinguishable to the user from a
+  file that simply is not there. Both suites pin the controls.
+- **The matched path is the LOGICAL address** — `output/nsfw/2026-08-04`, root
+  segment included — never the resolved OS path. Matching the OS path would put
+  every segment of `/home/<user>/ComfyUI/output` in the haystack, so a keyword
+  of `comfyui` would hide the whole library while the frontend, which never sees
+  those segments, kept showing it. `type=path` is the one case where the OS path
+  *is* the logical one.
+
+Hiding is applied inside `_probe_newest`, **above** the newest-N cap, and that
+is why the filter lives in that function rather than at its two call sites:
+filtering after the slice spends the entire budget on rows that are then
+dropped, and the user gets a near-empty grid they cannot tell from an empty
+folder. `tests/test_safe_view.py` fails with `assert 0 == 3` against that bug.
+
+Safe View is **discretion, not access control** — the blur is CSS and the bytes
+are still served. Say so wherever it is documented; the README carries the
+accepted gaps (plain-text toasts, the full-prompt metadata panel,
+folder-name-only matching, the unfiltered canvas preview).
+
 ### Flat view: never address a file by bare name
 
 In flat view two subfolders can each hold a `ComfyUI_00001_.png`, so a bare

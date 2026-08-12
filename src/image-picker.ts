@@ -36,9 +36,14 @@ import {
   highlightMatches,
   installBackGuard,
   installLazyMedia,
+  isSafeViewActive,
+  isSensitive,
   isValidSort,
+  makeRevealButton,
+  makeRevealSet,
   nextRating,
   notify,
+  onSafeViewChange,
   openModalShell,
   openShellOverlay,
   type PointerPatchableWidget,
@@ -46,9 +51,18 @@ import {
   postRating,
   type RatingAddress,
   ratingOf,
+  readSafeViewConfig,
+  registerSafeViewHubToggle,
+  SAFE_VIEW_GLYPH_OFF,
+  SAFE_VIEW_GLYPH_ON,
+  type SafeViewConfig,
   SORT_OPTIONS,
+  safeViewSettings,
+  setBlurred,
+  setSpoilered,
   sortFiles,
   starsHTML,
+  toggleSafeView,
   warnRating,
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
@@ -1142,8 +1156,90 @@ export async function openImagePicker(
     onClose: () => {
       disposeBackGuard?.();
       disposeBackGuard = null;
+      // Nothing scheduled may outlive the modal: the change listener closes
+      // over gridEl and repaints, so a surviving subscription would repaint a
+      // detached grid on every settings change for the rest of the session —
+      // one leaked listener per modal open.
+      disposeSafeViewSub?.();
+      disposeSafeViewSub = null;
+      // Reveals are per modal SESSION. Not clearing here would carry a reveal
+      // into the next open of the picker, which is exactly the "someone else
+      // walked up" case the filter exists for.
+      revealSet.clear();
     },
   });
+
+  // ---- Safe View --------------------------------------------------
+  //
+  // DISCRETION, NOT ACCESS CONTROL: the blur is a CSS class and the blurred
+  // bytes are still fetched and cached. It defeats a glance over the shoulder,
+  // not anyone with the keyboard or devtools.
+  //
+  // Reveals are held for the modal session and dropped on close and on any
+  // tab/folder change (see loadAndRender) — a delete-triggered re-render must
+  // not re-blur the card you were just looking at, while navigating away is a
+  // deliberate change of context and resets.
+  const revealSet = makeRevealSet();
+  let disposeSafeViewSub: (() => void) | null = null;
+
+  /**
+   * The LOGICAL folder address of a file, matching what the backend builds:
+   * `output/nsfw/2026-08-04` for a sandboxed root, the absolute directory for
+   * a path picker. `fileSub()` alone returns the bare SUBFOLDER, so passing it
+   * through unprefixed would drop the root segment and a keyword of `output`
+   * or `temp` would silently match nothing.
+   */
+  function safeViewPath(f: ListingFile): string {
+    if (state.type === "path") return state.absPath || "";
+    const sub = fileSub(f);
+    const root = fileType(f);
+    return sub ? `${root}/${sub}` : root;
+  }
+
+  /** Whether this card matches the filter AND the user has not revealed it. */
+  function isHiddenCard(f: ListingFile, cfg: SafeViewConfig): boolean {
+    if (!isSensitive({ name: f.name, path: safeViewPath(f) }, cfg)) return false;
+    return !revealSet.has(fileType(f), fileSub(f), f.name);
+  }
+
+  /**
+   * The element to blur: the MEDIA inside the thumbnail, never the thumbnail
+   * itself. `.ip-thumb` also hosts the ⓘ and 📌 overlay buttons and the reveal
+   * button below, and `filter` blurs an element's whole subtree — blurring the
+   * container would smear the very controls the user needs to act on the card.
+   * `.ip-thumb`'s `overflow: hidden` already clips the blur's 1.08 scale-up.
+   *
+   * Returns null for a folder card, whose thumbnail IS the generic 📁 glyph:
+   * that glyph carries no information about what is being hidden, so there is
+   * nothing to blur there. The folder's NAME is the sensitive part, and that is
+   * spoilered like any other.
+   */
+  function safeViewMediaEl(card: HTMLElement): Element | null {
+    return card.querySelector(".ip-thumb img, .ip-thumb video, .ip-thumb > .ip-thumb-icon");
+  }
+
+  /**
+   * Paint one card as hidden: blur the image, block out every label that
+   * carries the name, and add the per-card reveal.
+   *
+   * The reveal button goes in `.ip-thumb` — which is deliberately NOT the
+   * element being blurred, so the button stays sharp and tappable.
+   */
+  function applySafeView(card: HTMLElement, cfg: SafeViewConfig, onReveal: () => void): void {
+    card.classList.add("is-safe-hidden");
+    const media = safeViewMediaEl(card);
+    if (media) setBlurred(media, true);
+    if (cfg.blurNames) {
+      // setSpoilered also REMOVES the title attribute (parking it for restore).
+      // That matters more than the paint: a native tooltip renders the full
+      // name on hover regardless of any CSS, so a spoiler that only draws a
+      // block leaks the exact string it was hiding to anyone who rests a
+      // pointer on the card.
+      for (const el of card.querySelectorAll(".ip-name, .ip-subpath")) setSpoilered(el, true);
+    }
+    const host = card.querySelector(".ip-thumb") ?? card;
+    host.appendChild(makeRevealButton({ onReveal }));
+  }
 
   // ---- Android / gesture back ------------------------------------
   // A sentinel history entry keeps the hardware back button acting on the
@@ -1249,11 +1345,35 @@ export async function openImagePicker(
     pinsEl.className = "ip-pins";
   }
 
+  // Safe View toggle. Always created: unlike the flat/pin controls it is
+  // meaningful on every flavour of the picker, including a path browse and
+  // directory mode (a folder card can match by name too).
+  const safeViewEl = document.createElement("button");
+  safeViewEl.type = "button";
+  safeViewEl.className = "ip-control ip-icon ip-safe-view";
+
+  function renderSafeViewToggle(): void {
+    const on = isSafeViewActive();
+    safeViewEl.textContent = on ? SAFE_VIEW_GLYPH_ON : SAFE_VIEW_GLYPH_OFF;
+    safeViewEl.classList.toggle("is-active", on);
+    safeViewEl.title = on
+      ? "Safe View on — matching thumbnails are blurred. Tap to show everything."
+      : "Safe View off — tap to blur thumbnails matching your keywords.";
+    safeViewEl.setAttribute("aria-pressed", String(on));
+  }
+  renderSafeViewToggle();
+  safeViewEl.addEventListener("click", () => {
+    // The kit writes through the setting store, which fires onChange, which
+    // fires our subscription below — so there is deliberately no repaint here.
+    toggleSafeView();
+  });
+
   modal.toolbarEl.append(
     crumbsEl,
     ...(viewToggleEl ? [viewToggleEl] : []),
     ...(pinToggleEl ? [pinToggleEl] : []),
     ...(pruneEl ? [pruneEl] : []),
+    safeViewEl,
     sortEl,
     refreshEl,
     ...(pinsEl ? [pinsEl] : []),
@@ -1844,7 +1964,27 @@ export async function openImagePicker(
     if (state.extensionsParam?.length) {
       p.set("extensions", state.extensionsParam.join(","));
     }
+    // Server-side hide. Sent ONLY when the user asked for hiding and there is
+    // something to match with, so the default request URL is byte-identical to
+    // what it has always been and every existing listing test is untouched.
+    const kw = safeHideKeywords();
+    if (kw) {
+      p.set("safe_kw", kw);
+      p.set("safe_hide", "1");
+    }
     return `${LIST_URL}?${p.toString()}`;
+  }
+
+  /**
+   * The keyword string to send for server-side hiding, or "" when hiding is
+   * off. Doubles as the LISTING SIGNATURE: when it changes, the set of rows the
+   * server would return has changed, so a repaint is not enough — the grid has
+   * to be re-fetched. Reading it once, in one place, is what keeps the request
+   * and the reload decision from drifting apart.
+   */
+  function safeHideKeywords(): string {
+    const cfg = readSafeViewConfig();
+    return cfg.hide && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
   }
 
   function numOr0(v: unknown): number {
@@ -1883,7 +2023,44 @@ export async function openImagePicker(
     modal.setStatus("");
   }
 
+  // The location the reveal set belongs to, and the listing signature the last
+  // fetch was made with. Both are compared, never assumed.
+  let revealLocation: string | null = null;
+  let lastSafeHideKeywords = safeHideKeywords();
+
+  /** Identifies the tab/folder being shown. A change resets the reveals. */
+  function locationKey(): string {
+    return state.type === "path"
+      ? `path:${state.absPath}`
+      : `${state.type}:${state.subfolder}:${isFlat() ? "flat" : "folder"}`;
+  }
+
+  // Repaint (or re-fetch) every open picker when the shared setting changes —
+  // including when the change came from the OTHER gallery pack, since both
+  // register the same setting ids and the listeners live on the kit's shared
+  // rendezvous.
+  disposeSafeViewSub = onSafeViewChange(() => {
+    renderSafeViewToggle();
+    const kw = safeHideKeywords();
+    if (kw !== lastSafeHideKeywords) {
+      // The server would now return a different SET of rows, so a repaint of
+      // the rows we already have would show a stale listing — notably when
+      // hiding is switched OFF, where the hidden files are simply not in
+      // `state.files` to un-blur.
+      void loadAndRender();
+      return;
+    }
+    renderGrid();
+  });
+
   async function loadAndRender(): Promise<void> {
+    lastSafeHideKeywords = safeHideKeywords();
+    // Reveals are dropped on a tab/folder change but survive a plain refresh
+    // and a delete-triggered re-render, which is why this compares the location
+    // rather than clearing on every load.
+    const here = locationKey();
+    if (revealLocation !== null && revealLocation !== here) revealSet.clear();
+    revealLocation = here;
     renderTabs();
     renderCrumbs();
     renderViewToggle();
@@ -1963,6 +2140,10 @@ export async function openImagePicker(
   function renderGrid(): void {
     const q = state.query;
     gridEl.innerHTML = "";
+    // ONCE per render pass, not once per card: the kit's read is cheap but it
+    // is still a walk of the setting store, and a per-card read would also let
+    // the config change halfway down a grid.
+    const svCfg = readSafeViewConfig();
 
     // Flat view collapses the subtree into files only — no ".." card and no
     // folder cards (the backend returns dirs:[] recursively anyway). A ".."
@@ -1990,6 +2171,19 @@ export async function openImagePicker(
                 <div class="ip-thumb ip-thumb-icon">📁</div>
                 <div class="ip-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>
             `;
+      // A folder is matched by NAME ONLY — it carries no metadata to read. So a
+      // blandly-named folder full of sensitive files is NOT caught here; it is
+      // caught in flat view, which lists the files themselves. The README says
+      // so rather than implying folder-level coverage.
+      if (
+        isSensitive({ name: d.name }, svCfg) &&
+        !revealSet.has(state.type, state.subfolder, d.name)
+      ) {
+        applySafeView(c, svCfg, () => {
+          revealSet.reveal(state.type, state.subfolder, d.name);
+          renderGrid();
+        });
+      }
       gridEl.appendChild(c);
     }
 
@@ -2132,6 +2326,16 @@ export async function openImagePicker(
           nameEl.textContent = "";
           nameEl.appendChild(highlightMatches(f.name, hits));
         }
+      }
+      // LAST, so nothing above can re-populate a label after it was blocked
+      // out — the highlight pass rebuilds `.ip-name`'s children, and spoilering
+      // before it would leave the class on an element whose title had since
+      // been restored.
+      if (isHiddenCard(f, svCfg)) {
+        applySafeView(c, svCfg, () => {
+          revealSet.reveal(fileType(f), fileSub(f), f.name);
+          renderGrid();
+        });
       }
       gridEl.appendChild(c);
       visible++;
@@ -2310,6 +2514,16 @@ const PICKER_CSS = `
 .ip-control.is-active {
     background: #2f3a52;
     color: #9ec6ff;
+}
+/* Safe View's per-card reveal, repositioned for THIS pack's card layout: the
+   kit parks it top-left, which is exactly where .ip-pin-file sits, and
+   top-right is .ip-info. Bottom-left of the thumbnail is the one free corner.
+   Plain values only — no min()/calc() — because jsdom drops those and the
+   tests assert this through getComputedStyle. */
+.ip-card .cmk-sv-reveal {
+    top: auto;
+    bottom: 4px;
+    left: 4px;
 }
 /* ⓘ overlay button, pinned to the thumbnail's corner. */
 .ip-thumb { position: relative; }
@@ -2611,6 +2825,22 @@ function enhanceNode(node: PickerNode): void {
 try {
   app.registerExtension({
     name: "comfy.gallery-loader.image-picker",
+    // Safe View's settings come from the kit rather than being hand-written
+    // here, and comfyui-image-browser spreads the SAME array with the SAME ids
+    // on purpose. ComfyUI's addSetting skips a duplicate id with a
+    // console.warn and returns, so two installed packs yield one dialog row,
+    // one stored value, and cross-pack (and cross-device, via the server-side
+    // settings file) agreement for free. The benign warning from whichever
+    // pack loses the import race is expected — do not try to suppress it or to
+    // register conditionally, which would make WHICH pack defines the setting
+    // depend on a race with no stable winner.
+    //
+    // The cast is the same one the kit documents: it deliberately does not
+    // depend on @comfyorg/comfyui-frontend-types, so its structural setting
+    // type needs widening at the registration boundary.
+    settings: safeViewSettings() as unknown as Parameters<
+      typeof app.registerExtension
+    >[0]["settings"],
     async beforeRegisterNodeDef(_nodeType, nodeData) {
       try {
         defangNodeData(nodeData as unknown as NodeData);
@@ -2620,6 +2850,12 @@ try {
     },
     setup() {
       ensureStyleOnce(STYLE_ID, PICKER_CSS);
+      // In setup(), never at module scope: registration at import time would
+      // put a DISABLED pack's row in the Touch Tools chooser. Idempotent by id,
+      // so the sibling gallery pack also calling it is harmless — and having
+      // the KIT build the row is what stops two rows appearing with drifting
+      // labels when both packs are installed.
+      registerSafeViewHubToggle();
       debug("image-picker setup running");
       const nodes = (app?.graph as { _nodes?: unknown[] } | undefined)?._nodes;
       if (Array.isArray(nodes)) {
