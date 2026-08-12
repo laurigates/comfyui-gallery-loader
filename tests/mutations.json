@@ -1,0 +1,72 @@
+{
+  "command": ["uv", "run", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_xmp.py"],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "PNG rating write rebuilds the packet from scratch (the original data-loss bug)",
+      "file": "xmp_meta.py",
+      "before": "            packet = update_xmp_packet(png_get_xmp(data, stop_at_idat=False), r)",
+      "after": "            packet = build_xmp_packet(r)"
+    },
+    {
+      "label": "PNG write stops at IDAT, so a trailing XMP chunk is replaced unread",
+      "file": "xmp_meta.py",
+      "before": "            packet = update_xmp_packet(png_get_xmp(data, stop_at_idat=False), r)",
+      "after": "            packet = update_xmp_packet(png_get_xmp(data), r)"
+    },
+    {
+      "label": "JPEG rating write rebuilds the packet from scratch",
+      "file": "xmp_meta.py",
+      "before": "            existing = jpeg_get_xmp(data)\n            packet = update_xmp_packet(existing, r)",
+      "after": "            existing = jpeg_get_xmp(data)\n            packet = build_xmp_packet(r)"
+    },
+    {
+      "label": "sidecar rating write rebuilds the packet from scratch",
+      "file": "xmp_meta.py",
+      "before": "    packet = update_xmp_packet(sidecar_read_packet(path), clamp_rating(rating))",
+      "after": "    packet = build_xmp_packet(clamp_rating(rating))"
+    },
+    {
+      "label": "an unparseable packet is overwritten instead of refused",
+      "file": "xmp_meta.py",
+      "before": "    if not _packet_is_parseable(existing):\n        return None",
+      "after": "    if not _packet_is_parseable(existing):\n        return build_xmp_packet(r)"
+    },
+    {
+      "label": "the element form of our rating is left behind, shadowing the new one",
+      "file": "xmp_meta.py",
+      "before": "        if isinstance(child.tag, str) and child.tag in OWNED_PROPERTIES:",
+      "after": "        if False:"
+    },
+    {
+      "label": "our rating attribute is never removed (a stale copy on a sibling rdf:Description survives)",
+      "file": "xmp_meta.py",
+      "before": "    for name in OWNED_PROPERTIES:\n        parent.attrib.pop(name, None)",
+      "after": "    for name in ():\n        parent.attrib.pop(name, None)"
+    },
+    {
+      "label": "the document's own prefixes are discarded (dc:subject becomes ns:subject)",
+      "file": "xmp_meta.py",
+      "before": "            prefixes[uri] = _alloc_prefix(prefix, used)",
+      "after": "            prefixes[uri] = _alloc_prefix(\"ns\", used)"
+    },
+    {
+      "label": "the spec-bound xml prefix is re-invented (xml:lang stops qualifying language)",
+      "file": "xmp_meta.py",
+      "before": "    prefixes: dict[str, str] = {NS_XML: \"xml\"}",
+      "after": "    prefixes: dict[str, str] = {}"
+    },
+    {
+      "label": "a newline in a preserved attribute is written raw (flattens to a space on next read)",
+      "file": "xmp_meta.py",
+      "before": "        .replace(\"\\n\", \"&#10;\")",
+      "after": "        .replace(\"\\n\", \"\\n\")"
+    },
+    {
+      "label": "CONTROL — comment text only; MUST be MISSED, or this harness is lying",
+      "file": "xmp_meta.py",
+      "before": "# does it correctly. This is also what Adobe's own XMP SDK does on update.",
+      "after": "# does it correctly, which is also how Adobe's own XMP SDK handles an update."
+    }
+  ]
+}

@@ -24,6 +24,13 @@ Persistence, by priority:
 
 Reading checks in-file XMP first (so ratings set by Lightroom / Windows
 are honoured), then the sidecar.
+
+Writing is **read-modify-write**: an existing packet is parsed, only
+``xmp:Rating`` / ``MicrosoftPhoto:Rating`` are replaced, and every other
+property (``dc:subject`` keywords, ``dc:description`` captions,
+``dc:creator``, ``dc:rights``, …) is re-serialised untouched under its
+original prefix. A packet we cannot parse safely is never overwritten —
+see :func:`update_xmp_packet`.
 """
 
 from __future__ import annotations
@@ -41,6 +48,13 @@ log = logging.getLogger("comfyui-xmp")
 # --- XMP namespaces ---------------------------------------------------
 NS_XMP = "http://ns.adobe.com/xap/1.0/"
 NS_MS = "http://ns.microsoft.com/photo/1.0/"
+NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+# Bound to the `xml` prefix by the XML spec itself; never declared inline.
+NS_XML = "http://www.w3.org/XML/1998/namespace"
+
+# The two properties this module owns. Everything else in a packet belongs to
+# whoever wrote it (digiKam, Lightroom, Bridge, XnView) and is preserved.
+OWNED_PROPERTIES = (f"{{{NS_XMP}}}Rating", f"{{{NS_MS}}}Rating")
 
 # --- format markers ---------------------------------------------------
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
@@ -85,17 +99,34 @@ def ms_percent_to_rating(percent: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+XPACKET_BEGIN = '<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+XPACKET_END = '<?xpacket end="w"?>'
+XPACKET_PAD = 2048
+
+
+def _wrap_packet(body: str, pad: int = XPACKET_PAD) -> bytes:
+    """Wrap a serialised ``x:xmpmeta`` body in the ``<?xpacket?>`` envelope.
+
+    ``pad`` bytes of trailing whitespace follow the XMP per convention (lets
+    other editors expand the packet in place).
+    """
+    return (XPACKET_BEGIN + body + (" " * pad) + "\n" + XPACKET_END).encode("utf-8")
+
+
 def build_xmp_packet(rating: int) -> bytes:
     """Return a complete ``<?xpacket?>``-wrapped XMP packet (UTF-8 bytes).
 
+    Used only when a file has **no** existing packet. When one exists, go
+    through :func:`update_xmp_packet` instead — this function's output
+    contains nothing but our two rating properties, so writing it over an
+    existing packet destroys every other property the file carried.
+
     The only interpolated values are validated ints, so there is no
-    injection surface. ~2 KB of trailing whitespace follows the XMP per
-    convention (lets other editors expand in place).
+    injection surface.
     """
     r = clamp_rating(rating)
     pct = rating_to_ms_percent(r)
-    xml = (
-        '<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+    body = (
         '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
         ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
         '  <rdf:Description rdf:about=""\n'
@@ -106,20 +137,29 @@ def build_xmp_packet(rating: int) -> bytes:
         " </rdf:RDF>\n"
         "</x:xmpmeta>\n"
     )
-    packet = xml + (" " * 2048) + "\n" + '<?xpacket end="w"?>'
-    return packet.encode("utf-8")
+    return _wrap_packet(body)
+
+
+def _packet_is_parseable(xmp_bytes: bytes | None) -> bool:
+    """Gate an untrusted packet before handing it to the XML parser.
+
+    Reject packets over ``MAX_XMP_BYTES`` and any DOCTYPE/ENTITY declaration
+    (XXE / billion-laughs). Both the reader and the read-modify-write path go
+    through this, so a packet we refuse to *read* is also one we refuse to
+    *rewrite* — we never overwrite bytes we would not parse.
+    """
+    if not xmp_bytes or len(xmp_bytes) > MAX_XMP_BYTES:
+        return False
+    lowered = xmp_bytes.lower()
+    return b"<!doctype" not in lowered and b"<!entity" not in lowered
 
 
 def parse_rating_from_xmp(xmp_bytes: bytes | None) -> int | None:
     """Extract a 0..5 rating from an XMP packet, or None.
 
-    Security: reject packets over ``MAX_XMP_BYTES`` and any DOCTYPE/ENTITY
-    declaration (XXE / billion-laughs) before parsing.
+    Security: see :func:`_packet_is_parseable`.
     """
-    if not xmp_bytes or len(xmp_bytes) > MAX_XMP_BYTES:
-        return None
-    lowered = xmp_bytes.lower()
-    if b"<!doctype" in lowered or b"<!entity" in lowered:
+    if not _packet_is_parseable(xmp_bytes):
         return None
     try:
         root = ET.fromstring(xmp_bytes)
@@ -153,6 +193,213 @@ def _find_rating(root: ET.Element) -> int | None:
         except ValueError:
             pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# Read-modify-write: set our two properties, preserve everybody else's
+# ---------------------------------------------------------------------------
+#
+# Why parse-and-re-serialise rather than splice the packet bytes: an XMP
+# property is legal both as an attribute on ``rdf:Description`` and as a child
+# element (digiKam writes ``dc:subject`` as an ``rdf:Bag`` child), and either
+# form may carry our ``xmp:Rating``. Locating and excising both forms in raw
+# bytes means tokenising XML, which is the fragile-regex trap; a parser already
+# does it correctly. This is also what Adobe's own XMP SDK does on update.
+#
+# The cost of re-serialising is that ``ElementTree`` resolves prefixes away at
+# parse time and re-invents them as ``ns0:``/``ns1:`` on output — semantically
+# equivalent, but it rewrites every foreign property's prefix and reads as
+# corruption to a human. Registering prefixes with ``ET.register_namespace``
+# would fix that by mutating a process-global map shared with every other
+# ElementTree user in the ComfyUI process (a packet declaring
+# ``xmlns:rdf="http://evil/"`` would poison it), so instead we collect the
+# document's own prefix→URI declarations and serialise with a small writer of
+# our own that honours them.
+#
+# Not preserved: comments and processing instructions inside the packet, and
+# the exact placement of namespace declarations (all are hoisted to the root).
+# Neither carries an XMP property; Adobe's SDK drops them too.
+
+
+def _alloc_prefix(want: str, used: set[str]) -> str:
+    """Return an unused prefix, preferring ``want``.
+
+    A default (empty) prefix is deliberately never handed out: it cannot bind
+    an *attribute* name, and XMP has no use for one.
+    """
+    base = want or "ns"
+    if base not in used:
+        used.add(base)
+        return base
+    i = 2
+    while f"{base}{i}" in used:
+        i += 1
+    used.add(f"{base}{i}")
+    return f"{base}{i}"
+
+
+def _collect_prefixes(xmp_bytes: bytes) -> dict[str, str]:
+    """Return the packet's own ``uri -> prefix`` map, in declaration order."""
+    prefixes: dict[str, str] = {NS_XML: "xml"}
+    used = {"xml", "xmlns"}
+    pull = ET.XMLPullParser(events=("start-ns",))
+    with contextlib.suppress(ET.ParseError):
+        pull.feed(xmp_bytes)
+        pull.close()
+    for _event, (prefix, uri) in pull.read_events():
+        if uri not in prefixes:
+            prefixes[uri] = _alloc_prefix(prefix, used)
+    return prefixes
+
+
+def _ensure_prefixes(root: ET.Element, prefixes: dict[str, str]) -> None:
+    """Give every namespace used anywhere in the tree a prefix, before output.
+
+    Done as a pre-pass so the root's ``xmlns:`` declarations are complete: a
+    prefix invented halfway through serialisation would never be declared.
+    """
+    used = set(prefixes.values())
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue  # comment / processing instruction
+        for name in (el.tag, *el.attrib):
+            if name.startswith("{"):
+                uri = name[1:].partition("}")[0]
+                if uri not in prefixes:
+                    prefixes[uri] = _alloc_prefix("ns", used)
+
+
+def _qname(name: str, prefixes: dict[str, str]) -> str:
+    if not name.startswith("{"):
+        return name
+    uri, _, local = name[1:].partition("}")
+    return f"{prefixes[uri]}:{local}"
+
+
+def _esc_text(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _esc_attr(value: str) -> str:
+    # Literal tabs/newlines in an attribute survive serialisation but are
+    # normalised to spaces by the *next* parser to read the file, so a caption
+    # written with line breaks would silently flatten. Escape them numerically.
+    return (
+        _esc_text(value)
+        .replace('"', "&quot;")
+        .replace("\t", "&#9;")
+        .replace("\n", "&#10;")
+        .replace("\r", "&#13;")
+    )
+
+
+def _write_element(
+    el: ET.Element, prefixes: dict[str, str], out: list[str], *, root: bool
+) -> None:
+    if el.tag is ET.Comment:
+        out.append(f"<!--{el.text or ''}-->")
+    elif el.tag is ET.ProcessingInstruction:
+        out.append(f"<?{el.text or ''}?>")
+    else:
+        qname = _qname(el.tag, prefixes)
+        out.append(f"<{qname}")
+        if root:
+            for uri, prefix in prefixes.items():
+                if uri != NS_XML:  # bound by the spec; declaring it is noise
+                    out.append(f' xmlns:{prefix}="{_esc_attr(uri)}"')
+        for key, value in el.attrib.items():
+            out.append(f' {_qname(key, prefixes)}="{_esc_attr(value)}"')
+        if len(el) == 0 and el.text is None:
+            out.append("/>")
+            out.append(_esc_text(el.tail or ""))
+            return
+        out.append(">")
+        out.append(_esc_text(el.text or ""))
+        for child in el:
+            _write_element(child, prefixes, out, root=False)
+        out.append(f"</{qname}>")
+    out.append(_esc_text(el.tail or ""))
+
+
+def _strip_owned_properties(parent: ET.Element) -> None:
+    """Remove our two properties wherever they appear, in either legal form."""
+    for name in OWNED_PROPERTIES:
+        parent.attrib.pop(name, None)
+    previous: ET.Element | None = None
+    for child in list(parent):
+        if isinstance(child.tag, str) and child.tag in OWNED_PROPERTIES:
+            # Hand the removed node's tail to whatever preceded it, so the
+            # indentation of the following sibling is unchanged.
+            if previous is not None:
+                previous.tail = child.tail
+            else:
+                parent.text = child.tail
+            parent.remove(child)
+            continue
+        _strip_owned_properties(child)
+        previous = child
+
+
+def _primary_description(root: ET.Element) -> ET.Element | None:
+    """Return the ``rdf:Description`` our properties belong on, creating one
+    if the packet has an ``rdf:RDF`` but no description. None if the document
+    is not an RDF-shaped XMP packet at all."""
+    rdf = root if root.tag == f"{{{NS_RDF}}}RDF" else root.find(f"{{{NS_RDF}}}RDF")
+    if rdf is None:
+        return None
+    desc = rdf.find(f"{{{NS_RDF}}}Description")
+    if desc is not None:
+        return desc
+    desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description", {f"{{{NS_RDF}}}about": ""})
+    desc.tail = rdf.text
+    return desc
+
+
+def update_xmp_packet(
+    existing: bytes | None, rating: int, *, pad: int = XPACKET_PAD
+) -> bytes | None:
+    """Return ``existing`` with only our two rating properties changed.
+
+    Every other property — ``dc:subject`` keywords, ``dc:description``
+    captions, ``dc:creator``, ``dc:rights``, anything a photo manager wrote —
+    is carried through untouched, along with the prefix each was declared
+    under. With no existing packet, this is exactly :func:`build_xmp_packet`.
+
+    Returns **None** to mean *refuse*: the packet is oversize, carries a
+    DOCTYPE/ENTITY, does not parse, or is not RDF-shaped. The caller must not
+    overwrite it — the safe move is the sidecar, which the same three gates
+    make :func:`read_rating` prefer anyway (an unreadable in-file packet does
+    not mask a sidecar rating).
+    """
+    r = clamp_rating(rating)
+    if not existing:
+        return build_xmp_packet(r)
+    if not _packet_is_parseable(existing):
+        return None
+    try:
+        parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True, insert_pis=True))
+        root = ET.fromstring(existing, parser)
+    except ET.ParseError:
+        return None
+    desc = _primary_description(root)
+    if desc is None:
+        return None
+
+    _strip_owned_properties(root)
+    desc.set(f"{{{NS_XMP}}}Rating", str(r))
+    desc.set(f"{{{NS_MS}}}Rating", str(rating_to_ms_percent(r)))
+
+    prefixes = _collect_prefixes(existing)
+    prefixes.setdefault(NS_XMP, _alloc_prefix("xmp", set(prefixes.values())))
+    prefixes.setdefault(NS_MS, _alloc_prefix("MicrosoftPhoto", set(prefixes.values())))
+    _ensure_prefixes(root, prefixes)
+
+    out: list[str] = []
+    _write_element(root, prefixes, out, root=True)
+    body = "".join(out)
+    if not body.endswith("\n"):
+        body += "\n"
+    return _wrap_packet(body, pad)
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +472,19 @@ def _png_text_chunk_xmp(ctype: str, cdata: bytes) -> bytes | None:
     return text
 
 
-def png_get_xmp(data: bytes) -> bytes | None:
-    """Return the XMP packet from a PNG's text chunk before IDAT, or None."""
+def png_get_xmp(data: bytes, *, stop_at_idat: bool = True) -> bytes | None:
+    """Return the XMP packet from a PNG's text chunk, or None.
+
+    ``stop_at_idat`` (the default) stops before the pixel data, which is what
+    the cheap ``/list`` probe wants — it only ever reads ``PNG_HEAD_SCAN``
+    bytes, so chunks past IDAT are not in the buffer anyway. The **write**
+    path must pass False: ``png_set_xmp`` drops an XMP chunk wherever it sits,
+    so a trailing one has to be read before it is replaced or its properties
+    are lost.
+    """
     try:
         for ctype, cdata, _s, _e in _iter_png_chunks(data):
-            if ctype == "IDAT":
+            if stop_at_idat and ctype == "IDAT":
                 break
             pkt = _png_text_chunk_xmp(ctype, cdata)
             if pkt is not None:
@@ -349,8 +604,33 @@ def sidecar_get_rating(path: str) -> int | None:
     return parse_rating_from_xmp(data)
 
 
-def sidecar_set_rating(path: str, rating: int) -> None:
-    _atomic_write(sidecar_path(path), build_xmp_packet(clamp_rating(rating)))
+def sidecar_read_packet(path: str) -> bytes | None:
+    """Return the sidecar's raw packet bytes, or None if there is no sidecar.
+
+    Reads one byte past ``MAX_XMP_BYTES`` so an oversize sidecar comes back
+    oversize rather than truncated — :func:`update_xmp_packet` then refuses
+    it instead of rewriting a packet it only half read.
+    """
+    sp = sidecar_path(path)
+    try:
+        if not os.path.isfile(sp):
+            return None
+        with open(sp, "rb") as f:
+            return f.read(MAX_XMP_BYTES + 1)
+    except OSError:
+        return None
+
+
+def sidecar_set_rating(path: str, rating: int) -> bool:
+    """Set the rating in ``<path>.xmp``, preserving the sidecar's other
+    properties. Returns False without writing when an existing sidecar cannot
+    be safely updated — overwriting it would destroy keywords and captions
+    that exist nowhere else."""
+    packet = update_xmp_packet(sidecar_read_packet(path), clamp_rating(rating))
+    if packet is None:
+        return False
+    _atomic_write(sidecar_path(path), packet)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -409,32 +689,57 @@ def read_rating(path: str, *, head_only: bool = True) -> int:
 
 def write_rating(path: str, rating: int) -> tuple[bool, str]:
     """Write ``rating`` (clamped 0..5). Returns (ok, backend) where backend
-    is 'png' | 'jpeg' | 'sidecar', or (False, error)."""
+    is 'png' | 'jpeg' | 'sidecar', or (False, error).
+
+    Read-modify-write throughout: an existing packet's other properties are
+    preserved (see :func:`update_xmp_packet`). When that packet cannot be
+    parsed safely the in-file write is **refused** rather than overwritten,
+    and the rating goes to the sidecar — which :func:`read_rating` will read,
+    because the same gate that refused the rewrite also stops the in-file
+    packet from being read.
+    """
     r = clamp_rating(rating)
-    packet = build_xmp_packet(r)
     ext = os.path.splitext(path)[1].lower()
     try:
         if ext == ".png":
             with open(path, "rb") as f:
-                out = png_set_xmp(f.read(), packet)
-            _atomic_write(path, out)
-            _cache_invalidate(path)
-            return True, "png"
-        if ext in (".jpg", ".jpeg"):
+                data = f.read()
+            packet = update_xmp_packet(png_get_xmp(data, stop_at_idat=False), r)
+            if packet is not None:
+                _atomic_write(path, png_set_xmp(data, packet))
+                _cache_invalidate(path)
+                return True, "png"
+        elif ext in (".jpg", ".jpeg"):
             with open(path, "rb") as f:
-                out_opt = jpeg_set_xmp(f.read(), packet)
+                data = f.read()
+            existing = jpeg_get_xmp(data)
+            packet = update_xmp_packet(existing, r)
+            out_opt = jpeg_set_xmp(data, packet) if packet is not None else None
+            if out_opt is None and packet is not None:
+                # The APP1 length field is 16-bit and we just grew the packet
+                # by preserving it. Retry without the expansion padding.
+                packet = update_xmp_packet(existing, r, pad=0)
+                out_opt = jpeg_set_xmp(data, packet) if packet is not None else None
             if out_opt is not None:
                 _atomic_write(path, out_opt)
                 _cache_invalidate(path)
                 return True, "jpeg"
-        # Other formats, JPEG overflow → sidecar.
-        sidecar_set_rating(path, r)
+            if existing is not None and packet is not None:
+                # A readable in-file packet too large to rewrite: a sidecar
+                # would be shadowed by the stale in-file rating, so say so
+                # rather than report a write the reader will never see.
+                return False, "existing XMP packet is too large to update in place"
+        # Other formats, an unparseable packet we refuse to clobber, and JPEG
+        # overflow with nothing readable in the file → sidecar.
+        if not sidecar_set_rating(path, r):
+            return False, "existing XMP sidecar could not be updated safely"
         _cache_invalidate(path)
         return True, "sidecar"
     except (OSError, ValueError) as exc:
         log.warning("in-file XMP write failed for %s; wrote sidecar instead: %s", path, exc)
         try:
-            sidecar_set_rating(path, r)
+            if not sidecar_set_rating(path, r):
+                return False, "existing XMP sidecar could not be updated safely"
             _cache_invalidate(path)
             return True, "sidecar"
         except OSError:
