@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.25](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.24...comfyui-gallery-loader-v0.1.25) (2026-08-12)
+
+
+### Bug Fixes
+
+* **xmp:** preserve foreign XMP properties when writing a star rating ([#97](https://github.com/laurigates/comfyui-gallery-loader/issues/97)) ([39d169e](https://github.com/laurigates/comfyui-gallery-loader/commit/39d169e8ff3c6af6a041a5852b0e4a35650c6295))
+
 ## [0.1.24](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.23...comfyui-gallery-loader-v0.1.24) (2026-08-08)
 
 
