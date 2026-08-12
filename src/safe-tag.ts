@@ -44,6 +44,14 @@ export interface TaggedFile {
  * Returns null when the list is EMPTY, and the control is then not offered at
  * all. Falling back to the packaged default (`nsfw`) would write a keyword the
  * user's own filter does not contain, which is the same failure one step along.
+ *
+ * DRIFT RISK, TRACKED: `comfyui-image-browser/src/safe-tag.ts` now carries a
+ * hand-written copy of this function, and the two packs write over the SAME
+ * FILES ON DISK. If they ever disagree about which keyword 🙈 writes, a tap in
+ * one pack marks a file the other pack's filter does not honour. Its home is
+ * the kit (`comfy-modal-kit/src/safe-view.ts`), which already owns the
+ * `parseKeywords` whose order-preservation is the entire justification for
+ * "the first entry". See laurigates/comfy-modal-kit#33.
  */
 export function sensitiveKeyword(cfg: SafeViewConfig): string | null {
   return cfg.keywords.length ? (cfg.keywords[0] as string) : null;
