@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.27](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.26...comfyui-gallery-loader-v0.1.27) (2026-08-12)
+
+
+### Features
+
+* **safe-view:** match and write dc:subject keywords ([#102](https://github.com/laurigates/comfyui-gallery-loader/issues/102)) ([d740a9b](https://github.com/laurigates/comfyui-gallery-loader/commit/d740a9b9a6c25422959e289f4d8e07381b13026c))
+
 ## [0.1.26](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.25...comfyui-gallery-loader-v0.1.26) (2026-08-12)
 
 
