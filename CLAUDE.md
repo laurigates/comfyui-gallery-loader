@@ -85,6 +85,39 @@ from ComfyUI core). `pyproject.toml` declares only
 add `requests`, `httpx`, `pydantic`, etc. If a feature needs a
 non-bundled library, design it as an optional companion pack.
 
+### A rating write is read-modify-write — never rebuild the packet
+
+`xmp_meta.build_xmp_packet()` returns a packet containing **only** our two
+rating properties. Writing it over a file that already has XMP destroys every
+other property that file carried — `dc:subject` keywords, the `dc:description`
+caption, `dc:creator`, `dc:rights` — and nothing in this pack reads those, so
+nothing notices. That was the original bug: latent for fresh ComfyUI renders
+(no prior XMP), real data loss for anything imported or previously tagged in
+digiKam / Lightroom / Bridge / XnView.
+
+Every write path therefore goes through **`update_xmp_packet()`**, which parses
+the existing packet, replaces only `xmp:Rating` / `MicrosoftPhoto:Rating` (in
+either legal serialisation — attribute *or* child element, on *any*
+`rdf:Description`), and re-serialises everything else under its original
+prefix. `build_xmp_packet` is reachable only when there is no existing packet,
+and that path stays byte-identical to what shipped before.
+
+Two consequences worth keeping straight:
+
+- **A packet we refuse to parse is never overwritten.** Oversize,
+  DOCTYPE/ENTITY, unparseable, or not RDF-shaped → `update_xmp_packet` returns
+  None and the rating goes to the sidecar. That is safe precisely because the
+  *same* gate stops `read_rating` from reading the in-file packet, so the
+  sidecar is not shadowed. If you ever relax one gate, relax both.
+- **ElementTree is not the serialiser.** `ET.tostring` re-invents every prefix
+  as `ns0:`/`ns1:`, and the fix for that (`ET.register_namespace`) mutates a
+  process-global map shared with everything else in ComfyUI. The module
+  collects the document's own prefix declarations and writes the XML itself.
+  Don't swap it back for `ET.tostring`.
+
+`tests/mutations.json` pins all of this — `just mutation-check
+comfyui-gallery-loader` from the workspace root.
+
 ### Pack directory name is part of the URL
 
 `web/js/image-picker.js` is served at
