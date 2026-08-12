@@ -7,7 +7,7 @@ repos:
       - id: ruff-format
 
   - repo: https://github.com/biomejs/pre-commit
-    rev: v0.6.1
+    rev: v2.5.8
     hooks:
       - id: biome-check
         additional_dependencies: ["@biomejs/biome@2.4.15"]
