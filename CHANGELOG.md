@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.26](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.25...comfyui-gallery-loader-v0.1.26) (2026-08-12)
+
+
+### Features
+
+* Safe View — blur and optionally hide sensitive thumbnails ([#100](https://github.com/laurigates/comfyui-gallery-loader/issues/100)) ([e35d78b](https://github.com/laurigates/comfyui-gallery-loader/commit/e35d78b8749e034dfc4e576a629e9bb5acb32b4f))
+
 ## [0.1.25](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.24...comfyui-gallery-loader-v0.1.25) (2026-08-12)
 
 
