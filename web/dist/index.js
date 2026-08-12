@@ -10,14 +10,15 @@ function installBackGuard(onBack) {
     history.pushState({ cmpBackGuard: true }, "");
     armed = true;
   };
-  const dispose = () => {
+  const dispose = (opts) => {
     if (disposed)
       return;
     disposed = true;
     window.removeEventListener("popstate", onPop);
     if (armed) {
       armed = false;
-      history.back();
+      if (opts?.pop !== false)
+        history.back();
     }
   };
   function onPop() {
@@ -59,7 +60,11 @@ function getKit() {
       activeModal: null,
       pointerClaim: null,
       modalChrome: [],
-      pointerGuardInstalled: false
+      pointerGuardInstalled: false,
+      hubEntries: [],
+      hubLauncherInstalled: false,
+      hubToggles: [],
+      safeViewListeners: []
     };
     g[KEY] = kit;
   }
@@ -69,6 +74,12 @@ function getKit() {
     kit.modelPickers = [];
   if (!kit.modalChrome)
     kit.modalChrome = [];
+  if (!kit.hubEntries)
+    kit.hubEntries = [];
+  if (!kit.hubToggles)
+    kit.hubToggles = [];
+  if (!kit.safeViewListeners)
+    kit.safeViewListeners = [];
   return kit;
 }
 var SORT_OPTIONS = [
@@ -110,6 +121,15 @@ function sortFiles(files, key, dir) {
       break;
   }
   return [...files].sort((a, b) => mul * cmp(a, b));
+}
+function registerHubToggle(toggle) {
+  const list = getKit().hubToggles;
+  const i = list.findIndex((t) => t.id === toggle.id);
+  if (i >= 0) {
+    list.splice(i, 1, toggle);
+  } else {
+    list.push(toggle);
+  }
 }
 var CHROME_ATTR = "data-cmp-chrome";
 function setActiveModal(handle) {
@@ -436,146 +456,6 @@ function notify(opts) {
   }
   return { close, el: toast };
 }
-var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
-function installLazyMedia(container, opts) {
-  const noop = () => {};
-  if (typeof IntersectionObserver === "undefined")
-    return noop;
-  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
-  if (!els.length)
-    return noop;
-  const io = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting)
-        continue;
-      const el = e.target;
-      const src = el.dataset.src;
-      if (src) {
-        if (el.tagName === "VIDEO")
-          el.preload = "metadata";
-        el.src = src;
-        el.removeAttribute("data-src");
-      }
-      io.unobserve(el);
-    }
-  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
-  for (const el of els)
-    io.observe(el);
-  return () => io.disconnect();
-}
-function fuzzyScore(query, target) {
-  if (!query)
-    return { score: 0, matches: [] };
-  if (!target)
-    return null;
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  const matches = [];
-  let qi = 0;
-  let score = 0;
-  let consecutive = 0;
-  let prevMatchIdx = -1;
-  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
-    if (t[ti] !== q[qi]) {
-      consecutive = 0;
-      continue;
-    }
-    let charScore = 1;
-    if (ti === 0) {
-      charScore += 5;
-    } else {
-      const prev = t[ti - 1];
-      const orig = target[ti];
-      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
-        charScore += 4;
-      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
-        charScore += 3;
-      }
-    }
-    if (ti === prevMatchIdx + 1) {
-      consecutive++;
-      charScore += consecutive * 2;
-    } else {
-      consecutive = 0;
-    }
-    score += charScore;
-    matches.push(ti);
-    prevMatchIdx = ti;
-    qi++;
-  }
-  if (qi < q.length)
-    return null;
-  score -= target.length * 0.01;
-  return { score, matches };
-}
-function highlightMatches(target, matchIndices) {
-  const frag = document.createDocumentFragment();
-  if (!target)
-    return frag;
-  const set = new Set(matchIndices || []);
-  if (!set.size) {
-    frag.appendChild(document.createTextNode(target));
-    return frag;
-  }
-  for (let i = 0;i < target.length; i++) {
-    const ch = target[i];
-    if (set.has(i)) {
-      const m = document.createElement("span");
-      m.className = "cmp-match";
-      m.textContent = ch;
-      frag.appendChild(m);
-    } else {
-      frag.appendChild(document.createTextNode(ch));
-    }
-  }
-  return frag;
-}
-var MAX_RATING = 5;
-function ratingOf(f) {
-  const r = f.rating;
-  return typeof r === "number" && r > 0 ? Math.min(MAX_RATING, Math.floor(r)) : 0;
-}
-function nextRating(cur, val) {
-  return val === cur ? 0 : val;
-}
-function ratingRequestBody(addr, rating) {
-  if (addr.type === "path") {
-    return { type: "path", path: addr.absDir, name: addr.name, rating };
-  }
-  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, rating };
-}
-async function postRating(url, addr, rating) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(ratingRequestBody(addr, rating))
-  });
-  if (!res.ok)
-    throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  if (!data.ok)
-    throw new Error(data.error || "rating failed");
-  return typeof data.rating === "number" ? data.rating : rating;
-}
-function starsHTML(prefix, rating) {
-  const r = ratingOf({ rating });
-  let buttons = "";
-  for (let i = 1;i <= MAX_RATING; i++) {
-    const on = i <= r ? " is-on" : "";
-    buttons += `<button type="button" class="${prefix}-star${on}" data-val="${i}" tabindex="-1">★</button>`;
-  }
-  return `<div class="${prefix}-stars" data-rating="${r}" title="Rate (click the active star to clear)">${buttons}</div>`;
-}
-function applyStars(row, rating) {
-  const r = ratingOf({ rating });
-  row.dataset.rating = String(r);
-  for (const s of row.querySelectorAll("[data-val]")) {
-    s.classList.toggle("is-on", Number(s.dataset.val) <= r);
-  }
-}
-function warnRating(extName, e) {
-  console.warn(`[${extName}] rating update failed`, e);
-}
 var STYLE_ID2 = "cmp-shell-style";
 var CSS2 = `
 .cmp-backdrop {
@@ -636,8 +516,11 @@ var CSS2 = `
     color: #aaa;
     border: 1px solid #3a3a44;
     border-radius: 4px;
-    width: 36px;
-    height: 36px;
+    /* 44px, not 36: docs/modal-ux-drift-catalog.md:71 sets the family's D02
+       target at >=44px, and the Touch Tools chooser cannot credibly promise
+       >=44px rows while inheriting a 36px close control. */
+    width: 44px;
+    height: 44px;
     cursor: pointer;
     font-size: 20px;
     line-height: 1;
@@ -797,6 +680,7 @@ function openModalShell(opts = {}) {
       backdrop.remove();
       dialog.remove();
       document.removeEventListener("keydown", onKey, true);
+      bodyEl.removeEventListener("scroll", onBodyScroll);
     } finally {
       try {
         opts.onClose?.();
@@ -830,6 +714,11 @@ function openModalShell(opts = {}) {
   };
   document.addEventListener("keydown", onKey, true);
   document.body.append(backdrop, dialog);
+  let liveScrollTop = 0;
+  const onBodyScroll = () => {
+    liveScrollTop = bodyEl.scrollTop;
+  };
+  bodyEl.addEventListener("scroll", onBodyScroll, { passive: true });
   const controller = {
     backdrop,
     dialog,
@@ -838,12 +727,18 @@ function openModalShell(opts = {}) {
     searchEl,
     statusEl,
     bodyEl,
+    scrollHost: bodyEl,
     footerEl,
     setBusy(b) {
       bodyEl.classList.toggle("is-busy", !!b);
     },
     setStatus(s) {
       statusEl.textContent = s || "";
+    },
+    getScrollTop() {
+      if (bodyEl.isConnected)
+        liveScrollTop = bodyEl.scrollTop;
+      return liveScrollTop;
     },
     close: requestClose,
     _onKey: onKey,
@@ -857,6 +752,427 @@ function openModalShell(opts = {}) {
     });
   }
   return controller;
+}
+var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
+function installLazyMedia(container, opts) {
+  const noop = () => {};
+  if (typeof IntersectionObserver === "undefined")
+    return noop;
+  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
+  if (!els.length)
+    return noop;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting)
+        continue;
+      const el = e.target;
+      const src = el.dataset.src;
+      if (src) {
+        if (el.tagName === "VIDEO")
+          el.preload = "metadata";
+        el.src = src;
+        el.removeAttribute("data-src");
+      }
+      io.unobserve(el);
+    }
+  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
+  for (const el of els)
+    io.observe(el);
+  return () => io.disconnect();
+}
+function fuzzyScore(query, target) {
+  if (!query)
+    return { score: 0, matches: [] };
+  if (!target)
+    return null;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  const matches = [];
+  let qi = 0;
+  let score = 0;
+  let consecutive = 0;
+  let prevMatchIdx = -1;
+  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) {
+      consecutive = 0;
+      continue;
+    }
+    let charScore = 1;
+    if (ti === 0) {
+      charScore += 5;
+    } else {
+      const prev = t[ti - 1];
+      const orig = target[ti];
+      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
+        charScore += 4;
+      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
+        charScore += 3;
+      }
+    }
+    if (ti === prevMatchIdx + 1) {
+      consecutive++;
+      charScore += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+    score += charScore;
+    matches.push(ti);
+    prevMatchIdx = ti;
+    qi++;
+  }
+  if (qi < q.length)
+    return null;
+  score -= target.length * 0.01;
+  return { score, matches };
+}
+function highlightMatches(target, matchIndices) {
+  const frag = document.createDocumentFragment();
+  if (!target)
+    return frag;
+  const set = new Set(matchIndices || []);
+  if (!set.size) {
+    frag.appendChild(document.createTextNode(target));
+    return frag;
+  }
+  for (let i = 0;i < target.length; i++) {
+    const ch = target[i];
+    if (set.has(i)) {
+      const m = document.createElement("span");
+      m.className = "cmp-match";
+      m.textContent = ch;
+      frag.appendChild(m);
+    } else {
+      frag.appendChild(document.createTextNode(ch));
+    }
+  }
+  return frag;
+}
+var MAX_RATING = 5;
+function ratingOf(f) {
+  const r = f.rating;
+  return typeof r === "number" && r > 0 ? Math.min(MAX_RATING, Math.floor(r)) : 0;
+}
+function nextRating(cur, val) {
+  return val === cur ? 0 : val;
+}
+function ratingRequestBody(addr, rating) {
+  if (addr.type === "path") {
+    return { type: "path", path: addr.absDir, name: addr.name, rating };
+  }
+  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, rating };
+}
+async function postRating(url, addr, rating) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(ratingRequestBody(addr, rating))
+  });
+  if (!res.ok)
+    throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.ok)
+    throw new Error(data.error || "rating failed");
+  return typeof data.rating === "number" ? data.rating : rating;
+}
+function starsHTML(prefix, rating) {
+  const r = ratingOf({ rating });
+  let buttons = "";
+  for (let i = 1;i <= MAX_RATING; i++) {
+    const on = i <= r ? " is-on" : "";
+    buttons += `<button type="button" class="${prefix}-star${on}" data-val="${i}" tabindex="-1">★</button>`;
+  }
+  return `<div class="${prefix}-stars" data-rating="${r}" title="Rate (click the active star to clear)">${buttons}</div>`;
+}
+function applyStars(row, rating) {
+  const r = ratingOf({ rating });
+  row.dataset.rating = String(r);
+  for (const s of row.querySelectorAll("[data-val]")) {
+    s.classList.toggle("is-on", Number(s.dataset.val) <= r);
+  }
+}
+function warnRating(extName, e) {
+  console.warn(`[${extName}] rating update failed`, e);
+}
+var SAFE_VIEW_SETTINGS = {
+  enabled: "TouchTools.SafeView.Enabled",
+  keywords: "TouchTools.SafeView.Keywords",
+  hide: "TouchTools.SafeView.Hide",
+  blurNames: "TouchTools.SafeView.BlurNames",
+  matchPrompt: "TouchTools.SafeView.MatchPrompt"
+};
+var SAFE_VIEW_DEFAULT_KEYWORDS = "nsfw";
+var SAFE_VIEW_GLYPH_ON = "\uD83D\uDE48";
+var SAFE_VIEW_GLYPH_OFF = "\uD83D\uDC41";
+function safeViewSettings() {
+  const fire = () => notifySafeViewChange();
+  return [
+    {
+      id: SAFE_VIEW_SETTINGS.enabled,
+      category: ["Touch Tools", "Safe View", "Enabled"],
+      sortOrder: 100,
+      name: "Safe View",
+      tooltip: "Blur thumbnails and block out names for files and folders matching your keywords, in the Image Browser, the image picker and ComfyUI's own asset sidebar and lightbox. This is discretion, not security: the blur is CSS and the file is still downloaded, so it defeats someone glancing over your shoulder, not someone with your keyboard.",
+      type: "boolean",
+      defaultValue: true,
+      onChange: fire
+    },
+    {
+      id: SAFE_VIEW_SETTINGS.keywords,
+      category: ["Touch Tools", "Safe View", "Keywords"],
+      sortOrder: 90,
+      name: "Keywords",
+      tooltip: "Comma- or space-separated. Matched as WHOLE WORDS against the file name, every folder above it, and the file's XMP keyword tags — so 'nsfw' matches output/nsfw/pic.png and my_nsfw_pic.png, while 'ass' does not match assets/ or classic.png. Case-insensitive. Empty means nothing is filtered.",
+      type: "text",
+      defaultValue: SAFE_VIEW_DEFAULT_KEYWORDS,
+      onChange: fire
+    },
+    {
+      id: SAFE_VIEW_SETTINGS.hide,
+      category: ["Touch Tools", "Safe View", "Hide"],
+      sortOrder: 80,
+      name: "Remove matches from the listing entirely",
+      tooltip: "Off (default): matches stay in the grid, blurred, with a reveal button. On: matches are dropped server-side, so they never reach the browser and the listing count changes. Hiding is filtered above the newest-N cap, so a folder of mostly-sensitive files still returns a full page of the rest.",
+      type: "boolean",
+      defaultValue: false,
+      onChange: fire
+    },
+    {
+      id: SAFE_VIEW_SETTINGS.blurNames,
+      category: ["Touch Tools", "Safe View", "Names"],
+      sortOrder: 70,
+      name: "Block out names too",
+      tooltip: "Replaces the file name, its folder label and its tooltip with a solid block. Off leaves names readable under a blurred thumbnail — which usually defeats the point, since the folder name is often what matched.",
+      type: "boolean",
+      defaultValue: true,
+      onChange: fire
+    },
+    {
+      id: SAFE_VIEW_SETTINGS.matchPrompt,
+      category: ["Touch Tools", "Safe View", "Prompt"],
+      sortOrder: 60,
+      name: "Also match the generation prompt and model",
+      tooltip: "Off by default because it is expensive: every file's embedded metadata must be parsed and cached before its verdict is known, and a file with no verdict yet is blurred until the background scan reaches it. On a large library that means a mostly-blurred grid on first enable, clearing as the scan progresses.",
+      type: "boolean",
+      defaultValue: false,
+      onChange: fire
+    }
+  ];
+}
+function safeViewSettingHost() {
+  const host = globalThis;
+  return host.app?.extensionManager?.setting ?? null;
+}
+var SAFE_VIEW_DEFAULTS = Object.freeze({
+  enabled: true,
+  keywords: Object.freeze([SAFE_VIEW_DEFAULT_KEYWORDS]),
+  hide: false,
+  blurNames: true,
+  matchPrompt: false
+});
+function parseKeywords(raw) {
+  if (typeof raw !== "string")
+    return [];
+  const out = [];
+  const seen = new Set;
+  for (const piece of raw.split(/[\s,]+/)) {
+    const kw = piece.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!kw || seen.has(kw))
+      continue;
+    seen.add(kw);
+    out.push(kw);
+  }
+  return out;
+}
+function readSafeViewConfig(host = safeViewSettingHost()) {
+  if (!host)
+    return SAFE_VIEW_DEFAULTS;
+  const bool = (id, fallback) => {
+    const v = host.get(id);
+    return typeof v === "boolean" ? v : fallback;
+  };
+  const rawKeywords = host.get(SAFE_VIEW_SETTINGS.keywords);
+  return {
+    enabled: bool(SAFE_VIEW_SETTINGS.enabled, SAFE_VIEW_DEFAULTS.enabled),
+    keywords: rawKeywords === undefined ? SAFE_VIEW_DEFAULTS.keywords : parseKeywords(rawKeywords),
+    hide: bool(SAFE_VIEW_SETTINGS.hide, SAFE_VIEW_DEFAULTS.hide),
+    blurNames: bool(SAFE_VIEW_SETTINGS.blurNames, SAFE_VIEW_DEFAULTS.blurNames),
+    matchPrompt: bool(SAFE_VIEW_SETTINGS.matchPrompt, SAFE_VIEW_DEFAULTS.matchPrompt)
+  };
+}
+function isSafeViewActive(cfg = readSafeViewConfig()) {
+  return cfg.enabled && cfg.keywords.length > 0;
+}
+function tokenize(input) {
+  if (typeof input !== "string" || input === "")
+    return [];
+  return input.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t !== "");
+}
+function isSensitive(target, cfg) {
+  if (!cfg.enabled || cfg.keywords.length === 0)
+    return false;
+  const haystack = new Set;
+  for (const t of tokenize(target.name))
+    haystack.add(t);
+  for (const t of tokenize(target.path))
+    haystack.add(t);
+  for (const tag of target.tags ?? []) {
+    for (const t of tokenize(tag))
+      haystack.add(t);
+  }
+  for (const kw of cfg.keywords) {
+    if (haystack.has(kw))
+      return true;
+  }
+  if (cfg.matchPrompt) {
+    if (target.promptMatch === true)
+      return true;
+    if (target.promptMatch === "unscanned")
+      return true;
+  }
+  return false;
+}
+function makeRevealSet() {
+  const set = new Set;
+  const key = (type, subfolder, name) => `${type}:${subfolder}:${name}`;
+  return {
+    key,
+    has: (t, s, n) => set.has(key(t, s, n)),
+    reveal: (t, s, n) => {
+      set.add(key(t, s, n));
+    },
+    clear: () => set.clear(),
+    get size() {
+      return set.size;
+    }
+  };
+}
+var SAFE_VIEW_STYLE_ID = "cmk-safe-view-style";
+var SAFE_VIEW_BLUR_CLASS = "cmk-sv-blur";
+var SAFE_VIEW_SPOILER_CLASS = "cmk-sv-spoiler";
+var SPOILER_TITLE_ATTR = "data-cmk-sv-title";
+var SAFE_VIEW_CSS = `
+.${SAFE_VIEW_BLUR_CLASS} {
+    /* Scale past the edges: a blurred element otherwise fades toward its own
+       border and leaks a readable silhouette of the content at the rim. */
+    filter: blur(18px);
+    transform: scale(1.08);
+}
+.${SAFE_VIEW_SPOILER_CLASS} {
+    /* A SOLID BLOCK, never a text blur — blurred text stays readable at small
+       sizes, which is exactly the size a phone grid renders names at. */
+    background: #3a3a44;
+    color: transparent;
+    border-radius: 3px;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+}
+.cmk-sv-reveal {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 2;
+    /* >=34px is the family's per-card control floor. */
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    line-height: 1;
+    background: rgba(20, 20, 26, 0.82);
+    color: #e8e8ea;
+    border: 1px solid #4a4a58;
+    border-radius: 8px;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.cmk-sv-reveal:hover {
+    background: rgba(40, 40, 52, 0.92);
+}
+`;
+function ensureSafeViewStyle() {
+  ensureStyleOnce(SAFE_VIEW_STYLE_ID, SAFE_VIEW_CSS);
+}
+function setBlurred(el, blurred) {
+  ensureSafeViewStyle();
+  el.classList.toggle(SAFE_VIEW_BLUR_CLASS, blurred);
+}
+function setSpoilered(el, spoilered) {
+  ensureSafeViewStyle();
+  el.classList.toggle(SAFE_VIEW_SPOILER_CLASS, spoilered);
+  if (spoilered) {
+    const title = el.getAttribute("title");
+    if (title !== null) {
+      el.setAttribute(SPOILER_TITLE_ATTR, title);
+      el.removeAttribute("title");
+    }
+  } else {
+    const parked = el.getAttribute(SPOILER_TITLE_ATTR);
+    if (parked !== null) {
+      el.setAttribute("title", parked);
+      el.removeAttribute(SPOILER_TITLE_ATTR);
+    }
+  }
+}
+function makeRevealButton(opts) {
+  ensureSafeViewStyle();
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "cmk-sv-reveal";
+  btn.textContent = SAFE_VIEW_GLYPH_OFF;
+  btn.title = "Reveal";
+  btn.setAttribute("aria-label", opts.label ?? "Reveal hidden item");
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    opts.onReveal();
+  });
+  return btn;
+}
+function onSafeViewChange(listener) {
+  const list = getKit().safeViewListeners;
+  list.push(listener);
+  return () => {
+    const i = list.indexOf(listener);
+    if (i >= 0)
+      list.splice(i, 1);
+  };
+}
+function notifySafeViewChange() {
+  for (const listener of [...getKit().safeViewListeners]) {
+    try {
+      listener();
+    } catch (e) {
+      console.error("[comfy-modal-kit] safe-view listener failed", e);
+    }
+  }
+}
+function toggleSafeView(host = safeViewSettingHost()) {
+  if (!host)
+    return;
+  const cfg = readSafeViewConfig(host);
+  if (cfg.keywords.length === 0) {
+    notify({
+      severity: "warn",
+      summary: "Safe View has no keywords",
+      detail: "Add keywords in Settings → Touch Tools → Safe View → Keywords."
+    });
+    return;
+  }
+  host.set(SAFE_VIEW_SETTINGS.enabled, !cfg.enabled);
+}
+function registerSafeViewHubToggle() {
+  registerHubToggle({
+    id: "safe-view.toggle",
+    label: "Safe View",
+    icon: "pi pi-eye-slash",
+    description: "Blur sensitive thumbnails and names",
+    priority: 100,
+    get: () => isSafeViewActive(),
+    set: () => toggleSafeView()
+  });
 }
 var STYLE_ID3 = "cmp-overlay-style";
 var CSS3 = `
@@ -1106,6 +1422,7 @@ function attachGallery(node) {
             <select class="gl-sort" title="Sort">
                 <!-- options injected from the kit's SORT_OPTIONS below -->
             </select>
+            <button class="gl-icon gl-safe-view"></button>
             <button class="gl-icon gl-refresh" title="Refresh">⟳</button>
         </div>
         <div class="gl-crumbs"></div>
@@ -1152,8 +1469,55 @@ function attachGallery(node) {
     path: root.querySelector(".gl-pathinput"),
     selected: root.querySelector(".gl-selected"),
     refresh: root.querySelector(".gl-refresh"),
-    sort: root.querySelector(".gl-sort")
+    sort: root.querySelector(".gl-sort"),
+    safeView: root.querySelector(".gl-safe-view")
   };
+  const revealSet = makeRevealSet();
+  function safeViewPath() {
+    if (state.type === "path")
+      return state.absDir || "";
+    return state.subfolder ? `${state.type}/${state.subfolder}` : state.type;
+  }
+  function renderSafeViewToggle() {
+    const on = isSafeViewActive();
+    refs.safeView.textContent = on ? SAFE_VIEW_GLYPH_ON : SAFE_VIEW_GLYPH_OFF;
+    refs.safeView.classList.toggle("is-active", on);
+    refs.safeView.title = on ? "Safe View on — matching thumbnails are blurred. Tap to show everything." : "Safe View off — tap to blur thumbnails matching your keywords.";
+    refs.safeView.setAttribute("aria-pressed", String(on));
+  }
+  refs.safeView.addEventListener("click", () => {
+    toggleSafeView();
+  });
+  function safeHideKeywords() {
+    const cfg = readSafeViewConfig();
+    return cfg.hide && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
+  }
+  let lastSafeHideKeywords = safeHideKeywords();
+  const disposeSafeViewSub = onSafeViewChange(() => {
+    if (!root.isConnected) {
+      disposeSafeViewSub();
+      return;
+    }
+    renderSafeViewToggle();
+    const kw = safeHideKeywords();
+    if (kw !== lastSafeHideKeywords) {
+      loadAndRender();
+      return;
+    }
+    renderGrid();
+  });
+  function applySafeView(card, cfg, onReveal) {
+    card.classList.add("is-safe-hidden");
+    const media = card.querySelector(".gl-thumb img");
+    if (media)
+      setBlurred(media, true);
+    if (cfg.blurNames) {
+      for (const el of card.querySelectorAll(".gl-name"))
+        setSpoilered(el, true);
+    }
+    const host = card.querySelector(".gl-thumb") ?? card;
+    host.appendChild(makeRevealButton({ onReveal }));
+  }
   refs.sort.innerHTML = SORT_OPTIONS.map((o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`).join("");
   refs.sort.value = `${state.sortKey}:${state.sortDir}`;
   refs.sort.addEventListener("change", (e) => {
@@ -1320,7 +1684,16 @@ function attachGallery(node) {
       }
     }
   }
+  let revealLocation = null;
+  function locationKey() {
+    return state.type === "path" ? `path:${state.absDir}` : `${state.type}:${state.subfolder}`;
+  }
   async function loadAndRender() {
+    lastSafeHideKeywords = safeHideKeywords();
+    const here = locationKey();
+    if (revealLocation !== null && revealLocation !== here)
+      revealSet.clear();
+    revealLocation = here;
     renderControls();
     refs.status.textContent = "Loading…";
     refs.grid.classList.add("is-loading");
@@ -1336,6 +1709,11 @@ function attachGallery(node) {
         params.set("path", state.absDir);
       } else {
         params.set("subfolder", state.subfolder || "");
+      }
+      const kw = safeHideKeywords();
+      if (kw) {
+        params.set("safe_kw", kw);
+        params.set("safe_hide", "1");
       }
       const res = await fetch(`${LIST_URL}?${params.toString()}`);
       if (!res.ok)
@@ -1358,6 +1736,9 @@ function attachGallery(node) {
   function renderGrid() {
     const grid = refs.grid;
     grid.innerHTML = "";
+    const svCfg = readSafeViewConfig();
+    const svPath = safeViewPath();
+    renderSafeViewToggle();
     const inSub = state.type === "path" ? state.absDir && state.absDir !== "/" : !!state.subfolder;
     if (inSub) {
       const up = document.createElement("div");
@@ -1373,6 +1754,12 @@ function attachGallery(node) {
       c.className = "gl-card is-dir";
       c.dataset.name = d.name;
       c.innerHTML = `<div class="gl-thumb gl-folder">\uD83D\uDCC1</div><div class="gl-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>`;
+      if (isSensitive({ name: d.name }, svCfg) && !revealSet.has(state.type, state.subfolder, d.name)) {
+        applySafeView(c, svCfg, () => {
+          revealSet.reveal(state.type, state.subfolder, d.name);
+          renderGrid();
+        });
+      }
       grid.appendChild(c);
     }
     let sortedFiles;
@@ -1408,6 +1795,12 @@ ${stamp}`;
                 ${dims ? `<div class="gl-dims">${dims}</div>` : ""}
                 ${starsHTML("gl", ratingOf(f))}
             `;
+      if (isSensitive({ name: f.name, path: svPath }, svCfg) && !revealSet.has(state.type, state.subfolder, f.name)) {
+        applySafeView(c, svCfg, () => {
+          revealSet.reveal(state.type, state.subfolder, f.name);
+          renderGrid();
+        });
+      }
       grid.appendChild(c);
     }
     installLazyThumbs(grid);
@@ -2069,8 +2462,40 @@ async function openImagePicker(widget, node, opts) {
     onClose: () => {
       disposeBackGuard?.();
       disposeBackGuard = null;
+      disposeSafeViewSub?.();
+      disposeSafeViewSub = null;
+      revealSet.clear();
     }
   });
+  const revealSet = makeRevealSet();
+  let disposeSafeViewSub = null;
+  function safeViewPath(f) {
+    if (state.type === "path")
+      return state.absPath || "";
+    const sub = fileSub(f);
+    const root = fileType(f);
+    return sub ? `${root}/${sub}` : root;
+  }
+  function isHiddenCard(f, cfg) {
+    if (!isSensitive({ name: f.name, path: safeViewPath(f) }, cfg))
+      return false;
+    return !revealSet.has(fileType(f), fileSub(f), f.name);
+  }
+  function safeViewMediaEl(card) {
+    return card.querySelector(".ip-thumb img, .ip-thumb video, .ip-thumb > .ip-thumb-icon");
+  }
+  function applySafeView(card, cfg, onReveal) {
+    card.classList.add("is-safe-hidden");
+    const media = safeViewMediaEl(card);
+    if (media)
+      setBlurred(media, true);
+    if (cfg.blurNames) {
+      for (const el of card.querySelectorAll(".ip-name, .ip-subpath"))
+        setSpoilered(el, true);
+    }
+    const host = card.querySelector(".ip-thumb") ?? card;
+    host.appendChild(makeRevealButton({ onReveal }));
+  }
   let disposeBackGuard = null;
   function canGoUp() {
     return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
@@ -2140,7 +2565,21 @@ async function openImagePicker(widget, node, opts) {
     pinsEl = document.createElement("div");
     pinsEl.className = "ip-pins";
   }
-  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], ...pinToggleEl ? [pinToggleEl] : [], ...pruneEl ? [pruneEl] : [], sortEl, refreshEl, ...pinsEl ? [pinsEl] : []);
+  const safeViewEl = document.createElement("button");
+  safeViewEl.type = "button";
+  safeViewEl.className = "ip-control ip-icon ip-safe-view";
+  function renderSafeViewToggle() {
+    const on = isSafeViewActive();
+    safeViewEl.textContent = on ? SAFE_VIEW_GLYPH_ON : SAFE_VIEW_GLYPH_OFF;
+    safeViewEl.classList.toggle("is-active", on);
+    safeViewEl.title = on ? "Safe View on — matching thumbnails are blurred. Tap to show everything." : "Safe View off — tap to blur thumbnails matching your keywords.";
+    safeViewEl.setAttribute("aria-pressed", String(on));
+  }
+  renderSafeViewToggle();
+  safeViewEl.addEventListener("click", () => {
+    toggleSafeView();
+  });
+  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], ...pinToggleEl ? [pinToggleEl] : [], ...pruneEl ? [pruneEl] : [], safeViewEl, sortEl, refreshEl, ...pinsEl ? [pinsEl] : []);
   let pinEntries = [];
   let pinKeys = new Set;
   function adoptPins(entries) {
@@ -2622,7 +3061,16 @@ async function openImagePicker(widget, node, opts) {
     if (state.extensionsParam?.length) {
       p.set("extensions", state.extensionsParam.join(","));
     }
+    const kw = safeHideKeywords();
+    if (kw) {
+      p.set("safe_kw", kw);
+      p.set("safe_hide", "1");
+    }
     return `${LIST_URL2}?${p.toString()}`;
+  }
+  function safeHideKeywords() {
+    const cfg = readSafeViewConfig();
+    return cfg.hide && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
   }
   function numOr0(v) {
     const n = Number(v);
@@ -2649,7 +3097,26 @@ async function openImagePicker(widget, node, opts) {
     state.files = pinEntries.filter((p) => p.kind === "file").map(pinToListingFile);
     modal.setStatus("");
   }
+  let revealLocation = null;
+  let lastSafeHideKeywords = safeHideKeywords();
+  function locationKey() {
+    return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}:${isFlat() ? "flat" : "folder"}`;
+  }
+  disposeSafeViewSub = onSafeViewChange(() => {
+    renderSafeViewToggle();
+    const kw = safeHideKeywords();
+    if (kw !== lastSafeHideKeywords) {
+      loadAndRender();
+      return;
+    }
+    renderGrid();
+  });
   async function loadAndRender() {
+    lastSafeHideKeywords = safeHideKeywords();
+    const here = locationKey();
+    if (revealLocation !== null && revealLocation !== here)
+      revealSet.clear();
+    revealLocation = here;
     renderTabs();
     renderCrumbs();
     renderViewToggle();
@@ -2719,6 +3186,7 @@ async function openImagePicker(widget, node, opts) {
   function renderGrid() {
     const q = state.query;
     gridEl.innerHTML = "";
+    const svCfg = readSafeViewConfig();
     const flat = isFlat();
     const pinnedView = isPinned();
     const showUp = !flat && (state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder);
@@ -2741,6 +3209,12 @@ async function openImagePicker(widget, node, opts) {
                 <div class="ip-thumb ip-thumb-icon">\uD83D\uDCC1</div>
                 <div class="ip-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>
             `;
+      if (isSensitive({ name: d.name }, svCfg) && !revealSet.has(state.type, state.subfolder, d.name)) {
+        applySafeView(c, svCfg, () => {
+          revealSet.reveal(state.type, state.subfolder, d.name);
+          renderGrid();
+        });
+      }
       gridEl.appendChild(c);
     }
     let files = state.files;
@@ -2816,6 +3290,12 @@ ${when}`;
           nameEl.textContent = "";
           nameEl.appendChild(highlightMatches(f.name, hits));
         }
+      }
+      if (isHiddenCard(f, svCfg)) {
+        applySafeView(c, svCfg, () => {
+          revealSet.reveal(fileType(f), fileSub(f), f.name);
+          renderGrid();
+        });
       }
       gridEl.appendChild(c);
       visible++;
@@ -2941,6 +3421,16 @@ var PICKER_CSS = `
 .ip-control.is-active {
     background: #2f3a52;
     color: #9ec6ff;
+}
+/* Safe View's per-card reveal, repositioned for THIS pack's card layout: the
+   kit parks it top-left, which is exactly where .ip-pin-file sits, and
+   top-right is .ip-info. Bottom-left of the thumbnail is the one free corner.
+   Plain values only — no min()/calc() — because jsdom drops those and the
+   tests assert this through getComputedStyle. */
+.ip-card .cmk-sv-reveal {
+    top: auto;
+    bottom: 4px;
+    left: 4px;
 }
 /* ⓘ overlay button, pinned to the thumbnail's corner. */
 .ip-thumb { position: relative; }
@@ -3233,6 +3723,7 @@ function enhanceNode(node) {
 try {
   app2.registerExtension({
     name: "comfy.gallery-loader.image-picker",
+    settings: safeViewSettings(),
     async beforeRegisterNodeDef(_nodeType, nodeData) {
       try {
         defangNodeData(nodeData);
@@ -3242,6 +3733,7 @@ try {
     },
     setup() {
       ensureStyleOnce(STYLE_ID4, PICKER_CSS);
+      registerSafeViewHubToggle();
       debug("image-picker setup running");
       const nodes = app2?.graph?._nodes;
       if (Array.isArray(nodes)) {
