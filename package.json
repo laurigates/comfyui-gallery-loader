@@ -19,7 +19,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
     "@comfyorg/comfyui-frontend-types": "^1.43.0",
-    "@playwright/test": "1.56.0",
+    "@playwright/test": "1.62.1",
     "jsdom": "^29.0.0",
     "knip": "^6.16.1",
     "typescript": "^6.0.3",

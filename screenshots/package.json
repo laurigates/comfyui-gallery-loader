@@ -4,6 +4,6 @@
   "type": "module",
   "description": "Playwright driver for generating README screenshots of comfyui-gallery-loader.",
   "dependencies": {
-    "playwright": "1.49.1"
+    "playwright": "1.62.1"
   }
 }
