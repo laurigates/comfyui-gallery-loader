@@ -42,6 +42,7 @@ dev = [
     { name = "pathspec" },
     { name = "pre-commit" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -53,6 +54,7 @@ dev = [
     { name = "pathspec", specifier = ">=1.1.1" },
     { name = "pre-commit", specifier = ">=4" },
     { name = "pytest", specifier = ">=8" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "ruff", specifier = ">=0.11" },
 ]
 

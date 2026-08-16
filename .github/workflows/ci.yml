@@ -91,6 +91,22 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
 
+      # `bun run test` shells out to the `vitest` bin, whose shebang is
+      # `env node` — so the suite runs under the RUNNER'S Node, not under bun,
+      # and without this step that version is whatever the image happens to
+      # ship. Not cosmetic: Node put its built-in `localStorage` accessor on
+      # `globalThis` unflagged in **v25**, and that accessor shadows jsdom's
+      # Storage (vitest copies jsdom's globals across only where absent). So
+      # the runtime decides which Storage the jsdom suite exercises, and an
+      # unpinned runner picks one silently. Measured with setupFiles removed:
+      # 24.19.0 green (jsdom's Storage), 25.0.0 and 26.5.0 red with
+      # `TypeError: Cannot read properties of undefined (reading 'clear')`.
+      # See tests/js/setup-jsdom.js and #75.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
       - name: Install dev dependencies
         run: bun install --frozen-lockfile
 
@@ -111,6 +127,26 @@ jobs:
       - uses: actions/checkout@v6
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
+      # NO setup-node here, deliberately — see tests/test_ci_node_pin.py, which
+      # asserts the absence so this cannot be re-added by reflex.
+      #
+      # `playwright` is a Node bin like `vitest`, so pinning looks right by the
+      # same argument. It is not, at Playwright 1.56.0: `playwright install`
+      # downloads the browser to 100% and then HANGS in the extract step under
+      # Node 26. Reproduced locally with the runtime as the only variable, into
+      # a clean PLAYWRIGHT_BROWSERS_PATH:
+      #
+      #   node 24.19.0  rc=0    10s   all three artifacts downloaded + extracted
+      #   node 26.5.0   rc=124  300s  100% of 129.7 MiB, then nothing
+      #
+      # And in CI on this branch's first push: the step sat at "100% of 173.9
+      # MiB" for 22 minutes with no "downloaded to …" line, against 1m15s for
+      # the same step on a control re-run of a branch without setup-node.
+      # `engines` says `node: >=18` with no upper bound, so nothing warns.
+      #
+      # This job has no localStorage exposure — the reason test-js is pinned —
+      # so leaving it on the runner default costs nothing today. Revisit when
+      # Playwright supports Node 26; the test will tell you to.
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Install Chromium for Playwright

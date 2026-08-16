@@ -10,6 +10,10 @@ __pycache__/
 node_modules/
 coverage/
 
+# Playwright (tests/e2e) run artifacts — traces/screenshots of a failed run
+tests/e2e/test-results/
+playwright-report/
+
 
 # Editor
 .vscode/
