@@ -122,6 +122,96 @@ function sortFiles(files, key, dir) {
   }
   return [...files].sort((a, b) => mul * cmp(a, b));
 }
+var IMG_EXTS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+  ".bmp",
+  ".tiff",
+  ".tif",
+  ".avif"
+]);
+var VIDEO_EXTS = new Set([
+  ".mp4",
+  ".webm",
+  ".mov",
+  ".mkv",
+  ".avi",
+  ".m4v",
+  ".mpg",
+  ".mpeg"
+]);
+var SANDBOXED_TYPES = ["input", "output", "temp"];
+function joinAbs(dir, name) {
+  const d = (dir || "/").replace(/\/+$/, "");
+  return d === "" ? `/${name}` : `${d}/${name}`;
+}
+var META_FIELDS = [
+  { key: "positive", label: "Positive" },
+  { key: "negative", label: "Negative" },
+  { key: "model", label: "Model" },
+  { key: "seed", label: "Seed" },
+  { key: "steps", label: "Steps" },
+  { key: "cfg", label: "CFG" },
+  { key: "sampler", label: "Sampler" },
+  { key: "scheduler", label: "Scheduler" }
+];
+function metaRows(summary) {
+  const rows = [];
+  if (!summary || typeof summary !== "object")
+    return rows;
+  const bag = summary;
+  for (const { key, label } of META_FIELDS) {
+    const v = bag[key];
+    if (v === undefined || v === null)
+      continue;
+    const value = String(v);
+    if (!value.trim())
+      continue;
+    rows.push({ key, label, value });
+  }
+  return rows;
+}
+function metaClipboardText(rows) {
+  return rows.map((r) => `${r.label}: ${r.value}`).join(`
+`);
+}
+function createViewStore(namespace) {
+  const viewKey = `${namespace}:view`;
+  const pendingKey = `${namespace}:view-pending`;
+  return {
+    load() {
+      try {
+        if (localStorage.getItem(pendingKey) === "1") {
+          localStorage.removeItem(pendingKey);
+          localStorage.setItem(viewKey, "folder");
+          return { mode: "folder", recovered: true };
+        }
+        return {
+          mode: localStorage.getItem(viewKey) === "flat" ? "flat" : "folder",
+          recovered: false
+        };
+      } catch {
+        return { mode: "folder", recovered: false };
+      }
+    },
+    save(mode) {
+      try {
+        localStorage.setItem(viewKey, mode);
+      } catch {}
+    },
+    markPending(pending) {
+      try {
+        if (pending)
+          localStorage.setItem(pendingKey, "1");
+        else
+          localStorage.removeItem(pendingKey);
+      } catch {}
+    }
+  };
+}
 function registerHubToggle(toggle) {
   const list = getKit().hubToggles;
   const i = list.findIndex((t) => t.id === toggle.id);
@@ -1002,6 +1092,9 @@ function readSafeViewConfig(host = safeViewSettingHost()) {
 function isSafeViewActive(cfg = readSafeViewConfig()) {
   return cfg.enabled && cfg.keywords.length > 0;
 }
+function sensitiveKeyword(cfg) {
+  return cfg.keywords.length ? cfg.keywords[0] : null;
+}
 function tokenize(input) {
   if (typeof input !== "string" || input === "")
     return [];
@@ -1418,9 +1511,6 @@ import { app } from "/scripts/app.js";
 
 // src/safe-tag.ts
 var TAG_URL = "/gallery_loader/tag";
-function sensitiveKeyword(cfg) {
-  return cfg.keywords.length ? cfg.keywords[0] : null;
-}
 function hasSensitiveTag(f, keyword) {
   const want = keyword.toLowerCase();
   return (f.tags ?? []).some((t) => t.toLowerCase() === want);
@@ -2076,51 +2166,9 @@ function debug(...args) {
   if (DEBUG)
     console.debug(`[${EXT_NAME2}]`, ...args);
 }
-var IMG_EXTS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".gif",
-  ".bmp",
-  ".tiff",
-  ".tif",
-  ".avif"
-]);
-var VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"]);
 var SORT_STORAGE_KEY2 = "comfyui-gallery-loader:sort";
-var SANDBOXED_TYPES = ["input", "output", "temp"];
 var scrollMemory = createScrollMemory();
-var VIEW_STORAGE_KEY = "comfyui-gallery-loader:view";
-var VIEW_PENDING_KEY = "comfyui-gallery-loader:view-pending";
-function loadSavedView() {
-  try {
-    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
-      localStorage.removeItem(VIEW_PENDING_KEY);
-      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
-      return { mode: "folder", recovered: true };
-    }
-    return {
-      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
-      recovered: false
-    };
-  } catch {
-    return { mode: "folder", recovered: false };
-  }
-}
-function saveView(mode) {
-  try {
-    localStorage.setItem(VIEW_STORAGE_KEY, mode);
-  } catch {}
-}
-function markFlatPending(pending) {
-  try {
-    if (pending)
-      localStorage.setItem(VIEW_PENDING_KEY, "1");
-    else
-      localStorage.removeItem(VIEW_PENDING_KEY);
-  } catch {}
-}
+var viewStore = createViewStore("comfyui-gallery-loader");
 var PINS_URL = "/gallery_loader/pins";
 var PINNED_TYPE = "pinned";
 function pinKeyOf(p) {
@@ -2487,10 +2535,6 @@ function buildLoadImageValue(type, subfolder, name) {
   const rel = sub ? `${sub}/${name}` : name;
   return type === "input" ? rel : `${rel} [${type}]`;
 }
-function joinAbs(dir, name) {
-  const d = (dir || "/").replace(/\/+$/, "");
-  return d === "" ? `/${name}` : `${d}/${name}`;
-}
 function thumbVersion(f) {
   return `${f.mtime}-${f.size ?? 0}`;
 }
@@ -2514,36 +2558,6 @@ function videoSrcURL(type, subfolder, name, absDir) {
   }
   const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
   return `/api/view?${p.toString()}`;
-}
-var META_FIELDS = [
-  { key: "positive", label: "Positive" },
-  { key: "negative", label: "Negative" },
-  { key: "model", label: "Model" },
-  { key: "seed", label: "Seed" },
-  { key: "steps", label: "Steps" },
-  { key: "cfg", label: "CFG" },
-  { key: "sampler", label: "Sampler" },
-  { key: "scheduler", label: "Scheduler" }
-];
-function metaRows(summary) {
-  const rows = [];
-  if (!summary || typeof summary !== "object")
-    return rows;
-  const bag = summary;
-  for (const { key, label } of META_FIELDS) {
-    const v = bag[key];
-    if (v === undefined || v === null)
-      continue;
-    const value = String(v);
-    if (!value.trim())
-      continue;
-    rows.push({ key, label, value });
-  }
-  return rows;
-}
-function metaClipboardText(rows) {
-  return rows.map((r) => `${r.label}: ${r.value}`).join(`
-`);
 }
 async function fetchMetadata(type, subfolder, name, absDir) {
   const p = new URLSearchParams;
@@ -2596,7 +2610,7 @@ async function openImagePicker(widget, node, opts) {
     state.sortKey = savedSort.key;
     state.sortDir = savedSort.dir;
   }
-  const savedView = loadSavedView();
+  const savedView = viewStore.load();
   state.viewMode = savedView.mode;
   function isFlat() {
     return state.viewMode === "flat" && mode !== "directory" && SANDBOXED_TYPES.includes(state.type);
@@ -2954,7 +2968,7 @@ async function openImagePicker(widget, node, opts) {
       return;
     rememberScroll();
     state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
-    saveView(state.viewMode);
+    viewStore.save(state.viewMode);
     loadAndRender();
   });
   if (tabsEl) {
@@ -3053,7 +3067,7 @@ async function openImagePicker(widget, node, opts) {
         e.stopPropagation();
         rememberScroll();
         state.viewMode = "folder";
-        saveView("folder");
+        viewStore.save("folder");
         if (subEl.dataset.pinType)
           state.type = subEl.dataset.pinType;
         state.subfolder = subEl.dataset.sub || "";
@@ -3363,7 +3377,7 @@ async function openImagePicker(widget, node, opts) {
     renderPins();
     modal.setBusy(true);
     modal.setStatus("Loading…");
-    markFlatPending(isFlat());
+    viewStore.markPending(isFlat());
     const pinsDone = refreshPins();
     if (isPinned()) {
       await pinsDone;
@@ -3399,7 +3413,7 @@ async function openImagePicker(widget, node, opts) {
     renderGrid({
       scrollTo: opts2?.preserveScroll ? undefined : scrollMemory.get(locationKey())
     });
-    markFlatPending(false);
+    viewStore.markPending(false);
   }
   function thumbForFile(f) {
     const ext = (f.ext || "").toLowerCase();

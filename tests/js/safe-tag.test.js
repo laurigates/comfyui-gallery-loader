@@ -19,12 +19,7 @@
 import { SAFE_VIEW_SETTINGS } from "@laurigates/comfy-modal-kit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openImagePicker } from "../../src/image-picker.ts";
-import {
-  hasSensitiveTag,
-  markSensitiveHTML,
-  sensitiveKeyword,
-  tagRequestBody,
-} from "../../src/safe-tag.ts";
+import { hasSensitiveTag, markSensitiveHTML, tagRequestBody } from "../../src/safe-tag.ts";
 
 const FILES = [
   { name: "holiday.png", ext: ".png", mtime: 5, size: 10, rating: 0, tags: [] },
@@ -125,17 +120,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("sensitiveKeyword", () => {
-  it("writes the FIRST keyword the user configured", () => {
-    // Not a packaged constant: the filter matches the user's own list, so any
-    // other choice could write a mark their filter does not honour.
-    expect(sensitiveKeyword({ keywords: ["private", "nsfw"] })).toBe("private");
-  });
-
-  it("is null for an empty keyword list", () => {
-    expect(sensitiveKeyword({ keywords: [] })).toBe(null);
-  });
-});
+// `sensitiveKeyword` used to be unit-tested here. It moved to the kit in 0.14.0
+// (laurigates/comfy-modal-kit#33) precisely because this pack and
+// comfyui-image-browser each carried a hand-written copy while writing over the
+// same files on disk; the kit's own suite covers the function's contract now.
+//
+// What is still THIS pack's to pin is that its two surfaces call that function
+// rather than a constant of their own. The end-to-end 🙈 cases below assert it
+// through the DOM (the button's title names the configured keyword and the tap
+// POSTs it), and `tests/mutations.json` carries a mutation that hardcodes the
+// keyword at the picker's call site — see "TAGS picker — 🙈 writes a hardcoded
+// keyword instead of the one the user configured".
 
 describe("hasSensitiveTag", () => {
   it("matches the keyword case-insensitively", () => {
@@ -243,6 +238,27 @@ describe("image picker — the control on a card", () => {
       tag: "nsfw",
       present: true,
     });
+  });
+
+  it("posts the user's OWN first keyword, not the packaged default", async () => {
+    // Every other case in this file configures `nsfw`, which is ALSO the kit's
+    // packaged default (SAFE_VIEW_DEFAULT_KEYWORDS) — so a call site that
+    // hardcoded the default would satisfy all of them. This is the case that
+    // separates "reads the user's config" from "writes a constant that happens
+    // to match": the configured list leads with `private`, and `nsfw` is still
+    // in it, so the filter is unchanged and only the WRITTEN word differs.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "private, nsfw" });
+    const posts = stubFetch();
+    await openPicker();
+
+    // The control announces the same word it will write.
+    expect(markOf(fileCard("holiday.png")).title).toBe("Mark sensitive (‘private’)");
+
+    markOf(fileCard("holiday.png")).click();
+    await vi.waitFor(() => {
+      if (!posts.length) throw new Error("no tag POST");
+    });
+    expect(posts[0].tag).toBe("private");
   });
 
   it("removes the keyword when the file already carries it", async () => {
