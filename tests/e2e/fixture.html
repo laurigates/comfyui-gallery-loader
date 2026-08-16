@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Mobile-first suite: without this the 390px viewport would be laid out at
+         the 980px default width and the grid would report desktop column counts. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>comfyui-gallery-loader e2e fixture</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0b10;
+        color: #6a6a74;
+        font: 13px/1.5 system-ui, sans-serif;
+      }
+      /* Stands in for ComfyUI's canvas. Unlike comfyui-image-browser's modal
+         this one is NOT full-viewport (min(1100px, 100vw - 16px) wide,
+         min(88vh, 820px) tall), so the page behind it is genuinely visible —
+         which makes "the page itself never scrolls" worth asserting. */
+      #canvas-stand-in {
+        height: 300vh;
+        padding: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="canvas-stand-in">canvas stand-in (the picker modal sits over this)</div>
+    <script type="module">
+      // Loads the SERVED artifact at its real URL — not the TypeScript source.
+      // A test that imported src/ would prove nothing about what ComfyUI runs:
+      // web/dist/index.js is what ships, and `bun run build` is what produces
+      // it. The module's top-level `app.registerExtension(...)` runs on import,
+      // against the stub served at /scripts/app.js (that import is left
+      // unbundled by design — see ADR-0010).
+      import { openImagePicker } from "/extensions/comfyui-gallery-loader/index.js";
+
+      // The picker is opened FROM A WIDGET, not from the app chrome, so the
+      // fixture has to supply one. This is the smallest node/widget pair the
+      // picker's `loadimage` path reads: it parses `widget.value` for the
+      // initial root/subfolder/name, calls `widget.callback` on commit, and
+      // touches nothing else here.
+      //
+      // The value names a file that EXISTS in the stub tree, because the
+      // first-open behaviour under test is "centre the currently loaded image".
+      function makeWidget(value) {
+        const w = { name: "image", value, options: { values: [] }, callback: (v) => {
+          w.committed = v;
+        } };
+        return w;
+      }
+
+      // Opening is NOT automatic. Tests seed localStorage (saved sort and view
+      // mode are read at open time) before the modal mounts, and an auto-open
+      // would race that.
+      window.__GL_E2E__ = {
+        widget: null,
+        async open({ value = "", kind = "loadimage", mode = "file" } = {}) {
+          this.widget = makeWidget(value);
+          const node = {
+            widgets: [this.widget],
+            comfyClass: "LoadImage",
+            type: "LoadImage",
+            addWidget: () => ({}),
+            setDirtyCanvas: () => {},
+          };
+          await openImagePicker(this.widget, node, { kind, mode });
+          return true;
+        },
+        /** What the picker committed to the widget, if anything. */
+        committed() {
+          return this.widget?.committed ?? null;
+        },
+      };
+      window.__GL_E2E_READY__ = true;
+    </script>
+  </body>
+</html>

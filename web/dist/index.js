@@ -1174,6 +1174,128 @@ function registerSafeViewHubToggle() {
     set: () => toggleSafeView()
   });
 }
+var SCROLL_RESTORE_FRAMES = 12;
+var NATIVE_SCROLL_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End"
+]);
+var GESTURE_EVENTS = ["pointerdown", "wheel", "touchstart"];
+function defaultIsTypingTarget() {
+  const el = typeof document === "undefined" ? null : document.activeElement;
+  if (!el)
+    return false;
+  if (el.isContentEditable)
+    return true;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+function installScrollRestore(host, opts) {
+  const frames = Math.max(0, opts?.frames ?? SCROLL_RESTORE_FRAMES);
+  const isTyping = opts?.isTypingTarget ?? defaultIsTypingTarget;
+  const keyTarget = opts?.keyTarget ?? (typeof window === "undefined" ? null : window);
+  let liveScrollTop = 0;
+  let userTookOver = false;
+  let raf = 0;
+  const onScroll = () => {
+    liveScrollTop = host.scrollTop;
+  };
+  host.addEventListener("scroll", onScroll, { passive: true });
+  function cancel() {
+    if (raf !== 0) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+  }
+  function yieldScroller() {
+    userTookOver = true;
+    cancel();
+  }
+  for (const ev of GESTURE_EVENTS) {
+    host.addEventListener(ev, yieldScroller, { passive: true, capture: true });
+  }
+  const onKey = (e) => {
+    const key = e.key;
+    if (!NATIVE_SCROLL_KEYS.has(key) || isTyping())
+      return;
+    yieldScroller();
+  };
+  keyTarget?.addEventListener("keydown", onKey, true);
+  function current() {
+    if (host.isConnected)
+      liveScrollTop = host.scrollTop;
+    return liveScrollTop;
+  }
+  function set(top) {
+    host.scrollTop = top;
+    liveScrollTop = host.scrollTop;
+  }
+  function restore(target) {
+    cancel();
+    userTookOver = false;
+    set(target);
+    if (target <= 0)
+      return;
+    if (typeof requestAnimationFrame !== "function" || host.clientHeight <= 0)
+      return;
+    if (frames <= 0)
+      return;
+    let n = 0;
+    const step = () => {
+      raf = 0;
+      if (userTookOver || !host.isConnected)
+        return;
+      const max = Math.max(0, host.scrollHeight - host.clientHeight);
+      const reachable = Math.min(target, max);
+      if (Math.abs(host.scrollTop - reachable) > 1)
+        set(reachable);
+      if (++n >= frames)
+        return;
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  }
+  return {
+    host,
+    current,
+    set,
+    restore,
+    cancel,
+    sync() {
+      liveScrollTop = host.scrollTop;
+    },
+    dispose() {
+      cancel();
+      host.removeEventListener("scroll", onScroll);
+      for (const ev of GESTURE_EVENTS) {
+        host.removeEventListener(ev, yieldScroller, true);
+      }
+      keyTarget?.removeEventListener("keydown", onKey, true);
+    }
+  };
+}
+function createScrollMemory() {
+  const slots = new Map;
+  return {
+    get(key) {
+      return slots.get(key) ?? 0;
+    },
+    remember(key, top) {
+      slots.set(key, top);
+    },
+    forget(key) {
+      slots.delete(key);
+    },
+    get size() {
+      return slots.size;
+    }
+  };
+}
 var STYLE_ID3 = "cmp-overlay-style";
 var CSS3 = `
 .cmp-ov-backdrop {
@@ -1968,6 +2090,7 @@ var IMG_EXTS = new Set([
 var VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"]);
 var SORT_STORAGE_KEY2 = "comfyui-gallery-loader:sort";
 var SANDBOXED_TYPES = ["input", "output", "temp"];
+var scrollMemory = createScrollMemory();
 var VIEW_STORAGE_KEY = "comfyui-gallery-loader:view";
 var VIEW_PENDING_KEY = "comfyui-gallery-loader:view-pending";
 function loadSavedView() {
@@ -2530,6 +2653,8 @@ async function openImagePicker(widget, node, opts) {
     footerLeftHTML,
     footerRightHTML: '<span class="ip-count"></span>',
     onClose: () => {
+      rememberScroll();
+      scroller.dispose();
       disposeBackGuard?.();
       disposeBackGuard = null;
       disposeSafeViewSub?.();
@@ -2537,6 +2662,10 @@ async function openImagePicker(widget, node, opts) {
       revealSet.clear();
     }
   });
+  const scroller = installScrollRestore(modal.bodyEl);
+  function rememberScroll() {
+    scrollMemory.remember(locationKey(), scroller.current());
+  }
   const revealSet = makeRevealSet();
   let disposeSafeViewSub = null;
   function safeViewPath(f) {
@@ -2776,16 +2905,16 @@ async function openImagePicker(widget, node, opts) {
   }
   modal.searchEl.addEventListener("input", () => {
     state.query = modal.searchEl.value.toLowerCase().trim();
-    renderGrid();
+    renderGrid({ scrollTo: 0 });
   });
   sortEl.addEventListener("change", () => {
     const [k, d] = sortEl.value.split(":");
     state.sortKey = k;
     state.sortDir = d;
     saveSort2(k, d);
-    renderGrid();
+    renderGrid({ scrollTo: 0 });
   });
-  refreshEl.addEventListener("click", () => loadAndRender());
+  refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   pinToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type))
       return;
@@ -2807,6 +2936,7 @@ async function openImagePicker(widget, node, opts) {
     }
     if (item.type === state.type && item.subfolder === state.subfolder)
       return;
+    rememberScroll();
     state.type = item.type;
     state.subfolder = item.subfolder;
     loadAndRender();
@@ -2822,6 +2952,7 @@ async function openImagePicker(widget, node, opts) {
   viewToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type))
       return;
+    rememberScroll();
     state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
     saveView(state.viewMode);
     loadAndRender();
@@ -2833,6 +2964,7 @@ async function openImagePicker(widget, node, opts) {
         return;
       if (state.type === b.dataset.type)
         return;
+      rememberScroll();
       state.type = b.dataset.type;
       state.subfolder = "";
       loadAndRender();
@@ -2842,6 +2974,7 @@ async function openImagePicker(widget, node, opts) {
     const c = e.target.closest("[data-sub], [data-abs]");
     if (!c)
       return;
+    rememberScroll();
     if (c.dataset.abs !== undefined) {
       state.absPath = c.dataset.abs || "/";
     } else {
@@ -2918,6 +3051,7 @@ async function openImagePicker(widget, node, opts) {
       const subEl = target.closest(".ip-subpath");
       if (subEl?.dataset.sub !== undefined) {
         e.stopPropagation();
+        rememberScroll();
         state.viewMode = "folder";
         saveView("folder");
         if (subEl.dataset.pinType)
@@ -3094,6 +3228,7 @@ async function openImagePicker(widget, node, opts) {
     }
   }
   function navigateUp() {
+    rememberScroll();
     if (state.type === "path") {
       const p = (state.absPath || "/").replace(/\/+$/, "");
       if (p === "" || p === "/")
@@ -3108,6 +3243,7 @@ async function openImagePicker(widget, node, opts) {
     loadAndRender();
   }
   function navigateInto(name) {
+    rememberScroll();
     if (state.type === "path") {
       state.absPath = joinAbs(state.absPath, name);
     } else {
@@ -3210,12 +3346,12 @@ async function openImagePicker(widget, node, opts) {
     renderSafeViewToggle();
     const kw = safeHideKeywords();
     if (kw !== lastSafeHideKeywords) {
-      loadAndRender();
+      loadAndRender({ preserveScroll: true });
       return;
     }
     renderGrid();
   });
-  async function loadAndRender() {
+  async function loadAndRender(opts2) {
     lastSafeHideKeywords = safeHideKeywords();
     const here = locationKey();
     if (revealLocation !== null && revealLocation !== here)
@@ -3260,7 +3396,9 @@ async function openImagePicker(widget, node, opts) {
     }
     modal.setBusy(false);
     renderPins();
-    renderGrid();
+    renderGrid({
+      scrollTo: opts2?.preserveScroll ? undefined : scrollMemory.get(locationKey())
+    });
     markFlatPending(false);
   }
   function thumbForFile(f) {
@@ -3287,8 +3425,9 @@ async function openImagePicker(widget, node, opts) {
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
-  function renderGrid() {
+  function renderGrid(opts2) {
     const q = state.query;
+    const targetScrollTop = opts2?.scrollTo ?? scroller.current();
     gridEl.innerHTML = "";
     const svCfg = readSafeViewConfig();
     const safeKeyword = sensitiveKeyword(svCfg);
@@ -3417,19 +3556,21 @@ ${when}`;
       useFolderEl.textContent = state.type === "path" ? `Use ${shortenPath(state.absPath)}` : `Use ${state.type}${state.subfolder ? `/${state.subfolder}` : ""}`;
     }
     setCount(visible, state.files.length);
-    installLazyThumbs(gridEl);
-    if (!state.didInitialScroll && !isFlat()) {
+    let target = targetScrollTop;
+    if (!state.didInitialScroll) {
       state.didInitialScroll = true;
-      scrollToSelected();
+      if (target <= 0)
+        target = selectedCentreOffset() ?? target;
     }
+    scroller.restore(target);
+    installLazyThumbs(gridEl);
   }
-  function scrollToSelected() {
+  function selectedCentreOffset() {
     const card = gridEl.querySelector(".ip-card.is-selected");
     if (!card)
-      return;
+      return null;
     const body = modal.bodyEl;
-    const target = card.offsetTop - Math.max(0, (body.clientHeight - card.offsetHeight) / 2);
-    body.scrollTop = Math.max(0, target);
+    return Math.max(0, card.offsetTop - Math.max(0, (body.clientHeight - card.offsetHeight) / 2));
   }
   function shortenPath(p) {
     if (!p)
@@ -3875,3 +4016,6 @@ try {
 } catch (e) {
   console.error(`[${EXT_NAME2}] image-picker.js: registerExtension threw`, e);
 }
+export {
+  openImagePicker
+};

@@ -1,5 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
-  "entry": ["src/index.ts", "tests/js/**/*.test.js"],
-  "project": ["src/**/*.ts"]
+  "entry": ["src/index.ts", "tests/js/**/*.test.js", "tests/e2e/*.spec.js"],
+  "project": ["src/**/*.ts", "tests/e2e/**/*.{js,mjs}"],
+  "ignoreDependencies": ["playwright-core"]
 }

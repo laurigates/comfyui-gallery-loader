@@ -97,6 +97,43 @@ jobs:
       - name: Run Vitest
         run: bun run test
 
+  test-e2e:
+    # The browser suite. Its own job on purpose: it needs a Chromium download
+    # that no other job wants, and as a parallel job it adds nothing to the
+    # critical path. It is also the ONLY suite that can see the picker's scroll
+    # behaviour: jsdom does no layout, so it neither clamps `scrollTop` nor
+    # answers 0 from a detached element. Measured: rebuilding the bundle from
+    # the pre-change `src/image-picker.ts` fails 14 of the 16 tests here while
+    # `bun run test` stays green.
+    name: Tests (browser, Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Install Chromium for Playwright
+        # Chromium only — the suite declares a single chromium project, and the
+        # other engines are a download this job would never use.
+        run: bunx playwright install --with-deps chromium
+      - name: Build the served bundle
+        # The fixture serves web/dist/index.js at its real extension URL, so the
+        # suite must run against a bundle built from this commit's src/. (That
+        # the COMMITTED web/dist matches src/ is typecheck-build's assertion,
+        # not this job's.)
+        run: bun run build
+      - name: Run the browser suite
+        run: bun run test:e2e
+      - name: Upload traces from failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: tests/e2e/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   vendored-drift:
     name: Vendored modules match canonical
     runs-on: ubuntu-latest

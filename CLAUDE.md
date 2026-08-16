@@ -70,7 +70,9 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | `.github/workflows/ci.yml` | CI: ruff, biome, tsc+build (bun), pytest, vitest (bun), gitleaks. |
 | `.pre-commit-config.yaml` | Pre-commit hooks: ruff, biome (2.4.15), gitleaks, file hygiene. |
 | `biome.json` | Biome (TS/JSON) lint + format config. |
-| `tests/` | pytest suite for the Python backend + Vitest suite (`tests/js/`) for the kit's pure helpers. |
+| `tests/mutations.json` / `tests/mutations-e2e.json` | Mutation tables driving `just mutation-check comfyui-gallery-loader [tests/mutations-e2e.json]` from the workspace root. Two files because the tiers differ: the first runs vitest+pytest, the second rebuilds the bundle and runs the **browser** suite, because the scroll wiring is not observable anywhere else. Each carries a deliberate **CONTROL** mutation (a comment edit) the suite must MISS — a harness reporting everything as CAUGHT is indistinguishable from a broken one — so a healthy run exits **1**. Read the per-mutation lines, not the exit code. |
+| `tests/` | pytest suite for the Python backend + Vitest suite (`tests/js/`) for the kit's pure helpers. **No layout engine** — see `tests/e2e/` for the half of the picker's behaviour this suite structurally cannot see. |
+| `tests/e2e/` | **Browser suite** — Playwright driving real Chromium at a 390×844 phone viewport (`bun run test:e2e`, `just test-e2e`). It exists because the jsdom suite **cannot fail** for anything about scrolling: jsdom performs no layout, so it accepts `scrollTop = 500` on a zero-height scroller and reads it back verbatim — detached or not. A real engine **clamps** the assignment to `scrollHeight - clientHeight` at the instant of the write, and answers **0** from a detached element (the state the kit's teardown leaves the dialog in before `onClose` runs). `server.mjs` is a stdlib-only stub ComfyUI serving the **built** `web/dist/index.js` at its real extension URL plus `/gallery_loader/{base,list,thumb,file,pins}` — real PNG bytes, because a 404 thumb changes the layout under test; listing size is derived from the folder name (`bulk-400` holds 400 files) so the server stays stateless. `fixture.html` opens the picker through the bundle's exported `openImagePicker()` with a stub widget+node. `harness.js` holds the drivers, `probe.js` the `scrollTop`-setter spy that separates "clamped at assignment" from "moved afterwards" (both PORTS of `comfyui-image-browser`'s, which is where they were written). **Navigation goes through `tapWithoutScrolling`**, never Playwright's pointer: Playwright scrolls a target into view first, and folder / `..` cards sit at the TOP of the grid, so at a deep offset the harness moves the scroller to ~0 before `rememberScroll()` runs — measured here on the first run, five tests failing with a remembered 0 against a parked 743. The two gesture tests throttle the renderer (`Emulation.setCPUThrottlingRate`) so the ~200 ms restore window cannot close before an out-of-process CDP keypress arrives; do not replace that with a sleep or a retry, which hides the race instead of removing it. **Chromium-only**: no WebKit exists here, so iOS **momentum scrolling is NOT covered** by any test. |
 | `screenshots/` | Containerized Playwright pipeline that regenerates `docs/picker.png` + `docs/gallery.png` (`capture.mjs`, `seed_images.py`, `Dockerfile`, `entrypoint.sh`, `workflow.json`). |
 | `justfile` | `lint`, `test`, `format`, `check`, `screenshots` recipes. |
 | `RELEASE-CHECKLIST.md` | One-time and per-release publish steps. |
@@ -146,7 +148,12 @@ Three consequences, each pinned by a mutation:
   measured +40% on the metadata pass over a 2000-file directory, for nothing.
 
 `tests/mutations.json` pins all of this — `just mutation-check
-comfyui-gallery-loader` from the workspace root.
+comfyui-gallery-loader` from the workspace root. There is a SECOND table,
+`tests/mutations-e2e.json`, for the scroll wiring: its mutations are only
+observable in a real browser, so it rebuilds the bundle and runs the Playwright
+suite per mutation (`just mutation-check comfyui-gallery-loader
+tests/mutations-e2e.json` — six real mutations CAUGHT, the CONTROL correctly
+MISSED, so a healthy run exits 1).
 
 ### Pack directory name is part of the URL
 
@@ -195,6 +202,54 @@ Measured 400/400 off-screen cards intersecting with the grid as root vs 20/400
 with the real scroller; at scale it OOMs the tab. There is a regression test
 (`tests/js/image-picker.test.js`) asserting the picker's root. If you move
 either grid into or out of a scrolling container, move its `root` with it.
+
+### Scroll position: restored through the kit, remembered per LOCATION
+
+The picker remembers where each folder was scrolled to and puts it back — up,
+down, tab, crumb, pin chip, flat-view toggle, and across a close/reopen (the map
+is module-level, and deliberately not persisted to localStorage). `locationKey()`
+is the slot, and it is the SAME key Safe View's reveal set uses: one notion of
+"where you are", including the folder/flat distinction, because those are two
+different listings of one directory and an offset measured against one is
+meaningless against the other.
+
+The mechanism is `installScrollRestore` from `@laurigates/comfy-modal-kit`,
+shared with `comfyui-image-browser` — not a local copy. Four things break the
+obvious `modal.bodyEl.scrollTop = n`, all measured in Chromium at a phone
+viewport, and the kit's module documents each:
+
+1. **The close path reads a detached element.** The shell removes the dialog and
+   only THEN calls `onClose`, so a `scrollTop` read there is 0 in every real
+   engine. `rememberScroll()` reads the restorer's mirror instead, and
+   `scroller.dispose()` must stay AFTER it in `onClose`.
+2. **`scrollTop = n` clamps at the instant of assignment**, so one write is only
+   as good as the layout in force. The restorer re-asserts for a bounded
+   `SCROLL_RESTORE_FRAMES` and stops on detach.
+3. **Restore BEFORE `installLazyThumbs`**, so the observer's first pass is
+   computed against the final viewport; observing first queues the top-of-list
+   band, which in flat view is thousands of wrong `/thumb` requests. This one is
+   **latent** with a synchronous first write — the observer's callbacks are
+   async — so `tests/mutations-e2e.json` deliberately does not pin it: swapping
+   the two lines was caught on one run of the browser suite and missed on the
+   next, and a flaky table entry is worse than none.
+4. **Hand the destination INTO `renderGrid({ scrollTo })`** rather than assigning
+   after it — `renderGrid`'s own capture belongs to the folder you just left, and
+   a later write races the re-assert loop.
+
+Any user gesture that scrolls (pointer/wheel/touch, or a native scroll key
+outside a text field) ends a pending restore immediately: a wrong offset beats a
+scroller that fights a finger. The kit's default `isTypingTarget` covers the
+shell's autofocused search input, which is why no override is passed here.
+
+First-open **centring** on the widget's current image still wins over an empty
+slot — that is what the picker is for — but a remembered offset wins over the
+centring on a return visit. It now runs in flat view too: it used to be skipped
+there because a single bare write was clamped against a not-yet-final layout,
+which is exactly what the re-assert loop fixes.
+
+`tests/e2e/` is the only suite that can see any of this. Verified by rebuilding
+the bundle from the pre-change `src/image-picker.ts`: **14 of 16 browser tests
+fail**, while `bun run test` and `pytest` stay green.
 
 ### Listing caps and the extensions clamp
 
@@ -378,9 +433,15 @@ bun run knip                 # dead-export / unused-dependency check
 
 ```sh
 uv run pytest -v             # full backend suite
-bun run test                 # JS pure-helper suite (Vitest)
-just test                    # both, the local CI gate
+bun run test                 # Vitest/jsdom (tests/js/) — no layout engine
+just test-e2e                # builds, then Playwright/Chromium (tests/e2e/)
+bun run test:e2e             # the browser suite alone (serves the CURRENT web/dist — build first)
+just check                   # lint + all three, the local CI gate
 ```
+
+The jsdom/browser split is load-bearing: `tests/js/` cannot fail for anything
+layout-dependent, so scroll, clamping and lazy-load behaviour are asserted only
+in `tests/e2e/` (Chromium-only, so iOS momentum scrolling stays uncovered).
 
 ### JavaScript tests
 
@@ -483,6 +544,7 @@ After non-trivial frontend changes, verify in browser:
 | Metadata (`ⓘ`) | On an image card (including on a path picker) → in-dialog overlay, painted immediately with "Reading metadata…", then a source line, one row per recognised field with its own Copy, Copy all, and a collapsed raw disclosure. No `ⓘ` on video cards. A read failure closes the overlay FIRST, then toasts. |
 | Pins (`📌`) — folders | Toolbar `📌` pins the current folder; chips render on their own toolbar row — tap to navigate, ✕ to unpin. Hidden on a path picker. Persist across reloads **and across browsers**: the list is server-side (`<user_dir>/comfy-pins.json`), not `localStorage`. An old `localStorage` list is drained into it once on first open and the key removed. |
 | Pins (`📌`) — media | `📌` on a file card pins that file (highlighted when already pinned); the tap must NOT commit or close. The **📌 pinned** tab shows every pinned file across roots, each labelled with its full address (`output/2026-08-04/`) — tapping the label navigates there, **tapping the card commits in one tap** (a pinned `output/…/a.png` commits `…/a.png [output]` with no navigation). Tab hidden in directory mode; flat view and the folder-`📌` are hidden while on it. |
+| Scroll position | Scroll deep in a folder, enter a subfolder (starts at the top), come back → the parent is where you left it; descend again → the subfolder's own position. Star a card deep in a listing → the grid does not jump. **Close the picker deep in a folder and reopen it** → back where you left it, not at the top. A restored offset **holds** for ~200 ms of thumbnails landing rather than drifting up. Flick or press End immediately after a restore → the view follows the input. Toggling ≣ keeps a separate position per view. Changing sort/search starts at the top and stays there. Opening the picker fresh centres the widget's current image (in flat view too). |
 | Pins — stale + cross-device/pack | Delete a pinned file on disk, reopen: the card renders **dimmed**, refuses to commit, and `Prune missing` drops it. Pin on the phone → appears on the desktop after a reopen (and vice versa). Pin in `comfyui-image-browser` → appears here, same file on disk. Pins are **per-install, not per-user**. |
 
 ## Releases
