@@ -29,6 +29,7 @@ import {
   SAFE_VIEW_GLYPH_ON,
   type SafeViewConfig,
   SORT_OPTIONS,
+  sensitiveKeyword,
   setBlurred,
   setSpoilered,
   sortFiles,
@@ -41,7 +42,6 @@ import {
   hasSensitiveTag,
   markSensitiveHTML,
   postTag,
-  sensitiveKeyword,
   TAG_URL,
   type TagAddress,
 } from "./safe-tag.js";

@@ -58,7 +58,7 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | `src/index.ts` | Lone `bun build` entry. Imports both extension modules for their `app.registerExtension` side-effects. |
 | `src/gallery_loader.ts` | Inline-grid frontend for the `GalleryLoadImage` node (TS port of the former `web/js/gallery_loader.js`). |
 | `src/image-picker.ts` | Modal picker for stock `LoadImage` + VHS path loaders (TS port; consumes `@laurigates/comfy-modal-kit`). |
-| `src/safe-tag.ts` | The `🙈` mark-sensitive control, shared by both frontends: which keyword it writes, whether a file already carries it, the `/tag` request body, and the button markup. One module because BOTH surfaces carry the control and two hand-written copies of "which keyword" is exactly what drifts. |
+| `src/safe-tag.ts` | The `🙈` mark-sensitive control, shared by both frontends: whether a file already carries the keyword, the `/tag` request body, and the button markup. **Which** keyword it writes is the kit's `sensitiveKeyword` (0.14.0) — that half moved out because `comfyui-image-browser` carried a byte-identical copy and both packs write the same files; the rest is per-pack and has diverged on purpose. |
 | `src/comfyui-shims.d.ts` | Types the `/scripts/app.js` runtime import via the `tsconfig.json` `paths` shim. |
 | `web/css/gallery_loader.css` | Inline-grid styles, copied into `web/dist/css/` by the build. (The modal injects its own `<style>` from `image-picker.ts`.) |
 | `web/dist/` | **Generated** build output (`bun run build`) — **tracked in git**, and shipped to the registry via `[tool.comfy] includes`. Tracked deliberately: ComfyUI-Manager updates over git, and a `fetch && merge --ff-only` cannot pull an ignored path, so an ignored bundle updates "successfully" while ComfyUI keeps serving the stale one. Rebuild and commit it in the same commit as any `src/` change. |
@@ -336,6 +336,24 @@ the packaged default. The response carries the keywords read back off the file
 write did not land the way the tap assumed, and painting the guess would show a
 mark the file does not carry.
 
+**Which keyword is the kit's decision, not this pack's** (since kit 0.14.0).
+`sensitiveKeyword` used to be a hand-written copy here *and* in
+`comfyui-image-browser/src/safe-tag.ts`, and the two packs write over the same
+files on disk — a disagreement would have marked a file the other pack's filter
+did not honour, silently and asymmetrically. It now lives in
+`comfy-modal-kit/src/safe-view.ts`, next to the `parseKeywords` whose
+order-preservation is the whole justification for "the first entry"
+(laurigates/comfy-modal-kit#33). Both surfaces import it from there.
+
+The **rest** of `src/safe-tag.ts` deliberately stays per-pack and must not
+follow it in: `tagRequestBody` and `markSensitiveHTML` have diverged from the
+browser's copies **on purpose** (that pack dropped the `type: "path"` arm per
+its ADR-0002 and its `TagAddress` carries no `absDir`; the markup emits a
+different class prefix). Unifying them would silently reverse a considered
+decision. Two mutations in `tests/mutations.json` pin that each 🙈 call site
+reads the kit's function rather than a constant — one for the write path, one
+for the render pass.
+
 Safe View is **discretion, not access control** — the blur is CSS and the bytes
 are still served. Say so wherever it is documented; the README carries the
 accepted gaps (plain-text toasts, the full-prompt metadata panel,
@@ -383,14 +401,21 @@ both halves.
 
 ### VHS extension sets are copied, and can go stale
 
-`VHS_VIDEO_EXTS` mirrors VHS's own `video_extensions`
-(`videohelpersuite/load_video_nodes.py`: `webm, mp4, mkv, gif, mov`) so the grid
-offers exactly what the node's native dropdown does — deliberately **not** this
-pack's broader `VIDEO_EXTS`, which would list `.avi`/`.mpg` files the dropdown
-never shows. Note `.gif` is in VHS's list and in our `IMG_EXTS`, so it renders
-as a still `<img>` thumbnail; that is correct, not a bug. If VHS widens its
-list, ours goes stale silently — the symptom is a loadable file the grid won't
-show.
+`VHS_VIDEO_EXTS` (local, in `src/image-picker.ts`) mirrors VHS's own
+`video_extensions` (`videohelpersuite/load_video_nodes.py`:
+`webm, mp4, mkv, gif, mov`) so the grid offers exactly what the node's native
+dropdown does — deliberately **not** the broader `VIDEO_EXTS`, which would list
+`.avi`/`.mpg` files the dropdown never shows. Note `.gif` is in VHS's list and
+in `IMG_EXTS`, so it renders as a still `<img>` thumbnail; that is correct, not
+a bug. If VHS widens its list, ours goes stale silently — the symptom is a
+loadable file the grid won't show.
+
+`IMG_EXTS`, `VIDEO_EXTS` and `SANDBOXED_TYPES` are the **kit's** (0.14.0), not
+local — they were hand-written identically here and in `comfyui-image-browser`,
+which renders the same files off the same disk. Widening either set now widens
+it for both grids at once, which is the point: a file loadable in one grid and
+absent from the other is the failure the copies invited. `VHS_VIDEO_EXTS` stays
+local precisely because it tracks a THIRD party's list, not ours.
 
 ### A sandboxed folder value uses `.` for a root, never `""`
 

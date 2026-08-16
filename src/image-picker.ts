@@ -31,18 +31,24 @@ import {
   type ButtonWidgetHost,
   copyTextToClipboard,
   createScrollMemory,
+  createViewStore,
   ensureStyleOnce,
   escapeHTML as escHTML,
   fuzzyScore,
   highlightMatches,
+  IMG_EXTS,
   installBackGuard,
   installLazyMedia,
   installScrollRestore,
   isSafeViewActive,
   isSensitive,
   isValidSort,
+  joinAbs,
+  type MetaField,
   makeRevealButton,
   makeRevealSet,
+  metaClipboardText,
+  metaRows,
   nextRating,
   notify,
   onSafeViewChange,
@@ -57,24 +63,22 @@ import {
   registerSafeViewHubToggle,
   SAFE_VIEW_GLYPH_OFF,
   SAFE_VIEW_GLYPH_ON,
+  SANDBOXED_TYPES,
   type SafeViewConfig,
   SORT_OPTIONS,
   safeViewSettings,
+  sensitiveKeyword,
   setBlurred,
   setSpoilered,
   sortFiles,
   starsHTML,
   toggleSafeView,
+  VIDEO_EXTS,
+  type ViewMode,
   warnRating,
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
-import {
-  hasSensitiveTag,
-  markSensitiveHTML,
-  postTag,
-  sensitiveKeyword,
-  TAG_URL,
-} from "./safe-tag.js";
+import { hasSensitiveTag, markSensitiveHTML, postTag, TAG_URL } from "./safe-tag.js";
 
 const EXT_NAME = "comfyui-gallery-loader";
 const LIST_URL = "/gallery_loader/list";
@@ -100,24 +104,14 @@ function debug(...args: unknown[]): void {
   if (DEBUG) console.debug(`[${EXT_NAME}]`, ...args);
 }
 
-const IMG_EXTS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".gif",
-  ".bmp",
-  ".tiff",
-  ".tif",
-  ".avif",
-]);
-const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"]);
+// IMG_EXTS / VIDEO_EXTS / SANDBOXED_TYPES come from the kit (0.14.0). They were
+// hand-written here and byte-identically in comfyui-image-browser; both grids
+// render the same files off the same disk, so a widened set in one pack and not
+// the other shows a file as loadable in one grid and absent from the other.
 
 // Persisted sort preference. One shared key across every picker flavour so a
 // user's "Name A→Z" choice sticks regardless of which node opened the modal.
 const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
-
-const SANDBOXED_TYPES = ["input", "output", "temp"];
 
 // Per-directory scroll offsets. MODULE level, not per modal: that is what makes
 // closing the picker and opening it again — on the same widget or another one —
@@ -130,54 +124,22 @@ const SANDBOXED_TYPES = ["input", "output", "temp"];
 // that may have changed while the tab was gone is a guess.
 const scrollMemory = createScrollMemory();
 
-// Flat ("all subfolders") view preference.
-type ViewMode = "folder" | "flat";
-const VIEW_STORAGE_KEY = "comfyui-gallery-loader:view";
-// Breadcrumb set while a flat load is in flight and cleared once the grid has
-// painted. If it is STILL set at open time, the previous flat attempt never
-// finished — the tab died under it — so the persisted preference would reopen
-// straight into the same failure with no way to reach the toggle. Falling back
-// to folder view is the only self-service escape.
-const VIEW_PENDING_KEY = "comfyui-gallery-loader:view-pending";
-
-interface SavedView {
-  mode: ViewMode;
-  recovered: boolean;
-}
-
-function loadSavedView(): SavedView {
-  try {
-    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
-      localStorage.removeItem(VIEW_PENDING_KEY);
-      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
-      return { mode: "folder", recovered: true };
-    }
-    return {
-      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
-      recovered: false,
-    };
-  } catch {
-    // Private mode / disabled storage — non-fatal.
-    return { mode: "folder", recovered: false };
-  }
-}
-
-function saveView(mode: ViewMode): void {
-  try {
-    localStorage.setItem(VIEW_STORAGE_KEY, mode);
-  } catch {
-    // Non-fatal.
-  }
-}
-
-function markFlatPending(pending: boolean): void {
-  try {
-    if (pending) localStorage.setItem(VIEW_PENDING_KEY, "1");
-    else localStorage.removeItem(VIEW_PENDING_KEY);
-  } catch {
-    // Non-fatal.
-  }
-}
+// Flat ("all subfolders") view preference. The store comes from the kit
+// (0.14.0); the NAMESPACE stays here, because it is the one thing that genuinely
+// differs between this pack's copy and comfyui-image-browser's. The literal
+// below must remain "comfyui-gallery-loader": the keys it derives —
+// `comfyui-gallery-loader:view` and `comfyui-gallery-loader:view-pending` — are
+// the ones every existing install already wrote, and changing the namespace
+// orphans that stored preference silently while the UI still looks correct.
+// Pinned by "the view store keeps THIS pack's literal storage keys" in
+// tests/js/image-picker.test.js.
+//
+// The pending breadcrumb (`:view-pending`) is the load-bearing half: raised
+// before a flat load and cleared once the grid has painted, so a flat attempt
+// that killed the tab is detected at the next open and forced back to folder
+// view rather than reopening straight into the same failure with no reachable
+// toggle. That behaviour now lives in `createViewStore`.
+const viewStore = createViewStore("comfyui-gallery-loader");
 
 // ---- Pins ------------------------------------------------------------
 //
@@ -864,10 +826,8 @@ function buildLoadImageValue(type: string, subfolder: string, name: string): str
   return type === "input" ? rel : `${rel} [${type}]`;
 }
 
-function joinAbs(dir: string, name: string): string {
-  const d = (dir || "/").replace(/\/+$/, "");
-  return d === "" ? `/${name}` : `${d}/${name}`;
-}
+// `joinAbs` is the kit's (0.14.0) — the same three lines lived here and in
+// comfyui-image-browser, and both feed a `?path=` the backend resolves.
 
 // ============================================================
 // Thumbnail URL dispatch
@@ -907,63 +867,20 @@ function videoSrcURL(type: string, subfolder: string, name: string, absDir?: str
 
 // ---- Embedded generation metadata -------------------------------------
 
-type MetaField =
-  | "positive"
-  | "negative"
-  | "model"
-  | "seed"
-  | "steps"
-  | "cfg"
-  | "sampler"
-  | "scheduler";
-
+// `MetaField`, `MetaRow`, `metaRows` and `metaClipboardText` come from the kit
+// (0.14.0), along with the fixed `META_FIELDS` display order they walk. Both
+// packs' /metadata endpoints answer the same summary keys, and the ORDER is the
+// thing worth single-sourcing: rendering the response's own key order lays the
+// same image out differently depending on which tool wrote the file.
+//
+// `ImageMetadata` stays here — it is the shape of THIS pack's
+// /gallery_loader/metadata response, not a shared display concern.
 interface ImageMetadata {
   format: string;
   source: string;
   summary: Partial<Record<MetaField, unknown>>;
   raw: Record<string, string>;
   truncated: boolean;
-}
-
-// Fixed display order. NOT the response's own key order — that is JSON
-// insertion order and varies by whichever tool wrote the file.
-const META_FIELDS: { key: MetaField; label: string }[] = [
-  { key: "positive", label: "Positive" },
-  { key: "negative", label: "Negative" },
-  { key: "model", label: "Model" },
-  { key: "seed", label: "Seed" },
-  { key: "steps", label: "Steps" },
-  { key: "cfg", label: "CFG" },
-  { key: "sampler", label: "Sampler" },
-  { key: "scheduler", label: "Scheduler" },
-];
-
-interface MetaRow {
-  key: MetaField;
-  label: string;
-  value: string;
-}
-
-// Drop anything missing or whitespace-only, so an unknown field never renders
-// as a bare "Negative:" row with a Copy button that copies nothing.
-function metaRows(summary: Partial<Record<MetaField, unknown>> | null | undefined): MetaRow[] {
-  const rows: MetaRow[] = [];
-  if (!summary || typeof summary !== "object") return rows;
-  const bag = summary as Record<string, unknown>;
-  for (const { key, label } of META_FIELDS) {
-    const v = bag[key];
-    if (v === undefined || v === null) continue;
-    const value = String(v);
-    if (!value.trim()) continue;
-    rows.push({ key, label, value });
-  }
-  return rows;
-}
-
-// The "Copy all" payload. Multi-line prompts stay verbatim so the text can be
-// pasted straight back into a prompt box.
-function metaClipboardText(rows: MetaRow[]): string {
-  return rows.map((r) => `${r.label}: ${r.value}`).join("\n");
 }
 
 async function fetchMetadata(
@@ -1079,7 +996,7 @@ export async function openImagePicker(
     state.sortDir = savedSort.dir;
   }
 
-  const savedView = loadSavedView();
+  const savedView = viewStore.load();
   state.viewMode = savedView.mode;
 
   // Flat view is only in effect on a sandboxed root — the toggle is hidden on
@@ -1673,7 +1590,7 @@ export async function openImagePicker(
     // locationKey() gives them separate slots — so each keeps its own place.
     rememberScroll();
     state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
-    saveView(state.viewMode);
+    viewStore.save(state.viewMode);
     // Flat needs a recursive re-fetch, so this is a reload, not a re-render.
     loadAndRender();
   });
@@ -1780,7 +1697,7 @@ export async function openImagePicker(
         e.stopPropagation();
         rememberScroll();
         state.viewMode = "folder";
-        saveView("folder");
+        viewStore.save("folder");
         if (subEl.dataset.pinType) state.type = subEl.dataset.pinType;
         state.subfolder = subEl.dataset.sub || "";
         loadAndRender();
@@ -2210,7 +2127,7 @@ export async function openImagePicker(
     renderPins();
     modal.setBusy(true);
     modal.setStatus("Loading…");
-    markFlatPending(isFlat());
+    viewStore.markPending(isFlat());
     // In flight alongside the listing: the chips are shown on every tab, so the
     // list is refreshed on every load rather than only when the pinned tab is
     // open — that is also what keeps a pin made on another device visible here.
@@ -2260,7 +2177,7 @@ export async function openImagePicker(
     });
     // Cleared only once the grid has actually painted — that is what makes a
     // still-set flag at open time mean "the last flat load never finished".
-    markFlatPending(false);
+    viewStore.markPending(false);
   }
 
   function thumbForFile(f: ListingFile): ThumbDescriptor {

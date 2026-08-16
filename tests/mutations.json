@@ -337,10 +337,16 @@
       "after": "    if (!isSensitive({ name: f.name, path: safeViewPath(f) }, cfg)) return false;"
     },
     {
-      "label": "TAGS picker \u2014 \ud83d\ude48 writes a hardcoded keyword instead of the one the user configured",
-      "file": "src/safe-tag.ts",
-      "before": "  return cfg.keywords.length ? (cfg.keywords[0] as string) : null;",
-      "after": "  return \"nsfw\";"
+      "label": "TAGS picker \u2014 the \ud83d\ude48 WRITE hardcodes the packaged default instead of the keyword the user configured",
+      "file": "src/image-picker.ts",
+      "before": "    const keyword = sensitiveKeyword(cfg);",
+      "after": "    const keyword = \"nsfw\";"
+    },
+    {
+      "label": "TAGS picker \u2014 the \ud83d\ude48 RENDER hardcodes the packaged default, so the control is offered with an empty keyword list",
+      "file": "src/image-picker.ts",
+      "before": "    const safeKeyword = sensitiveKeyword(svCfg);",
+      "after": "    const safeKeyword = \"nsfw\";"
     },
     {
       "label": "TAGS picker \u2014 the card handler does not skip a mark tap, so \ud83d\ude48 commits the file and closes the modal",

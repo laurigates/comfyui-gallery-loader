@@ -409,6 +409,52 @@ describe("image picker flat (recursive) view", () => {
     expect(localStorage.getItem(PENDING_KEY)).toBeNull();
   });
 
+  it("writes BOTH keys under this pack's own namespace and no other", async () => {
+    // The store is the kit's `createViewStore`, which takes the namespace as a
+    // PARAMETER — so nothing in the type system stops a future edit passing
+    // "comfyui-image-browser", or the kit baking a default in. Either would
+    // orphan every existing install's stored preference while the UI kept
+    // looking correct: a fresh key reads as "never set", which is also what a
+    // first run looks like.
+    //
+    // The two literals are spelled out here rather than imported from the
+    // source, so this fails if the source's namespace moves. Asserting the
+    // whole `:view*` key SET, not just a getItem, is what makes it two-sided:
+    // a getItem on the right key still passes when the store ALSO wrote a
+    // second key somewhere else.
+    stubInertObserver();
+    stubFetchRecording();
+    await openWith();
+
+    // Enumerated through the Storage API (`length`/`key`), not Object.keys —
+    // tests/js/setup-jsdom.js installs a Map-backed shim whose own enumerable
+    // properties are its METHODS, so Object.keys silently answers a list with
+    // no stored keys in it at all and the filter below would be vacuously [].
+    const viewKeys = () => {
+      const out = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (/:view(-pending)?$/.test(k)) out.push(k);
+      }
+      return out.sort();
+    };
+
+    // Mid-flight the breadcrumb is up; after the grid paints only :view remains.
+    await goFlat();
+    expect(viewKeys()).toEqual(["comfyui-gallery-loader:view"]);
+    expect(localStorage.getItem("comfyui-gallery-loader:view")).toBe("flat");
+
+    // …and the breadcrumb, when raised, lands on the same namespace. Seeded
+    // rather than caught mid-load: the recovery path is what reads it, and it
+    // is the half a wrong namespace would silently disable.
+    localStorage.setItem("comfyui-gallery-loader:view-pending", "1");
+    document.querySelector(".cmp-close")?.click();
+    stubFetchRecording();
+    await openWith();
+    expect(localStorage.getItem("comfyui-gallery-loader:view-pending")).toBeNull();
+    expect(localStorage.getItem("comfyui-gallery-loader:view")).toBe("folder");
+  });
+
   it("hides the toggle on the path tab and omits it in directory mode", async () => {
     stubInertObserver();
     stubFetchRecording();
