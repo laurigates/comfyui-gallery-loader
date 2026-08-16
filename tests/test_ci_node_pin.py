@@ -35,7 +35,29 @@ This test exists because the pin lives in a workflow file that nothing else
 reads: a new Node-running job added later, or a hand-edit dropping the step,
 restores the divergence with no other signal.
 
-Ported from comfyui-image-browser (8e5dc13), which hit the same divergence.
+WHY test-e2e IS DELIBERATELY *NOT* PINNED.
+
+`playwright` is a Node bin too, so the same argument appears to apply — and it
+does not, at Playwright 1.56.0. `playwright install` downloads the browser to
+100% and then hangs in the extract step under Node 26. Reproduced locally with
+the runtime as the only variable, into a clean PLAYWRIGHT_BROWSERS_PATH:
+
+    node 24.19.0   rc=0     10s    all three artifacts downloaded + extracted
+    node 26.5.0    rc=124  300s    100% of 129.7 MiB, then nothing
+
+and observed in CI: 22 minutes at "100% of 173.9 MiB" with no "downloaded to"
+line, against 1m15s for the identical step on a control re-run of a branch
+without setup-node. `engines` declares `node: >=18` with no upper bound, so
+nothing warns — the failure is a hang, not an error.
+
+The browser tier has no localStorage exposure, so leaving it on the runner
+default costs nothing. The absence is asserted below rather than merely
+commented, because "add setup-node to the other Node job too" is exactly the
+tidy-up someone will make. Unblock condition: a Playwright release that
+installs cleanly under the pinned Node.
+
+Ported from comfyui-image-browser (8e5dc13), which hit the same divergence —
+and, at the time of writing, the same hang.
 """
 
 from __future__ import annotations
@@ -56,6 +78,12 @@ MIN_NODE_MAJOR = 25
 
 # Commands that reach a Node bin rather than running under bun.
 NODE_DRIVEN_COMMANDS = ("bun run test", "bun run test:e2e")
+
+# Of those, the jobs that must pin — and the ones that must NOT (see the
+# module docstring). Every Node-driven job belongs to exactly one list, which
+# is what the reconciliation test below enforces.
+PINNED_JOBS = ("test-js",)
+UNPINNED_JOBS = ("test-e2e",)
 
 
 def _jobs() -> dict:
@@ -104,8 +132,8 @@ def test_the_workflow_actually_contains_node_driven_suites():
     )
 
 
-@pytest.mark.parametrize("job_name", ["test-js", "test-e2e"])
-def test_each_node_driven_job_pins_node_from_the_shared_file(job_name: str):
+@pytest.mark.parametrize("job_name", PINNED_JOBS)
+def test_each_pinned_job_reads_node_from_the_shared_file(job_name: str):
     job = _jobs()[job_name]
     assert _runs_node_suite(job), f"{job_name} no longer runs a Node-driven suite"
     step = _setup_node_step(job)
@@ -124,3 +152,38 @@ def test_each_node_driven_job_pins_node_from_the_shared_file(job_name: str):
         f"{job_name} pins an inline node-version alongside node-version-file; "
         f"setup-node prefers the inline one, which reintroduces the drift."
     )
+
+
+@pytest.mark.parametrize("job_name", UNPINNED_JOBS)
+def test_the_playwright_job_stays_on_the_runner_default(job_name: str):
+    """The deliberate exclusion, asserted so it is a decision and not a gap.
+
+    If this fails because someone added setup-node to test-e2e: re-run
+    `playwright install` under the pinned Node into a clean
+    PLAYWRIGHT_BROWSERS_PATH first. If it now completes, the upstream bug is
+    fixed — move the job from UNPINNED_JOBS to PINNED_JOBS and delete this
+    test's rationale from the module docstring. If it still hangs, the CI job
+    will hang for the full 6-hour timeout, which is why this is a test.
+    """
+    job = _jobs()[job_name]
+    assert _runs_node_suite(job), f"{job_name} no longer runs a Node-driven suite"
+    step = _setup_node_step(job)
+    assert step is None, (
+        f"{job_name} now pins Node. Playwright 1.56.0's `playwright install` "
+        f"hangs after downloading under Node 26 (measured: rc=124 at 300s vs "
+        f"rc=0 at 10s on 24.19.0), and `engines: node >=18` gives no warning. "
+        f"Verify against the current Playwright before making this the pin."
+    )
+
+
+def test_every_node_driven_job_is_classified_exactly_once():
+    """No third state. A Node-driven job that is in neither list is a job
+    nobody decided about — the gap this whole module exists to close."""
+    found = {n for n, j in _jobs().items() if _runs_node_suite(j)}
+    classified = set(PINNED_JOBS) | set(UNPINNED_JOBS)
+    assert found == classified, (
+        f"Node-driven jobs {sorted(found)} do not match the classified set "
+        f"{sorted(classified)}. Add the new job to PINNED_JOBS or, with a "
+        f"measured reason, to UNPINNED_JOBS."
+    )
+    assert not (set(PINNED_JOBS) & set(UNPINNED_JOBS))
