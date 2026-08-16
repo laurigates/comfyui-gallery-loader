@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.30](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.29...comfyui-gallery-loader-v0.1.30) (2026-08-16)
+
+
+### Bug Fixes
+
+* **deps:** adopt comfy-modal-kit 0.14.0 and delete the copies it supersedes ([#115](https://github.com/laurigates/comfyui-gallery-loader/issues/115)) ([b5b20cc](https://github.com/laurigates/comfyui-gallery-loader/commit/b5b20cc94f2f9fc5404df3752d07541cb759dede))
+
+
+### Miscellaneous
+
+* **ci:** guard registry-health against closing on Pending; drop duplicate Renovate runner ([#109](https://github.com/laurigates/comfyui-gallery-loader/issues/109)) ([f819981](https://github.com/laurigates/comfyui-gallery-loader/commit/f8199815dd02f3b720737f2d9a9c1e9354c8792e))
+* **ci:** pin Node for the jsdom suite (not the browser one), and stop tracking a Playwright artifact ([#113](https://github.com/laurigates/comfyui-gallery-loader/issues/113)) ([02d45be](https://github.com/laurigates/comfyui-gallery-loader/commit/02d45be2246d62787041aba15388d360b214d096))
+
 ## [0.1.29](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.28...comfyui-gallery-loader-v0.1.29) (2026-08-16)
 
 
