@@ -91,6 +91,22 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
 
+      # `bun run test` shells out to the `vitest` bin, whose shebang is
+      # `env node` — so the suite runs under the RUNNER'S Node, not under bun,
+      # and without this step that version is whatever the image happens to
+      # ship. Not cosmetic: Node put its built-in `localStorage` accessor on
+      # `globalThis` unflagged in **v25**, and that accessor shadows jsdom's
+      # Storage (vitest copies jsdom's globals across only where absent). So
+      # the runtime decides which Storage the jsdom suite exercises, and an
+      # unpinned runner picks one silently. Measured with setupFiles removed:
+      # 24.19.0 green (jsdom's Storage), 25.0.0 and 26.5.0 red with
+      # `TypeError: Cannot read properties of undefined (reading 'clear')`.
+      # See tests/js/setup-jsdom.js and #75.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
       - name: Install dev dependencies
         run: bun install --frozen-lockfile
 
@@ -111,6 +127,12 @@ jobs:
       - uses: actions/checkout@v6
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
+      # Same reason as test-js: `playwright` is a Node bin too, so an unpinned
+      # runner Node is an unpinned test runtime here as well.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Install Chromium for Playwright
