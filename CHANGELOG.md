@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.29](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.28...comfyui-gallery-loader-v0.1.29) (2026-08-16)
+
+
+### Features
+
+* **picker:** remember and restore the scroll position per folder ([#107](https://github.com/laurigates/comfyui-gallery-loader/issues/107)) ([f2ed146](https://github.com/laurigates/comfyui-gallery-loader/commit/f2ed1464d5b2859a01489c7bbdd949b33d230dd2))
+
 ## [0.1.28](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.27...comfyui-gallery-loader-v0.1.28) (2026-08-12)
 
 
