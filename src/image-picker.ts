@@ -30,12 +30,14 @@ import {
   applyStars,
   type ButtonWidgetHost,
   copyTextToClipboard,
+  createScrollMemory,
   ensureStyleOnce,
   escapeHTML as escHTML,
   fuzzyScore,
   highlightMatches,
   installBackGuard,
   installLazyMedia,
+  installScrollRestore,
   isSafeViewActive,
   isSensitive,
   isValidSort,
@@ -116,6 +118,17 @@ const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".m
 const SORT_STORAGE_KEY = "comfyui-gallery-loader:sort";
 
 const SANDBOXED_TYPES = ["input", "output", "temp"];
+
+// Per-directory scroll offsets. MODULE level, not per modal: that is what makes
+// closing the picker and opening it again — on the same widget or another one —
+// resume where you left off rather than at the top. A location never visited
+// answers 0, which is why a first visit needs no special case.
+//
+// The store and the restore loop both come from the kit, shared with
+// comfyui-image-browser so the two packs cannot drift on any of it. NOT
+// persisted to localStorage, deliberately: an offset measured against a listing
+// that may have changed while the tab was gone is a guess.
+const scrollMemory = createScrollMemory();
 
 // Flat ("all subfolders") view preference.
 type ViewMode = "folder" | "flat";
@@ -1164,6 +1177,15 @@ export async function openImagePicker(
     footerLeftHTML,
     footerRightHTML: '<span class="ip-count"></span>',
     onClose: () => {
+      // FIRST, and through the restorer's mirror: the shell has already
+      // removed the dialog by the time onClose runs, and a detached element
+      // answers scrollTop 0 in every real engine. Reading modal.bodyEl here
+      // would store 0 and silently reopen the picker at the top.
+      rememberScroll();
+      // …and only then drop the restorer's listeners and cancel a re-assert
+      // loop that may still be running against the detached dialog. Nothing
+      // scheduled may outlive the modal.
+      scroller.dispose();
       disposeBackGuard?.();
       disposeBackGuard = null;
       // Nothing scheduled may outlive the modal: the change listener closes
@@ -1178,6 +1200,36 @@ export async function openImagePicker(
       revealSet.clear();
     },
   });
+
+  // ---- Scroll restore --------------------------------------------
+  // `.cmp-body` is the shell's overflow-y:auto region and therefore the one
+  // element that actually scrolls — `.ip-grid` has no overflow clip, the same
+  // fact that decides installLazyMedia's root just below.
+  //
+  // Everything about WHY a remembered offset is not one assignment lives in
+  // comfy-modal-kit/src/scroll-restore.ts: the close path reads a detached
+  // element, `scrollTop = n` clamps against the layout in force at that
+  // instant, iOS momentum keeps decelerating after the finger is up, and a
+  // restore that outlives the user's next gesture swallows it. All four were
+  // measured in comfyui-image-browser's browser suite; this pack now has one
+  // of its own (tests/e2e) rather than a comment explaining why it could not
+  // do this.
+  //
+  // No isTypingTarget override: the kit's default already reads "the focused
+  // element is a text field", which covers the shell's autofocused search
+  // input — the case that matters, since a caret key there must not read as a
+  // scroll gesture and disarm the restore on every keystroke of a filter.
+  const scroller = installScrollRestore(modal.bodyEl);
+
+  /**
+   * Store the current offset under the CURRENT location, before it changes.
+   *
+   * Every navigation calls this first; so does onClose. It reads through the
+   * restorer, never `modal.bodyEl.scrollTop` — see the note in onClose.
+   */
+  function rememberScroll(): void {
+    scrollMemory.remember(locationKey(), scroller.current());
+  }
 
   // ---- Safe View --------------------------------------------------
   //
@@ -1556,7 +1608,10 @@ export async function openImagePicker(
   // ---- Wiring ----------------------------------------------------
   modal.searchEl.addEventListener("input", () => {
     state.query = modal.searchEl.value.toLowerCase().trim();
-    renderGrid();
+    // A new filter reads from the top. Handed in rather than assigned after,
+    // for the same reason as in loadAndRender: renderGrid's restore defends the
+    // offset it was given for a few frames.
+    renderGrid({ scrollTo: 0 });
   });
 
   sortEl.addEventListener("change", () => {
@@ -1564,10 +1619,10 @@ export async function openImagePicker(
     state.sortKey = k as string;
     state.sortDir = d as string;
     saveSort(k as string, d as string);
-    renderGrid();
+    renderGrid({ scrollTo: 0 });
   });
 
-  refreshEl.addEventListener("click", () => loadAndRender());
+  refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
 
   pinToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
@@ -1587,6 +1642,7 @@ export async function openImagePicker(
       return;
     }
     if (item.type === state.type && item.subfolder === state.subfolder) return;
+    rememberScroll();
     state.type = item.type;
     state.subfolder = item.subfolder;
     loadAndRender();
@@ -1605,6 +1661,9 @@ export async function openImagePicker(
 
   viewToggleEl?.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
+    // The folder and flat listings of one directory are different lists, and
+    // locationKey() gives them separate slots — so each keeps its own place.
+    rememberScroll();
     state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
     saveView(state.viewMode);
     // Flat needs a recursive re-fetch, so this is a reload, not a re-render.
@@ -1616,6 +1675,7 @@ export async function openImagePicker(
       const b = (e.target as HTMLElement).closest("[data-type]") as HTMLElement | null;
       if (!b) return;
       if (state.type === b.dataset.type) return;
+      rememberScroll();
       state.type = b.dataset.type as string;
       state.subfolder = "";
       loadAndRender();
@@ -1625,6 +1685,7 @@ export async function openImagePicker(
   crumbsEl.addEventListener("click", (e) => {
     const c = (e.target as HTMLElement).closest("[data-sub], [data-abs]") as HTMLElement | null;
     if (!c) return;
+    rememberScroll();
     if (c.dataset.abs !== undefined) {
       state.absPath = c.dataset.abs || "/";
     } else {
@@ -1709,6 +1770,7 @@ export async function openImagePicker(
       const subEl = target.closest(".ip-subpath") as HTMLElement | null;
       if (subEl?.dataset.sub !== undefined) {
         e.stopPropagation();
+        rememberScroll();
         state.viewMode = "folder";
         saveView("folder");
         if (subEl.dataset.pinType) state.type = subEl.dataset.pinType;
@@ -1958,6 +2020,7 @@ export async function openImagePicker(
   }
 
   function navigateUp(): void {
+    rememberScroll();
     if (state.type === "path") {
       const p = (state.absPath || "/").replace(/\/+$/, "");
       if (p === "" || p === "/") return; // already at root
@@ -1972,6 +2035,7 @@ export async function openImagePicker(
   }
 
   function navigateInto(name: string): void {
+    rememberScroll();
     if (state.type === "path") {
       state.absPath = joinAbs(state.absPath, name);
     } else {
@@ -2118,13 +2182,13 @@ export async function openImagePicker(
       // the rows we already have would show a stale listing — notably when
       // hiding is switched OFF, where the hidden files are simply not in
       // `state.files` to un-blur.
-      void loadAndRender();
+      void loadAndRender({ preserveScroll: true });
       return;
     }
     renderGrid();
   });
 
-  async function loadAndRender(): Promise<void> {
+  async function loadAndRender(opts?: { preserveScroll?: boolean }): Promise<void> {
     lastSafeHideKeywords = safeHideKeywords();
     // Reveals are dropped on a tab/folder change but survive a plain refresh
     // and a delete-triggered re-render, which is why this compares the location
@@ -2173,9 +2237,19 @@ export async function openImagePicker(
     }
     modal.setBusy(false);
     // Re-run now that the pin cache has landed — the call at the top of this
-    // function painted the PREVIOUS list.
+    // function painted the PREVIOUS list. Before the grid, because the chips
+    // render into the toolbar INSIDE the scroller, so painting them afterwards
+    // would move the content under an offset just restored.
     renderPins();
-    renderGrid();
+    // A navigation lands at the destination's remembered offset (0 for a folder
+    // never visited); a refresh-in-place keeps whatever renderGrid captures.
+    //
+    // Handed INTO renderGrid rather than assigned after it: renderGrid would
+    // otherwise capture and re-assert the offset belonging to the folder we
+    // just LEFT, and a follow-up write would race that loop for ~200 ms.
+    renderGrid({
+      scrollTo: opts?.preserveScroll ? undefined : scrollMemory.get(locationKey()),
+    });
     // Cleared only once the grid has actually painted — that is what makes a
     // still-set flag at open time mean "the last flat load never finished".
     markFlatPending(false);
@@ -2208,8 +2282,13 @@ export async function openImagePicker(
     return { kind: "icon", text: "📄" };
   }
 
-  function renderGrid(): void {
+  function renderGrid(opts?: { scrollTo?: number }): void {
     const q = state.query;
+    // Wiping innerHTML resets the scroller, so the offset is captured here and
+    // put back at the end. `scrollTo` overrides the capture for a caller that
+    // already knows where the view belongs — a navigation's remembered offset,
+    // or 0 for a new search or sort.
+    const targetScrollTop = opts?.scrollTo ?? scroller.current();
     gridEl.innerHTML = "";
     // ONCE per render pass, not once per card: the kit's read is cheap but it
     // is still a walk of the setting store, and a per-card read would also let
@@ -2445,29 +2524,51 @@ export async function openImagePicker(
     }
 
     setCount(visible, state.files.length);
-    installLazyThumbs(gridEl);
 
-    // On first paint, scroll the currently loaded image into the middle of the
-    // viewport so the user lands where they left off — neighbours visible above
-    // and below make picking the next image quick. Only once per modal open.
-    // Not in flat view: the target may be thousands of cards down a grid whose
-    // thumbnails are all still data-src placeholders, so the single bare write
-    // below lands against a shorter-than-final layout and gets CLAMPED at the
-    // instant of assignment — leaving the view somewhere arbitrary once the
-    // real heights arrive. Doing better needs a re-assert loop, which needs a
-    // browser test suite this pack does not have; not scrolling is honest.
-    if (!state.didInitialScroll && !isFlat()) {
+    // On the FIRST paint of a modal, centring the currently loaded image beats
+    // any remembered offset: the user opened the picker to change this widget's
+    // image, and seeing its neighbours above and below is the whole point. Only
+    // once per open, and only where a remembered offset is not already the
+    // better answer — coming BACK to a folder you scrolled resumes there.
+    let target = targetScrollTop;
+    if (!state.didInitialScroll) {
       state.didInitialScroll = true;
-      scrollToSelected();
+      if (target <= 0) target = selectedCentreOffset() ?? target;
     }
+
+    // Restore BEFORE installing the observer, so its first pass is computed
+    // against the final viewport. Observing first queues the top-of-list band,
+    // which in flat view is thousands of wrong /thumb requests.
+    //
+    // This ordering is LATENT rather than load-bearing today, and the mutation
+    // table says so by not carrying it: IntersectionObserver delivers its
+    // callbacks asynchronously, after the task holding the synchronous first
+    // write, so swapping these two lines was caught on one browser-suite run
+    // and missed on the next. It matters for the frames the re-assert loop
+    // corrects across — which is exactly when it would be hardest to debug.
+    //
+    // This is also what makes the centring above safe in FLAT view, where it
+    // used to be skipped: the target can be thousands of cards down a grid
+    // whose thumbnails are still placeholders, so a single bare write gets
+    // CLAMPED against a shorter-than-final layout. The kit's restore re-asserts
+    // across the next few frames instead, against the bound in force at each.
+    // (Card height does not actually depend on the thumbnail — `.ip-thumb` is
+    // `aspect-ratio: 1/1` inside a fixed grid track — so the clamp only bites
+    // while cards are still being appended. Measured in tests/e2e rather than
+    // assumed: `flat-view centring lands on the selected card`.)
+    scroller.restore(target);
+    installLazyThumbs(gridEl);
   }
 
-  function scrollToSelected(): void {
+  /**
+   * Where the scroller must sit to put the selected card in the middle of the
+   * viewport, or null when nothing is selected in this listing.
+   */
+  function selectedCentreOffset(): number | null {
     const card = gridEl.querySelector(".ip-card.is-selected") as HTMLElement | null;
-    if (!card) return;
+    if (!card) return null;
     const body = modal.bodyEl;
-    const target = card.offsetTop - Math.max(0, (body.clientHeight - card.offsetHeight) / 2);
-    body.scrollTop = Math.max(0, target);
+    return Math.max(0, card.offsetTop - Math.max(0, (body.clientHeight - card.offsetHeight) / 2));
   }
 
   function shortenPath(p: string): string {

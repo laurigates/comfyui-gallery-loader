@@ -38,8 +38,18 @@ test-js:
 # Run both Python and JavaScript tests
 test: test-py test-js
 
+# Run the browser suite (Playwright/Chromium, tests/e2e/).
+#
+# Builds first: the fixture serves web/dist/index.js at its real extension URL,
+# so a stale bundle would test the previous commit. This is the only tier that
+# can see scroll clamping, the detached-element read, or the restore loop —
+# jsdom performs no layout.
+test-e2e:
+    bun run build
+    bun run test:e2e
+
 # All quality gates (matches CI)
-check: lint test
+check: lint test test-e2e
 
 # Reachability probe — only meaningful when ComfyUI is running locally
 probe:

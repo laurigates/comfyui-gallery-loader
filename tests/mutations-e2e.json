@@ -1,0 +1,52 @@
+{
+  "command": [
+    "bash",
+    "-lc",
+    "bun run build >/dev/null && bun run test:e2e"
+  ],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "navigateInto stops remembering (descending forgets where the parent was)",
+      "file": "src/image-picker.ts",
+      "before": "  function navigateInto(name: string): void {\n    rememberScroll();",
+      "after": "  function navigateInto(name: string): void {"
+    },
+    {
+      "label": "navigateUp stops remembering (the folder you left forgets its place)",
+      "file": "src/image-picker.ts",
+      "before": "  function navigateUp(): void {\n    rememberScroll();",
+      "after": "  function navigateUp(): void {"
+    },
+    {
+      "label": "onClose stops remembering (reopening lands at the top)",
+      "file": "src/image-picker.ts",
+      "before": "      rememberScroll();\n      // \u2026and only then drop the restorer's listeners",
+      "after": "      // \u2026and only then drop the restorer's listeners"
+    },
+    {
+      "label": "renderGrid ignores the destination handed in (restores the folder just LEFT)",
+      "file": "src/image-picker.ts",
+      "before": "    const targetScrollTop = opts?.scrollTo ?? scroller.current();",
+      "after": "    const targetScrollTop = scroller.current();"
+    },
+    {
+      "label": "a new search/sort keeps the old offset instead of reading from the top",
+      "file": "src/image-picker.ts",
+      "before": "    renderGrid({ scrollTo: 0 });\n  });\n\n  sortEl.addEventListener",
+      "after": "    renderGrid();\n  });\n\n  sortEl.addEventListener"
+    },
+    {
+      "label": "first-open centring beats a remembered offset (a return visit re-centres)",
+      "file": "src/image-picker.ts",
+      "before": "      if (target <= 0) target = selectedCentreOffset() ?? target;",
+      "after": "      target = selectedCentreOffset() ?? target;"
+    },
+    {
+      "label": "CONTROL \u2014 comment text only; MUST be MISSED, or this harness is lying",
+      "file": "src/image-picker.ts",
+      "before": "// Per-directory scroll offsets. MODULE level, not per modal",
+      "after": "// Per-directory scroll offsets. Module scope, incidentally"
+    }
+  ]
+}
