@@ -62,8 +62,8 @@ function stubObserver() {
 }
 
 /** Minimal LiteGraph-ish node carrying the `image` widget the grid takes over. */
-function fakeNode() {
-  const widget = { name: "image", value: "a.png", type: "STRING", options: {} };
+function fakeNode(initialValue = "a.png") {
+  const widget = { name: "image", value: initialValue, type: "STRING", options: {} };
   return {
     widgets: [widget],
     size: [400, 400],
@@ -78,8 +78,8 @@ function fakeNode() {
   };
 }
 
-async function mountGrid() {
-  const node = fakeNode();
+async function mountGrid(initialValue) {
+  const node = fakeNode(initialValue);
   attachGallery(node);
   await vi.waitFor(() => {
     if (!document.querySelector(".gl-card")) throw new Error("grid not rendered");
@@ -193,5 +193,95 @@ describe("gallery node grid search and sort", () => {
     document.body.innerHTML = "";
     await mountGrid();
     expect(document.querySelector(".gl-sort").value).toBe("pixels:asc");
+  });
+});
+
+describe("node grid commit contract", () => {
+  // The inline grid and the modal picker commit DIFFERENT strings for the same
+  // input-type file, and that is deliberate — see the long note above
+  // `buildAnnotated` in src/gallery_loader.ts. Only the picker half was pinned
+  // (tests/js/image-picker.test.js › "commits bare-relative on input"); this
+  // block pins the other half so neither side can be "unified" into the other
+  // without a red test naming the consumer it would break.
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  async function clickFile(name) {
+    const card = [...document.querySelectorAll(".gl-card.is-file")].find(
+      (c) => c.dataset.name === name,
+    );
+    if (!card) throw new Error(`no file card for ${name}`);
+    // Dispatched ON the card: the handler is delegated from `.gl-grid`, an
+    // ancestor, so a real tap lands here and bubbles up. Dispatching on the
+    // grid itself would find no `.closest(".gl-card")` and assert nothing.
+    card.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    return card;
+  }
+
+  it("annotates input, unlike the modal picker's bare-relative form", async () => {
+    // GalleryLoadImage's `image` is a STRING widget with no option list, so
+    // there is nothing for a bare value to match and the root is stated
+    // outright. `_resolve_input_string` accepts it via get_annotated_filepath.
+    stubObserver();
+    stubFetch();
+    const node = await mountGrid();
+    await clickFile("zzz.png");
+    expect(node._widget.value).toBe("zzz.png [input]");
+  });
+
+  it("annotates output the same way, so the input case is not a hard-wired string", async () => {
+    // The paired positive for the assertion above: an implementation that
+    // always emitted "[input]" would pass that test and fail this one, and one
+    // that never annotated would fail both.
+    stubObserver();
+    stubFetch();
+    const node = await mountGrid();
+    document.querySelector('.gl-chip[data-type="output"]').click();
+    await vi.waitFor(() => {
+      if (!document.querySelector(".gl-chip.is-active[data-type='output']")) {
+        throw new Error("output chip not active");
+      }
+      if (!document.querySelector(".gl-card.is-file")) throw new Error("no grid");
+    });
+    await clickFile("zzz.png");
+    expect(node._widget.value).toBe("zzz.png [output]");
+  });
+
+  it("nests the subfolder INSIDE the annotation, not after it", async () => {
+    // "sub/zzz.png [input]", never "zzz.png [input]/sub" or "sub [input]/zzz.png".
+    // folder_paths.annotated_filepath strips a fixed 9-char "[output]"-plus-space
+    // suffix, so the marker has to be last.
+    stubObserver();
+    stubFetch();
+    const node = await mountGrid("sub/a.png [input]");
+    await clickFile("zzz.png");
+    expect(node._widget.value).toBe("sub/zzz.png [input]");
+  });
+
+  it("reads the picker's bare-relative form back as input and re-emits it annotated", async () => {
+    // The bridge that makes the divergence safe: parseAnnotated's bare branch
+    // classifies an un-annotated value as input, so a widget seeded with what
+    // the modal picker writes lands on the input root with its subfolder
+    // intact rather than on whatever tab happens to be first.
+    stubObserver();
+    stubFetch();
+    const node = await mountGrid("sub/a.png");
+    expect(document.querySelector(".gl-chip.is-active").dataset.type).toBe("input");
+    await clickFile("zzz.png");
+    expect(node._widget.value).toBe("sub/zzz.png [input]");
+  });
+
+  it("commits a RAW absolute path on the path tab — no annotation at all", async () => {
+    // type=path has no sandbox root to name, and VHS path widgets take the
+    // raw string. Annotating here would break every path loader.
+    stubObserver();
+    stubFetch();
+    const node = await mountGrid("/data/renders/a.png");
+    expect(document.querySelector(".gl-chip.is-active").dataset.type).toBe("path");
+    await clickFile("zzz.png");
+    expect(node._widget.value).toBe("/data/renders/zzz.png");
   });
 });

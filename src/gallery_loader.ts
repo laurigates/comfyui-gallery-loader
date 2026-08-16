@@ -216,6 +216,28 @@ function parseAnnotated(value: unknown): ParsedValue {
   };
 }
 
+// DELIBERATELY DIFFERENT from image-picker.ts's `buildLoadImageValue`, which
+// commits a BARE relative path for `input` and annotates only output/temp.
+// The two surfaces write to different widgets on different nodes, and each
+// form is the right one for its consumer:
+//
+//   this file  → GalleryLoadImage's own STRING widget → _resolve_input_string
+//                in gallery_loader.py. There is no option list to match, so
+//                the annotation is free and makes the root explicit rather
+//                than inferred (parseAnnotated's bare-relative branch is the
+//                only thing that would otherwise say "input").
+//   the picker → core LoadImage's native COMBO, whose options are
+//                `sorted(files)` off the input dir (ComfyUI nodes.py
+//                LoadImage.INPUT_TYPES) — bare filenames, no annotation. A
+//                bare value therefore MATCHES an existing option and keeps
+//                pre-existing workflows byte-identical on save/reload; output
+//                and temp have no option to match, which is why the picker
+//                has to push those onto options.values.
+//
+// Both forms resolve identically through folder_paths.get_annotated_filepath,
+// so this is a presentation split, not two resolution rules. Pinned on both
+// sides — see tests/js/gallery-loader.test.js ("node grid commit contract")
+// and tests/js/image-picker.test.js ("commits bare-relative on input").
 function buildAnnotated(type: string, subfolder: string, name: string): string {
   if (type === "path") {
     if (subfolder) return `${subfolder.replace(/\/$/, "")}/${name}`;
