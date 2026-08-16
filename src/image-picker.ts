@@ -852,7 +852,15 @@ function buildLoadImageValue(type: string, subfolder: string, name: string): str
   const sub = (subfolder || "").replace(/^\/+|\/+$/g, "");
   const rel = sub ? `${sub}/${name}` : name;
   // Preserve the existing bare-relative form for input so existing
-  // workflows don't churn on save/reload.
+  // workflows don't churn on save/reload: this widget is core LoadImage's
+  // native COMBO, whose options are `sorted(files)` off the input dir with no
+  // annotation, so a bare value matches an option the widget already has.
+  //
+  // The inline node grid does the OPPOSITE and annotates input too — see the
+  // long note above `buildAnnotated` in gallery_loader.ts for why that is
+  // right there (a STRING widget with no option list) and wrong here. Both
+  // forms resolve the same through get_annotated_filepath; the divergence is
+  // about which widget is being written, not about resolution.
   return type === "input" ? rel : `${rel} [${type}]`;
 }
 

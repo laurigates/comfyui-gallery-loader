@@ -183,6 +183,22 @@ When committing from the modal:
 Don't switch the Input source to annotated form — existing workflows
 serialize bare relative paths and would churn on save/reload.
 
+**The inline node grid deliberately does the opposite for Input.**
+`buildAnnotated` in `src/gallery_loader.ts` emits `subdir/foo.png [input]`
+where `buildLoadImageValue` in `src/image-picker.ts` emits `subdir/foo.png`.
+That is not drift — the two write to different widgets:
+
+| Surface | Widget | Input value | Why |
+|---|---|---|---|
+| Modal picker | core `LoadImage`'s native **combo** | `subdir/foo.png` | Options are `sorted(files)` off the input dir (core `nodes.py`), so bare matches an option the widget already has and pre-existing workflows stay byte-identical. |
+| Inline node grid | `GalleryLoadImage`'s own **STRING** widget | `subdir/foo.png [input]` | No option list to match. The annotation makes the root explicit instead of leaving it to `parseAnnotated`'s bare-relative fallback. |
+
+Both resolve identically through `folder_paths.get_annotated_filepath`
+(`_resolve_input_string` accepts annotated, absolute, and bare). Pinned on
+both sides: `tests/js/gallery-loader.test.js` ("node grid commit contract")
+and `tests/js/image-picker.test.js` ("commits bare-relative on input"). Don't
+"unify" them without changing the consumer each one writes to.
+
 ### The lazy-thumb observer root differs between the two surfaces
 
 `installLazyThumbs`'s `IntersectionObserver` must be rooted on **whatever

@@ -269,6 +269,36 @@
       "file": "src/image-picker.ts",
       "before": "      f.tags = await postTag(TAG_URL, addressOf(f), keyword, next);",
       "after": "      await postTag(TAG_URL, addressOf(f), keyword, next);\n      f.tags = next ? [...(f.tags ?? []), keyword] : [];"
+    },
+    {
+      "label": "NODE GRID \u2014 buildAnnotated adopts the picker's bare-for-input rule, so the two surfaces silently converge",
+      "file": "src/gallery_loader.ts",
+      "before": "  const sub = (subfolder || \"\").replace(/^\\/+|\\/+$/g, \"\");\n  const rel = sub ? `${sub}/${name}` : name;\n  return `${rel} [${type}]`;",
+      "after": "  const sub = (subfolder || \"\").replace(/^\\/+|\\/+$/g, \"\");\n  const rel = sub ? `${sub}/${name}` : name;\n  return type === \"input\" ? rel : `${rel} [${type}]`;"
+    },
+    {
+      "label": "NODE GRID \u2014 buildAnnotated hard-wires [input], so an output/temp pick resolves against the wrong root",
+      "file": "src/gallery_loader.ts",
+      "before": "  return `${rel} [${type}]`;",
+      "after": "  return `${rel} [input]`;"
+    },
+    {
+      "label": "NODE GRID \u2014 parseAnnotated reads a bare-relative value as output, so the picker's own value opens the wrong tab",
+      "file": "src/gallery_loader.ts",
+      "before": "  // Bare relative \u2014 assume input.\n  const idx = v.lastIndexOf(\"/\");\n  return {\n    type: \"input\",",
+      "after": "  // Bare relative \u2014 assume input.\n  const idx = v.lastIndexOf(\"/\");\n  return {\n    type: \"output\","
+    },
+    {
+      "label": "NODE GRID \u2014 buildAnnotated loses the path-mode early return, annotating raw absolute paths",
+      "file": "src/gallery_loader.ts",
+      "before": "  if (type === \"path\") {\n    if (subfolder) return `${subfolder.replace(/\\/$/, \"\")}/${name}`;\n    return name;\n  }\n",
+      "after": ""
+    },
+    {
+      "label": "CONTROL \u2014 commit-contract comment text only; MUST be MISSED, or the node-grid assertions are over-triggering",
+      "file": "src/gallery_loader.ts",
+      "before": "// so this is a presentation split, not two resolution rules. Pinned on both",
+      "after": "// so this is a presentation split rather than two resolution rules. Pinned on both"
     }
   ]
 }
