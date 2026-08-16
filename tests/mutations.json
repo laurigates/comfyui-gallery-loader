@@ -2,7 +2,7 @@
   "command": [
     "bash",
     "-c",
-    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_safe_view.py && bun run test"
+    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_safe_view.py tests/test_endpoints.py && bun run test"
   ],
   "reporter": "exit-code",
   "mutations": [
@@ -71,6 +71,90 @@
       "file": "xmp_meta.py",
       "before": "# does it correctly. This is also what Adobe's own XMP SDK does on update.",
       "after": "# does it correctly, which is also how Adobe's own XMP SDK handles an update."
+    },
+    {
+      "label": "ENDPOINTS \u2014 /thumb loses the If-None-Match short-circuit, so every revalidation re-encodes and re-sends",
+      "file": "gallery_loader.py",
+      "before": "    if request.headers.get(\"If-None-Match\") == etag:\n        return web.Response(status=304, headers=cache_headers)",
+      "after": "    if False:\n        return web.Response(status=304, headers=cache_headers)"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /thumb answers 304 unconditionally (the one-sided-control trap: a 304-only assertion passes here)",
+      "file": "gallery_loader.py",
+      "before": "    if request.headers.get(\"If-None-Match\") == etag:",
+      "after": "    if True:"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /thumb's 304 carries no cache headers, so the client has nothing to revalidate with next time",
+      "file": "gallery_loader.py",
+      "before": "        return web.Response(status=304, headers=cache_headers)",
+      "after": "        return web.Response(status=304)"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /thumb stops sending Cache-Control, so a warm grid re-fetches every thumbnail",
+      "file": "gallery_loader.py",
+      "before": "        \"Cache-Control\": \"private, max-age=604800, immutable\",",
+      "after": "        \"Cache-Control\": \"no-store\","
+    },
+    {
+      "label": "ENDPOINTS \u2014 /thumb's image gate is removed, so any readable absolute path is handed to the encoder",
+      "file": "gallery_loader.py",
+      "before": "    if not os.path.isfile(path) or not _is_image_file(path):",
+      "after": "    if not os.path.isfile(path):"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /thumb reports a resolver error as 404, hiding a rejected address behind 'not found'",
+      "file": "gallery_loader.py",
+      "before": "    path, err = _resolve_thumb_target(request.rel_url.query)\n    if err:\n        return web.Response(status=400)",
+      "after": "    path, err = _resolve_thumb_target(request.rel_url.query)\n    if err:\n        return web.Response(status=404)"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /thumb serves an empty 200 instead of a 500 when the encode yields nothing",
+      "file": "gallery_loader.py",
+      "before": "    if data is None:\n        return web.Response(status=500)",
+      "after": "    if data is None:\n        data = b\"\""
+    },
+    {
+      "label": "ENDPOINTS \u2014 /file's extension whitelist is removed (the arbitrary-path read loses its only gate)",
+      "file": "gallery_loader.py",
+      "before": "    if ext not in STREAMABLE_EXTS:\n        return web.Response(status=403)",
+      "after": "    if False:\n        return web.Response(status=403)"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /file's empty-path guard is removed, so a bare request resolves to the process cwd",
+      "file": "gallery_loader.py",
+      "before": "    if not abs_path:\n        return web.Response(status=400)",
+      "after": "    if False:\n        return web.Response(status=400)"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /file probes exists() rather than isfile(), so a directory named *.png is streamed",
+      "file": "gallery_loader.py",
+      "before": "    if not os.path.isfile(path):\n        return web.Response(status=404)\n    ext = os.path.splitext(path)[1].lower()",
+      "after": "    if not os.path.exists(path):\n        return web.Response(status=404)\n    ext = os.path.splitext(path)[1].lower()"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /file hardcodes the content type, so every video is served as octet-stream",
+      "file": "gallery_loader.py",
+      "before": "            \"Content-Type\": mime or \"application/octet-stream\",",
+      "after": "            \"Content-Type\": \"application/octet-stream\","
+    },
+    {
+      "label": "ENDPOINTS \u2014 /file skips abspath normalisation, so the served path is not the one that was probed",
+      "file": "gallery_loader.py",
+      "before": "    path = os.path.abspath(os.path.expanduser(abs_path))",
+      "after": "    path = os.path.expanduser(abs_path)"
+    },
+    {
+      "label": "ENDPOINTS \u2014 /base stops reporting user_dir, which is where the shared pin store and thumb cache live",
+      "file": "gallery_loader.py",
+      "before": "            \"user_dir\": folder_paths.get_user_directory(),\n",
+      "after": ""
+    },
+    {
+      "label": "CONTROL \u2014 endpoint comment text only; MUST be MISSED, or the endpoint assertions are over-triggering",
+      "file": "gallery_loader.py",
+      "before": "    Two addressing modes, mirroring /list:",
+      "after": "    Two addressing modes, which mirror /list:"
     },
     {
       "label": "SAFE VIEW backend \u2014 the matcher compares SUBSTRINGS instead of whole tokens",
