@@ -17,6 +17,7 @@ The list endpoint ``/gallery_loader/list`` powers the picker UI.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import mimetypes
@@ -421,18 +422,64 @@ def _validate_tag_request(body: Any) -> tuple[dict[str, Any] | None, str]:
     return parsed, ""
 
 
+def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[str | None, str]:
+    """Resolve a MUTATION target to an absolute path inside a sandboxed root.
+
+    Reads deliberately reach further than writes. ``/file``, ``/thumb`` and
+    ``/metadata`` accept ``type=path`` and serve any absolute path behind an
+    extension gate, because the VHS path browser has to preview files that are
+    not under input/output/temp at all. A write has no such need and must not
+    inherit that reach: ``xmp_meta`` rewrites a PNG/JPEG in place, and for
+    every other container it CREATES ``<path>.xmp``. Pointing either at an
+    arbitrary path is an arbitrary file write.
+
+    So the first statement is the type gate, and the remaining four are
+    stacked behind it: bare filename, media extension, lexical containment,
+    and a realpath re-check.
+
+    The last one is not redundant. ``os.path.abspath`` is purely textual — it
+    collapses ``..`` and joins, and resolves no symlinks — so a link inside
+    the root (``output/link -> /``) satisfies the lexical check while landing
+    the target outside. ``os.path.realpath`` is anchored on the ROOT rather
+    than on the resolved base, because anchoring on the base is exactly what a
+    traversed link would move.
+
+    Consequence worth knowing: a genuinely symlinked subfolder
+    (``output/renders -> /mnt/nas/renders``) can be listed and previewed but
+    not rated or tagged. Reads are unaffected — ``_resolve_listing_base``
+    keeps no realpath gate, deliberately.
+    """
+    if type_name not in SANDBOXED_TYPES:
+        return None, "writes are only allowed in input/output/temp"
+    if not _is_bare_name(name):
+        return None, "invalid name"
+    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):
+        return None, "unsupported file type"
+    base, err = _resolve_listing_base(type_name, subfolder, "")
+    if err:
+        return None, err
+    assert base is not None
+    target = os.path.abspath(os.path.join(base, name))
+    if os.path.commonpath([target, base]) != base:
+        return None, "name escapes root"
+    root = os.path.realpath(str(folder_paths.get_directory_by_type(type_name)))
+    if os.path.commonpath([os.path.realpath(target), root]) != root:
+        return None, "name escapes root"
+    return target, ""
+
+
 def _resolve_write_target(parsed: dict[str, Any]) -> tuple[str | None, str, int]:
     """Absolute path for a validated metadata-write address, or (None, error,
-    status). Shared by /rating and /tag."""
-    base, berr = _resolve_listing_base(parsed["type"], parsed["subfolder"], parsed["path"])
-    if berr:
-        return None, berr, 400
-    assert base is not None
-    target = os.path.abspath(os.path.join(base, parsed["name"]))
-    # Belt-and-braces: the name is already separator-free, but re-assert
-    # containment so the target can't escape the sandboxed root.
-    if parsed["type"] in SANDBOXED_TYPES and os.path.commonpath([target, base]) != base:
-        return None, "name escapes root", 400
+    status). Shared by /rating and /tag.
+
+    ``parsed["path"]`` is carried by the request grammar and deliberately
+    ignored here — it is the ``type=path`` address, which the resolver above
+    refuses outright.
+    """
+    target, err = _resolve_sandboxed_file(parsed["type"], parsed["subfolder"], parsed["name"])
+    if err:
+        return None, err, 400
+    assert target is not None
     if not os.path.isfile(target):
         return None, "file not found", 404
     return target, "", 200
@@ -924,7 +971,61 @@ async def gallery_metadata(request: web.Request) -> web.Response:
     )
 
 
-@PromptServer.instance.routes.post("/gallery_loader/rating")
+# ---------------------------------------------------------------------------
+# Mutating POST routes
+# ---------------------------------------------------------------------------
+#
+# aiohttp never inspects Content-Type on the way in. Verified against the
+# installed aiohttp 3.14.3: BaseRequest.json() calls text(), which calls
+# read() and decodes with .charset — the header is consulted for the encoding
+# and for nothing else. A body is parsed as JSON whatever it was labelled.
+#
+# That matters because a cross-origin form POST with enctype="text/plain" is a
+# CORS-SIMPLE request: the browser sends it with no preflight, and although the
+# attacker cannot read the response, the write has already happened. Requiring
+# application/json makes every cross-origin POST here non-simple, so the
+# browser must preflight it first, and the preflight only succeeds where the
+# operator has deliberately enabled CORS.
+#
+# Deliberately NOT re-implemented here: the Origin/Host compare. ComfyUI core
+# already applies create_origin_only_middleware() to every route in the app
+# (server.py, and it is skipped precisely when --enable-cors-header opts out of
+# it), and a second copy would need a URL parser from the standard library
+# whose module name is itself one of the registry scanner's network tripwires
+# — see tests/test_publish_hygiene.py. Adding a scanner finding to the file
+# under appeal to duplicate a check core already performs is a bad trade.
+#
+# The guard is applied by the decorator that REGISTERS the route rather than by
+# hand inside each handler, so a new mutating route cannot be added without it.
+# tests/test_write_containment.py enumerates the registry this fills and reads
+# the module's own decorators back to prove nothing bypassed it.
+
+JSON_MEDIA_TYPE = "application/json"
+
+MUTATING_POST_ROUTES: dict[str, Any] = {}
+
+
+def _mutating_post(path: str):
+    """Register a mutating POST handler behind the JSON Content-Type guard."""
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def guarded(request: Any) -> web.Response:
+            media_type = (request.headers.get("Content-Type") or "").split(";", 1)[0]
+            if media_type.strip().lower() != JSON_MEDIA_TYPE:
+                return web.json_response(
+                    {"ok": False, "error": "Content-Type must be application/json"},
+                    status=415,
+                )
+            return await fn(request)
+
+        MUTATING_POST_ROUTES[path] = guarded
+        return PromptServer.instance.routes.post(path)(guarded)
+
+    return deco
+
+
+@_mutating_post("/gallery_loader/rating")
 async def gallery_set_rating(request: web.Request) -> web.Response:
     """Persist a 0..5 star rating into a file's XMP (or a sidecar).
 
@@ -952,7 +1053,7 @@ async def gallery_set_rating(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "rating": parsed["rating"], "backend": backend})
 
 
-@PromptServer.instance.routes.post("/gallery_loader/tag")
+@_mutating_post("/gallery_loader/tag")
 async def gallery_set_tag(request: web.Request) -> web.Response:
     """Add or remove ONE ``dc:subject`` keyword on a file's XMP (or sidecar).
 
@@ -1102,7 +1203,7 @@ async def gallery_pins_get(request: web.Request) -> web.Response:
     return _pins_response(pins_store.load_pins(_pins_file()))
 
 
-@PromptServer.instance.routes.post("/gallery_loader/pins")
+@_mutating_post("/gallery_loader/pins")
 async def gallery_pins_post(request: web.Request) -> web.Response:
     """Apply ONE delta: ``{op: "add"|"remove"|"prune", item?}``.
 

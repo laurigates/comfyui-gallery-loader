@@ -1994,6 +1994,7 @@ function attachGallery(node) {
     grid.innerHTML = "";
     const svCfg = readSafeViewConfig();
     const safeKeyword = sensitiveKeyword(svCfg);
+    const writable = SANDBOXED_TYPES.includes(state.type);
     const svPath = safeViewPath();
     renderSafeViewToggle();
     const inSub = state.type === "path" ? state.absDir && state.absDir !== "/" : !!state.subfolder;
@@ -2046,12 +2047,12 @@ function attachGallery(node) {
 ${dims}
 ${stamp}` : `${f.name}
 ${stamp}`;
-      const markBtn = safeKeyword ? markSensitiveHTML("gl", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
+      const markBtn = safeKeyword && writable ? markSensitiveHTML("gl", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
       c.innerHTML = `
                 <div class="gl-thumb"><img loading="lazy" decoding="async" data-src="${url}" alt="">${markBtn}</div>
                 <div class="gl-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="gl-dims">${dims}</div>` : ""}
-                ${starsHTML("gl", ratingOf(f))}
+                ${writable ? starsHTML("gl", ratingOf(f)) : ""}
             `;
       if (isSensitive({ name: f.name, path: svPath, tags: f.tags }, svCfg) && !revealSet.has(state.type, state.subfolder, f.name)) {
         applySafeView(c, svCfg, () => {
@@ -3524,11 +3525,12 @@ ${dims}
 ${when}` : `${f.name}
 ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ip-thumb-icon">${t.text}</div>`;
-      const stars = mode === "directory" || missing ? "" : starsHTML("ip", ratingOf(f));
+      const writable = SANDBOXED_TYPES.includes(fileType(f));
+      const stars = mode === "directory" || missing || !writable ? "" : starsHTML("ip", ratingOf(f));
       const pinned = isFilePinned(f);
       const pinBtn = mode !== "directory" && SANDBOXED_TYPES.includes(fileType(f)) ? `<button type="button" class="ip-pin-file${pinned ? " is-pinned" : ""}" aria-pressed="${pinned}" title="${pinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
       const infoBtn = mode !== "directory" && !missing && IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>` : "";
-      const markBtn = mode !== "directory" && !missing && safeKeyword ? markSensitiveHTML("ip", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
+      const markBtn = mode !== "directory" && !missing && writable && safeKeyword ? markSensitiveHTML("ip", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
       const subLabel = pinnedView ? (() => {
         const ft = fileType(f);
         const sub = fileSub(f);

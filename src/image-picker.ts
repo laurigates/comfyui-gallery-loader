@@ -2343,10 +2343,17 @@ export async function openImagePicker(
           : t.kind === "video"
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
             : `<div class="ip-thumb-icon">${t.text}</div>`;
-      // No stars on a missing pin: the rating write would address a file that
-      // isn't there, and the optimistic repaint would make the failure look
-      // like it had worked until the response came back.
-      const stars = mode === "directory" || missing ? "" : starsHTML("ip", ratingOf(f));
+      // Whether a metadata WRITE can reach this card's file. /rating and /tag
+      // are contained to input/output/temp — a `type: "path"` write is refused
+      // at the resolver's first statement — so in path mode the stars and 🙈
+      // would be controls whose every press is a 400. Reads are unaffected:
+      // the thumbnail, the preview and ⓘ all still work there.
+      const writable = SANDBOXED_TYPES.includes(fileType(f));
+      // No stars on a missing pin either: the rating write would address a
+      // file that isn't there, and the optimistic repaint would make the
+      // failure look like it had worked until the response came back.
+      const stars =
+        mode === "directory" || missing || !writable ? "" : starsHTML("ip", ratingOf(f));
       // 📌 pins the FILE. Sandboxed roots only — a path picker has no stable
       // type to pin against and the store rejects `type: "path"` — and never in
       // directory mode, where file cards are inert. Reads fileType(f) so a card
@@ -2370,7 +2377,7 @@ export async function openImagePicker(
       // file that isn't there — and never in directory mode, where file cards
       // are inert.
       const markBtn =
-        mode !== "directory" && !missing && safeKeyword
+        mode !== "directory" && !missing && writable && safeKeyword
           ? markSensitiveHTML("ip", safeKeyword, hasSensitiveTag(f, safeKeyword))
           : "";
       // Flat view: show the file's folder above the thumbnail. It's a button —
