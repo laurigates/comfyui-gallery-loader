@@ -375,11 +375,18 @@ def _validate_media_address(body: Any) -> tuple[dict[str, Any] | None, str]:
     type_name = body.get("type", "input")
     if not isinstance(type_name, str):
         return None, "invalid type"
+    # `subfolder` is joined onto the root by the resolver, and os.path.join
+    # raises TypeError on a non-str rather than returning an error — so an
+    # untyped `{"subfolder": 123}` leaves the handler as a 500. Type it here,
+    # beside `name` and `type`, so every JSON-body caller is covered at once.
+    subfolder = body.get("subfolder") or ""
+    if not isinstance(subfolder, str):
+        return None, "invalid subfolder"
     if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):
         return None, "unsupported file type"
     return {
         "type": type_name,
-        "subfolder": body.get("subfolder") or "",
+        "subfolder": subfolder,
         "path": body.get("path") or "",
         "name": name,
     }, ""
@@ -462,8 +469,22 @@ def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[
     target = os.path.abspath(os.path.join(base, name))
     if os.path.commonpath([target, base]) != base:
         return None, "name escapes root"
-    root = os.path.realpath(str(folder_paths.get_directory_by_type(type_name)))
-    if os.path.commonpath([os.path.realpath(target), root]) != root:
+    try:
+        root = os.path.realpath(str(folder_paths.get_directory_by_type(type_name)))
+        resolved = os.path.realpath(target)
+    except ValueError:
+        # An embedded NUL. Every gate above this one is a pure STRING
+        # operation — basename, splitext, abspath, commonpath all carry a
+        # ``\0`` through without complaint — and realpath is the first call
+        # here that touches the filesystem, so it is the first to reject it,
+        # by RAISING rather than returning. os.path.isfile (which is all the
+        # pre-containment resolver did) swallows the same ValueError, so this
+        # address used to be a plain 404. Refuse it the same way rather than
+        # letting it out of the handler as a 500 with a traceback. Reachable
+        # from a same-origin JSON POST via EITHER component: `name` and
+        # `subfolder` both end up in `target`.
+        return None, "invalid path"
+    if os.path.commonpath([resolved, root]) != root:
         return None, "name escapes root"
     return target, ""
 

@@ -212,4 +212,25 @@ describe("inline node grid — write controls follow the write perimeter", () =>
       expect(card.querySelector(".gl-mark-sensitive")).toBeNull();
     }
   });
+
+  it("keeps the READ controls in path mode — the thumbnail and the name", async () => {
+    // The picker's mirror of this test is what stops "hide the write
+    // controls" from being implemented as "render a bare card". Without it
+    // on THIS surface, the two path-mode assertions above are satisfied by a
+    // grid that renders nothing but an empty div, and the inline node grid
+    // is the surface that had no commit-contract coverage at all until #111.
+    //
+    // The grid has no ⓘ button — generation metadata is the picker's control
+    // — so its read surface is the lazy thumbnail plus the name, both of
+    // which are served by endpoints that accept type=path deliberately.
+    stubFetch("path");
+    await mountGrid("/abs/dir/a.png");
+
+    const cards = gridCards();
+    expect(cards.length).toBe(FILES.length);
+    for (const card of cards) {
+      expect(card.querySelector(".gl-thumb img[data-src]")).not.toBeNull();
+      expect(card.querySelector(".gl-name")?.textContent).toBeTruthy();
+    }
+  });
 });

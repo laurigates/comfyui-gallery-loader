@@ -220,11 +220,24 @@ module's own decorators back with `ast` to prove nothing bypassed it —
 so a new route added the old way fails the suite rather than shipping
 unguarded.
 
-The Origin/Host compare is deliberately **not** duplicated here: core
-already applies `create_origin_only_middleware()` to every route (and
-skips it precisely when `--enable-cors-header` opts out), and a second
-copy would need `urllib`, whose name is itself one of the registry
-scanner tripwires `tests/test_publish_hygiene.py` guards.
+The Origin/Host compare is deliberately **not** added here, and the
+reason is narrower than "core already does it". Core applies
+`create_origin_only_middleware()` to every route (skipping it precisely
+when `--enable-cors-header` opts out), but the Host/Origin comparison
+inside it is gated on `is_loopback(host)` — `server.py:177`. Reached
+over a LAN by hostname (`--listen 0.0.0.0`, which is how the GPU lab
+runs) that gate is False and the comparison never executes; what
+remains is `Sec-Fetch-Site: cross-site` -> 403, which does not reject
+`same-site`. So on that deployment the Content-Type guard is not a
+duplicate of core — it is the only check standing between a same-site
+cross-origin POST and a write, and it works by making the request
+non-simple so the browser preflights and core answers the OPTIONS with
+no `Access-Control-Allow-Origin`.
+
+Adding a pack-level compare would not close that gap without also
+refusing the reverse-proxy and hostname-vs-IP setups core deliberately
+permits, and it would need `urllib`, whose name is itself one of the
+registry scanner tripwires `tests/test_publish_hygiene.py` guards.
 
 ### Value contract: don't churn input/ workflows
 

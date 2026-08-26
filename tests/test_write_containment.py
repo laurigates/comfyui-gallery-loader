@@ -497,3 +497,122 @@ class TestNoPostRouteBypassesTheGuard:
             "gallery_set_rating",
             "gallery_set_tag",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Malformed addresses must be REFUSED, not raised on
+# ---------------------------------------------------------------------------
+
+
+class TestAMalformedAddressIsRefusedNotRaised(_SandboxBase):
+    """A same-origin JSON POST controls both fields of the address.
+
+    Neither of these is a containment hole — no write escapes the root either
+    way — but both leave the handler as an unhandled exception, which aiohttp
+    renders as a 500 with a traceback. The gates below are the string/type
+    checks that keep them 400s.
+
+    Every test here is two-sided on the same seeded file: the malformed arm is
+    refused AND the well-formed arm still resolves. A resolver that refused
+    everything passes the first assertion of each pair and fails the second.
+    """
+
+    def test_a_nul_in_the_name_is_refused_while_the_same_name_without_it_resolves(
+        self, tmp_path, monkeypatch
+    ):
+        """``os.path.realpath`` RAISES on an embedded NUL rather than
+        returning False, so the write resolver's last gate is the one that
+        turns it into a 500. ``os.path.isfile`` swallows it, which is why the
+        pre-containment resolver answered 404 here and this one did not.
+        """
+        root = self._sandbox(tmp_path, monkeypatch)
+        self._seed(root, "victim.png")
+
+        _, err, status = gallery_loader._resolve_write_target(
+            {"type": "output", "subfolder": "", "path": "", "name": "victim\x00.png"}
+        )
+        assert err == "invalid path"
+        assert status == 400
+
+        target, err, status = gallery_loader._resolve_write_target(
+            {"type": "output", "subfolder": "", "path": "", "name": "victim.png"}
+        )
+        assert target == str(root / "victim.png")
+        assert err == ""
+        assert status == 200
+
+    def test_a_nul_in_the_subfolder_is_refused_while_a_real_subfolder_resolves(
+        self, tmp_path, monkeypatch
+    ):
+        """The subfolder reaches ``realpath`` by the same route the name does."""
+        root = self._sandbox(tmp_path, monkeypatch)
+        self._seed(root / "sub", "victim.png")
+
+        _, err, status = gallery_loader._resolve_write_target(
+            {"type": "output", "subfolder": "su\x00b", "path": "", "name": "victim.png"}
+        )
+        assert err == "invalid path"
+        assert status == 400
+
+        target, err, _ = gallery_loader._resolve_write_target(
+            {"type": "output", "subfolder": "sub", "path": "", "name": "victim.png"}
+        )
+        assert target == str(root / "sub" / "victim.png")
+        assert err == ""
+
+    @pytest.mark.parametrize("subfolder", [123, 4.5, ["sub"], {"a": 1}, True])
+    def test_a_non_string_subfolder_is_refused_while_a_string_one_is_accepted(self, subfolder):
+        """``os.path.join`` raises TypeError on a non-str instead of erroring
+        out, so the type check has to happen in the validator.
+        """
+        parsed, err = gallery_loader._validate_media_address(
+            {"type": "output", "subfolder": subfolder, "name": "victim.png"}
+        )
+        assert parsed is None
+        assert err == "invalid subfolder"
+
+        parsed, err = gallery_loader._validate_media_address(
+            {"type": "output", "subfolder": "sub", "name": "victim.png"}
+        )
+        assert err == ""
+        assert parsed is not None
+        assert parsed["subfolder"] == "sub"
+
+    @pytest.mark.parametrize("falsy", [None, "", 0, False, []])
+    def test_a_falsy_subfolder_still_means_the_root(self, falsy):
+        """`or ""` runs BEFORE the type check, so these are the root — not a
+        400. Asserted so the new gate cannot quietly start rejecting the
+        request the frontend actually sends for a top-level folder.
+        """
+        parsed, err = gallery_loader._validate_media_address(
+            {"type": "output", "subfolder": falsy, "name": "victim.png"}
+        )
+        assert err == ""
+        assert parsed is not None
+        assert parsed["subfolder"] == ""
+
+    def test_the_handlers_answer_400_rather_than_raising(self, tmp_path, monkeypatch):
+        """End to end: a POST a browser can send must not reach aiohttp's
+        500 handler. Asserting the status is not enough on its own — an
+        exception escaping ``_call`` would error the test rather than fail an
+        assertion, which is what makes this the regression pin.
+        """
+        root = self._sandbox(tmp_path, monkeypatch)
+        self._seed(root, "victim.png")
+
+        for handler, extra in (
+            (gallery_loader.gallery_set_rating, {"rating": 5}),
+            (gallery_loader.gallery_set_tag, {"tag": "nsfw", "present": True}),
+        ):
+            for bad in ({"name": "victim\x00.png"}, {"subfolder": 123}):
+                body = {"type": "output", "subfolder": "", "name": "victim.png"}
+                body.update(extra)
+                body.update(bad)
+                resp = _call(handler, _FakePostRequest(body))
+                assert resp.status == 400, (handler.__name__, bad)
+
+            # Control on the same corpus: the well-formed body still writes.
+            body = {"type": "output", "subfolder": "", "name": "victim.png"}
+            body.update(extra)
+            resp = _call(handler, _FakePostRequest(body))
+            assert resp.status == 200, handler.__name__
