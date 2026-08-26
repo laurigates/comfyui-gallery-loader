@@ -1,15 +1,18 @@
 // image-picker.ts — opens a modal gallery picker on click of either:
 //   - any upload-flag combo widget — stock LoadImage / LoadImageMask /
-//     LoadImageOutput (`image_upload`) and core LoadVideo (`video_upload`) —
-//     Input/Output/Temp tabs, writes annotated values like "foo.png [output]"
-//     that folder_paths.get_annotated_filepath resolves transparently.
+//     LoadImageOutput (`image_upload`), core LoadVideo (`video_upload`) and
+//     core LoadAudio (`audio_upload`) — Input/Output/Temp tabs, writes
+//     annotated values like "foo.png [output]" that
+//     folder_paths.get_annotated_filepath resolves transparently.
 //   - VHS's *upload* combo loaders (VHS_LoadVideo, VHS_LoadVideoFFmpeg,
-//     VHS_LoadImages), matched by class name because VHS builds those widgets
-//     from its own JS and leaves no marker on the input spec. Same sandboxed
-//     tabs and same annotated values — VHS resolves them through
-//     get_annotated_filepath too. VHS_LoadImages opens in directory mode.
+//     VHS_LoadAudioUpload, VHS_LoadImages), matched by class name because VHS
+//     builds those widgets from its own JS and leaves no marker on the input
+//     spec. Same sandboxed tabs and same annotated values — VHS resolves them
+//     through get_annotated_filepath too. VHS_LoadImages opens in directory
+//     mode.
 //   - any VHS path-loader's STRING widget (VHS_LoadImagePath,
-//     VHS_LoadImagesPath, VHS_LoadVideoPath, VHS_LoadVideoFFmpegPath) —
+//     VHS_LoadImagesPath, VHS_LoadVideoPath, VHS_LoadVideoFFmpegPath,
+//     VHS_LoadAudio) —
 //     opens in path-mode rooted at folder_paths.base_path; commits a
 //     raw absolute path. Directory loaders (LoadImagesPath) get a
 //     footer "Use this folder" button; clicks on folders still descend.
@@ -108,6 +111,13 @@ function debug(...args: unknown[]): void {
 // hand-written here and byte-identically in comfyui-image-browser; both grids
 // render the same files off the same disk, so a widened set in one pack and not
 // the other shows a file as loadable in one grid and absent from the other.
+//
+// AUDIO_EXTS has no kit equivalent yet, so it lives here and MUST stay in step
+// with `AUDIO_EXTS` in gallery_loader.py — the backend clamps /list to
+// MEDIA_EXTS, so an extension this set asks for and that one lacks lists
+// nothing, with no error to read. See issue #88's follow-up for promoting it
+// into the kit alongside IMG_EXTS / VIDEO_EXTS.
+const AUDIO_EXTS = new Set([".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".aac"]);
 
 // Persisted sort preference. One shared key across every picker flavour so a
 // user's "Name A→Z" choice sticks regardless of which node opened the modal.
@@ -432,6 +442,10 @@ const VHS_PATH_LOADERS = new Set([
   "VHS_LoadImagesPath",
   "VHS_LoadVideoPath",
   "VHS_LoadVideoFFmpegPath",
+  // Declares vhs_path_extensions ['wav','mp3','ogg','m4a','flac'] on its
+  // `audio_file` STRING widget, so findVHSPathWidget already finds it and the
+  // grid asks the backend for VHS's own set — nothing is hardcoded here.
+  "VHS_LoadAudio",
 ]);
 
 // VHS's *upload* loaders: plain combos over the input dir. Unlike the path
@@ -456,6 +470,12 @@ interface VHSComboSpec {
 // goes stale silently; the symptom is a loadable file the grid won't show.
 const VHS_VIDEO_EXTS = [".webm", ".mp4", ".mkv", ".gif", ".mov"];
 
+// Mirrors VHS's own `audio_extensions` (videohelpersuite/nodes.py) the same
+// way. `.mp4` is in it — VHS_LoadAudioUpload will pull the audio track out of a
+// video container — so this is NOT our AUDIO_EXTS and must not be replaced by
+// it: that would drop .mp4 from a dropdown the node itself offers.
+const VHS_AUDIO_EXTS = [".mp3", ".mp4", ".wav", ".ogg"];
+
 const VHS_COMBO_LOADERS = new Map<string, VHSComboSpec>([
   [
     "VHS_LoadVideo",
@@ -477,6 +497,16 @@ const VHS_COMBO_LOADERS = new Map<string, VHSComboSpec>([
       button: "📁 Browse videos",
     },
   ],
+  [
+    "VHS_LoadAudioUpload",
+    {
+      widget: "audio",
+      mode: "file",
+      extensions: VHS_AUDIO_EXTS,
+      title: "Choose audio",
+      button: "📁 Browse audio",
+    },
+  ],
   // Loads every image in a directory, so the picker runs in directory mode:
   // files are inert and the footer commits the folder.
   [
@@ -485,16 +515,35 @@ const VHS_COMBO_LOADERS = new Map<string, VHSComboSpec>([
   ],
 ]);
 
-// Upload flags a combo may declare. Core LoadVideo declares `video_upload`
-// (io.UploadType.video); the frontend's WidgetSelect keys on the same flag to
-// mount its Vue asset browser, which is why the defang below must strip both.
-const UPLOAD_FLAGS = ["image_upload", "video_upload"] as const;
+// Upload flags a combo may declare. Core LoadVideo declares `video_upload` and
+// core LoadAudio `audio_upload` (io.UploadType.video / .audio); the frontend's
+// WidgetSelect keys on the same flags to mount its Vue asset browser, which is
+// why the defang below must strip all three.
+const UPLOAD_FLAGS = ["image_upload", "video_upload", "audio_upload"] as const;
 type UploadFlag = (typeof UPLOAD_FLAGS)[number];
-type MediaKind = "image" | "video";
+type MediaKind = "image" | "video" | "audio";
 
 const MEDIA_OF_FLAG: Record<UploadFlag, MediaKind> = {
   image_upload: "image",
   video_upload: "video",
+  audio_upload: "audio",
+};
+
+// What each media kind asks the backend for, and how the modal names itself.
+// `undefined` extensions means "the backend's default", which is images.
+//
+// Audio asks for AUDIO_EXTS *and* VIDEO_EXTS because core LoadAudio builds its
+// own combo with filter_files_content_types(files, ["audio", "video"]) — it
+// reads the audio track out of a video container — so an audio-only grid would
+// hide files the node's native dropdown offers.
+const MEDIA_PICKER: Record<MediaKind, { extensions?: string[]; title: string; button: string }> = {
+  image: { title: "Choose image", button: "📁 Browse gallery" },
+  video: { extensions: [...VIDEO_EXTS], title: "Choose video", button: "📁 Browse videos" },
+  audio: {
+    extensions: [...AUDIO_EXTS, ...VIDEO_EXTS],
+    title: "Choose audio",
+    button: "📁 Browse audio",
+  },
 };
 
 // Fallbacks for when the defang never ran — an older frontend, or a node
@@ -505,6 +554,7 @@ const CORE_LOADERS = new Map<string, { widget: string; media: MediaKind }>([
   ["LoadImageMask", { widget: "image", media: "image" }],
   ["LoadImageOutput", { widget: "image", media: "image" }],
   ["LoadVideo", { widget: "file", media: "video" }],
+  ["LoadAudio", { widget: "audio", media: "audio" }],
 ]);
 
 // Cached /gallery_loader/base response. Set once on first picker open.
@@ -539,8 +589,8 @@ async function fetchBasePaths(): Promise<BasePaths> {
 // canvas combo, which calls widget.onPointerDown as expected.
 //
 // WidgetSelect keys on `image_upload`, `video_upload`, `animated_image_upload`,
-// `audio_upload` and `mesh_upload`; we strip only the two the picker can serve
-// (see UPLOAD_FLAGS), so an audio or mesh combo keeps its native control.
+// `audio_upload` and `mesh_upload`; we strip only the three the picker can
+// serve (see UPLOAD_FLAGS), so a mesh combo keeps its native control.
 //
 // Trade-off: the native "Upload" button is tied to the same flag, so it
 // disappears too. The modal can grow its own upload action later.
@@ -574,7 +624,7 @@ function defangNodeData(nodeData: NodeData | null | undefined): boolean {
       opts[flag] = false;
       // Records WHICH flag was stripped, not merely that one was: it is the
       // only thing left on the widget that says whether this combo lists
-      // images or videos, and the two want different extension sets.
+      // images, videos or audio, and the three want different extension sets.
       opts._origUploadFlag = flag;
       touched = true;
       debug(`defanged ${flag} on ${nodeData?.name}.${name}`);
@@ -660,12 +710,13 @@ function enhanceUploadComboNode(node: PickerNode): void {
   });
 
   addPickerHint(w);
-  wireOpeners(node, w, media === "video" ? "📁 Browse videos" : "📁 Browse gallery", {
+  const picker = MEDIA_PICKER[media];
+  wireOpeners(node, w, picker.button, {
     kind: "loadimage",
-    // Images are the backend's default listing, so only the video flavour
-    // needs to say so.
-    extensions: media === "video" ? [...VIDEO_EXTS] : undefined,
-    title: media === "video" ? "Choose video" : "Choose image",
+    // Images are the backend's default listing, so only the video and audio
+    // flavours carry an extension set.
+    extensions: picker.extensions,
+    title: picker.title,
   });
 }
 
@@ -944,7 +995,7 @@ interface InitialSnapshot {
 }
 
 interface ThumbDescriptor {
-  kind: "img" | "video" | "icon";
+  kind: "img" | "video" | "audio" | "icon";
   src?: string;
   text?: string;
 }
@@ -2195,6 +2246,9 @@ export async function openImagePicker(
       if (VIDEO_EXTS.has(ext)) {
         return { kind: "video", src: videoSrcURL("path", "", f.name, state.absPath) };
       }
+      if (AUDIO_EXTS.has(ext)) {
+        return { kind: "audio" };
+      }
       return { kind: "icon", text: "📄" };
     }
     const sub = fileSub(f);
@@ -2203,6 +2257,9 @@ export async function openImagePicker(
     }
     if (VIDEO_EXTS.has(ext)) {
       return { kind: "video", src: videoSrcURL(type, sub, f.name) };
+    }
+    if (AUDIO_EXTS.has(ext)) {
+      return { kind: "audio" };
     }
     return { kind: "icon", text: "📄" };
   }
@@ -2342,12 +2399,22 @@ export async function openImagePicker(
           ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">`
           : t.kind === "video"
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
-            : `<div class="ip-thumb-icon">${t.text}</div>`;
+            : t.kind === "audio"
+              ? // A GLYPH, not an <audio controls>. Every click inside a file
+                // card that is not a star / 📌 / 🙈 / ⓘ / subpath commits the
+                // file and closes the modal (see the grid click handler), so an
+                // inline player would commit-and-close on the first tap at its
+                // play button. Preview belongs on a control that is explicitly
+                // not the select target; tracked as a follow-up to #88.
+                `<div class="ip-thumb-icon is-audio">🎵</div>`
+              : `<div class="ip-thumb-icon">${t.text}</div>`;
       // Whether a metadata WRITE can reach this card's file. /rating and /tag
       // are contained to input/output/temp — a `type: "path"` write is refused
       // at the resolver's first statement — so in path mode the stars and 🙈
       // would be controls whose every press is a 400. Reads are unaffected:
-      // the thumbnail, the preview and ⓘ all still work there.
+      // the thumbnail, the preview and ⓘ all still work there. Audio cards are
+      // ordinary cards here: the gate is the card's TYPE, not its media kind,
+      // so 🎵 in a path picker gets no star row for the same reason 🖼 doesn't.
       const writable = SANDBOXED_TYPES.includes(fileType(f));
       // No stars on a missing pin either: the rating write would address a
       // file that isn't there, and the optimistic repaint would make the

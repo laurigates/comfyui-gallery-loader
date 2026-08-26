@@ -52,10 +52,20 @@ log = logging.getLogger("comfyui-gallery-loader")
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif", ".avif"}
 VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"}
+# Audio containers the picker may list. Derived from the three nodes that ask
+# for them, not guessed:
+#   - VHS `audio_extensions` (videohelpersuite/nodes.py): mp3, mp4, wav, ogg
+#   - VHS_LoadAudio's `vhs_path_extensions`: wav, mp3, ogg, m4a, flac
+#   - core LoadAudio, whose combo is built by
+#     folder_paths.filter_files_content_types(files, ["audio", "video"]) — a
+#     mimetypes.guess_type dispatch, which resolves .oga/.opus/.aac to audio/*
+# `.mp4` is deliberately absent here: it is already in VIDEO_EXTS, and the two
+# sets are asserted disjoint so a card's kind is decided by exactly one of them.
+AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".aac"}
 # Extensions the /gallery_loader/file endpoint will stream raw to the
 # browser (for previews in type=path mode where /api/view doesn't apply).
 # Keep this narrow — it's an arbitrary-path read.
-STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS
+STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS | AUDIO_EXTS
 
 SANDBOXED_TYPES = ("input", "output", "temp")
 
@@ -148,7 +158,7 @@ def _is_sensitive(name: str, path: str, keywords: Sequence[str], tags: Sequence[
 # recursive listing turns "enumerate one directory" into "enumerate the whole
 # tree in one request", so the extensions parameter is clamped to this rather
 # than passed through — see gallery_list.
-MEDIA_EXTS = IMG_EXTS | VIDEO_EXTS
+MEDIA_EXTS = IMG_EXTS | VIDEO_EXTS | AUDIO_EXTS
 
 # Upper bound on files a recursive ("flat") listing RETURNS. The walk itself
 # always covers the whole subtree (see FLAT_WALK_CAP) and the cap is applied
@@ -360,7 +370,7 @@ def _validate_media_address(body: Any) -> tuple[dict[str, Any] | None, str]:
     """Validate the ``{type, subfolder|path, name}`` half of a metadata-write
     POST body. Returns (parsed, error).
 
-    Enforces a bare (traversal-free) filename and the image/video extension
+    Enforces a bare (traversal-free) filename and the MEDIA_EXTS extension
     whitelist — the same security perimeter as the /thumb and /file endpoints.
     Path resolution stays in the handler. Shared by /rating and /tag so the two
     writes cannot drift into addressing files differently.
@@ -382,7 +392,12 @@ def _validate_media_address(body: Any) -> tuple[dict[str, Any] | None, str]:
     subfolder = body.get("subfolder") or ""
     if not isinstance(subfolder, str):
         return None, "invalid subfolder"
-    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):
+    # MEDIA_EXTS, not a hand-rolled union: every card the grid paints gets
+    # stars and a 🙈, so a media kind the listing can show but this gate refuses
+    # ships controls that always fail. Audio has no in-file XMP writer, which is
+    # not a special case — `_write_xmp` already routes every non-PNG/JPEG format
+    # to the `.xmp` sidecar, exactly as it does for the video extensions above.
+    if os.path.splitext(name)[1].lower() not in MEDIA_EXTS:
         return None, "unsupported file type"
     return {
         "type": type_name,
@@ -460,7 +475,12 @@ def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[
         return None, "writes are only allowed in input/output/temp"
     if not _is_bare_name(name):
         return None, "invalid name"
-    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):
+    # MEDIA_EXTS, matching `_validate_media_address` above. The two gates guard
+    # the SAME address on its way to the same write, so a set that differs
+    # between them is a kind the request grammar accepts and the resolver then
+    # refuses — audio would take stars in the grid and 400 on every press. They
+    # are asserted equal in tests/test_write_containment.py.
+    if os.path.splitext(name)[1].lower() not in MEDIA_EXTS:
         return None, "unsupported file type"
     base, err = _resolve_listing_base(type_name, subfolder, "")
     if err:

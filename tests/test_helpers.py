@@ -64,6 +64,53 @@ def test_img_and_video_sets_are_disjoint():
     assert not (gallery_loader.IMG_EXTS & gallery_loader.VIDEO_EXTS)
 
 
+# ---------- audio whitelist (issue #88) ------------------------------
+#
+# Every assertion below is TWO-SIDED on purpose: an implementation that
+# returned the empty set, or one that made every extension a member, passes
+# a one-directional check and would ship a picker that lists nothing (or one
+# that streams anything off an arbitrary path). Each test names an extension
+# that must be in and one that must be out, of the SAME set.
+
+
+def test_audio_exts_carries_what_the_audio_loaders_ask_for():
+    # VHS `audio_extensions` (mp3/wav/ogg), VHS_LoadAudio's
+    # `vhs_path_extensions` (+m4a/flac), and the mimetype-audio extensions
+    # core LoadAudio's own combo picks up via filter_files_content_types.
+    for ext in (".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".aac"):
+        assert ext in gallery_loader.AUDIO_EXTS, ext
+    # The paired negative, so a set that swallowed everything cannot pass.
+    for ext in (".png", ".mp4", ".txt", ".py", ".safetensors"):
+        assert ext not in gallery_loader.AUDIO_EXTS, ext
+
+
+def test_audio_is_disjoint_from_image_and_video():
+    # thumbForFile dispatches on membership, so an extension in two sets would
+    # make a card's kind depend on the order the branches happen to be in.
+    # `.mp4` is the live case: VHS_LoadAudioUpload offers it, and it stays a
+    # VIDEO extension here.
+    assert not (gallery_loader.AUDIO_EXTS & gallery_loader.IMG_EXTS)
+    assert not (gallery_loader.AUDIO_EXTS & gallery_loader.VIDEO_EXTS)
+    assert ".mp4" in gallery_loader.VIDEO_EXTS
+
+
+def test_media_exts_admits_audio_so_the_list_clamp_does_not_drop_it():
+    # /list intersects the requested extensions with MEDIA_EXTS. Audio missing
+    # from it means an audio picker gets an empty grid and no error to read.
+    assert ".flac" in gallery_loader.MEDIA_EXTS
+    assert ".txt" not in gallery_loader.MEDIA_EXTS
+
+
+def test_streamable_exts_admits_audio_so_path_mode_can_serve_it():
+    # /gallery_loader/file is the only way a type=path listing reaches a file
+    # that is not under input/output/temp. Narrow by design — the negative half
+    # is the point of the assertion, not decoration.
+    assert ".flac" in gallery_loader.STREAMABLE_EXTS
+    assert ".m4a" in gallery_loader.STREAMABLE_EXTS
+    assert ".txt" not in gallery_loader.STREAMABLE_EXTS
+    assert ".safetensors" not in gallery_loader.STREAMABLE_EXTS
+
+
 # ---------- _resolve_listing_base -----------------------------------
 
 
@@ -132,6 +179,18 @@ def test_validate_rating_request_enforces_extension_whitelist():
     parsed, err = gallery_loader._validate_rating_request({"name": "clip.mp4", "rating": 1})
     assert err == ""
     assert parsed is not None
+
+
+def test_validate_rating_request_accepts_audio_because_audio_cards_show_stars():
+    # The grid paints stars on every non-directory card, audio included, so a
+    # gate that refused audio would ship a control that always fails. Paired
+    # with the refusal below so a gate hard-wired to accept cannot pass either.
+    parsed, err = gallery_loader._validate_rating_request({"name": "take.flac", "rating": 4})
+    assert err == ""
+    assert parsed is not None
+    parsed, err = gallery_loader._validate_rating_request({"name": "notes.txt", "rating": 4})
+    assert parsed is None
+    assert "unsupported file type" in err
 
 
 # ---------- /list recursive (flat) view -------------------------------
@@ -351,6 +410,20 @@ class TestListCapsAndClamps(_ListEndpointBase):
         resp = self._call({"type": "output", "subfolder": ""})
         assert resp._body["truncated"] is True
         assert {f["name"] for f in resp._body["files"]} == {"f3.png", "f4.png"}
+
+    def test_audio_survives_the_clamp_while_a_non_media_file_does_not(self, tmp_path, monkeypatch):
+        """End-to-end for the AUDIO_EXTS widening (issue #88).
+
+        Two-sided in ONE request: the same call asks for an audio extension and
+        a non-media one. A clamp that dropped audio returns [] and a clamp that
+        passed everything through returns both, so neither degenerate
+        implementation can produce this result.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "take.flac").write_bytes(b"x")
+        (tmp_path / "notes.txt").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "extensions": ".flac,.txt"})
+        assert {f["name"] for f in resp._body["files"]} == {"take.flac"}
 
     def test_extensions_are_clamped_to_media(self, tmp_path, monkeypatch):
         # Recursion turns a directory-at-a-time enumeration into a whole-tree

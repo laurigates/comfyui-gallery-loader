@@ -26,6 +26,15 @@ const FILES = [
   { name: "b.png", ext: ".png", mtime: 2, size: 10, width: 8, height: 8, rating: 0, tags: [] },
 ];
 
+// Audio became a listable kind with the audio loaders (#117). These cards
+// paint a 🎵 glyph instead of an <img>/<video>, which is the ONLY thing that
+// differs about them — the write controls are gated on the card's TYPE, never
+// on its media kind, so audio must follow the same perimeter as a PNG.
+const AUDIO_FILES = [
+  { name: "a.flac", ext: ".flac", mtime: 3, size: 10, rating: 0, tags: [] },
+  { name: "b.wav", ext: ".wav", mtime: 2, size: 10, rating: 0, tags: [] },
+];
+
 /** A keyword must be configured or 🙈 is not offered on ANY card. */
 function stubSettings() {
   const values = {
@@ -42,7 +51,7 @@ function stubSettings() {
   });
 }
 
-function stubFetch(listedType) {
+function stubFetch(listedType, files = FILES) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url) => {
@@ -70,7 +79,7 @@ function stubFetch(listedType) {
           type: listedType,
           subfolder: "",
           dirs: [],
-          files: FILES,
+          files,
           exists: true,
           truncated: false,
         }),
@@ -231,6 +240,79 @@ describe("inline node grid — write controls follow the write perimeter", () =>
     for (const card of cards) {
       expect(card.querySelector(".gl-thumb img[data-src]")).not.toBeNull();
       expect(card.querySelector(".gl-name")?.textContent).toBeTruthy();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Audio cards are ordinary cards
+// ---------------------------------------------------------------------------
+//
+// #117 widened the picker to the audio loaders, and the write perimeter landed
+// in the same release train. The risk this block pins is a NEW kind slipping
+// past the gate — an audio branch in the thumb renderer that reintroduces the
+// star row for its own cards, or a widened MEDIA_EXTS that reaches the write
+// endpoints without the type gate coming with it.
+//
+// Both arms assert the 🎵 glyph is present, so "no stars" can never be
+// satisfied by a card that failed to render at all.
+
+describe("modal picker — audio cards follow the same write perimeter", () => {
+  it("offers stars and 🙈 on an audio card in a sandboxed root", async () => {
+    stubFetch("input", AUDIO_FILES);
+    await openPicker({ kind: "loadimage" }, "a.flac");
+
+    const cards = pickerCards();
+    expect(cards.length).toBe(AUDIO_FILES.length);
+    for (const card of cards) {
+      expect(card.querySelector(".ip-thumb-icon.is-audio")).not.toBeNull();
+      expect(card.querySelectorAll(".ip-star").length).toBeGreaterThan(0);
+      expect(card.querySelector(".ip-mark-sensitive")).not.toBeNull();
+    }
+  });
+
+  it("offers neither on an audio card in path mode", async () => {
+    stubFetch("path", AUDIO_FILES);
+    await openPicker(
+      { kind: "vhs-path", mode: "file", extensions: [".flac", ".wav"] },
+      "/abs/dir/a.flac",
+    );
+
+    const cards = pickerCards();
+    expect(cards.length).toBe(AUDIO_FILES.length);
+    for (const card of cards) {
+      // The card rendered, and it rendered as AUDIO — so the two assertions
+      // below are about the perimeter and not about an empty grid.
+      expect(card.querySelector(".ip-thumb-icon.is-audio")).not.toBeNull();
+      expect(card.querySelectorAll(".ip-star").length).toBe(0);
+      expect(card.querySelector(".ip-mark-sensitive")).toBeNull();
+    }
+  });
+});
+
+describe("inline node grid — audio cards follow the same write perimeter", () => {
+  it("offers stars and 🙈 on an audio card in a sandboxed root", async () => {
+    stubFetch("input", AUDIO_FILES);
+    await mountGrid("a.flac");
+
+    const cards = gridCards();
+    expect(cards.length).toBe(AUDIO_FILES.length);
+    for (const card of cards) {
+      expect(card.querySelectorAll(".gl-star").length).toBeGreaterThan(0);
+      expect(card.querySelector(".gl-mark-sensitive")).not.toBeNull();
+    }
+  });
+
+  it("offers neither on an audio card in path mode", async () => {
+    stubFetch("path", AUDIO_FILES);
+    await mountGrid("/abs/dir/a.flac");
+
+    const cards = gridCards();
+    expect(cards.length).toBe(AUDIO_FILES.length);
+    for (const card of cards) {
+      expect(card.querySelector(".gl-name")?.textContent).toBeTruthy();
+      expect(card.querySelectorAll(".gl-star").length).toBe(0);
+      expect(card.querySelector(".gl-mark-sensitive")).toBeNull();
     }
   });
 });
