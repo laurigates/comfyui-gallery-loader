@@ -258,9 +258,36 @@ the current absolute path.
 | `GET /gallery_loader/base`    | Returns `base_path`, `input_dir`, `output_dir`, `temp_dir`, `user_dir`. Used by the modal to default VHS path-mode to the ComfyUI install root. |
 | `GET /gallery_loader/thumb`   | Webp 512px thumbnail for images at an arbitrary absolute path. Managed-type listings use core `/api/view` directly. |
 | `GET /gallery_loader/file`    | Streams a whitelisted-extension file (images + common video formats) at an absolute path. Used for video posters in path-mode where core `/api/view` doesn't apply. |
-| `POST /gallery_loader/tag`    | Add or remove ONE `dc:subject` keyword: `{type, subfolder\|path, name, tag, present}`. A delta — the file's other keywords, its rating and every foreign XMP property survive. Answers `{ok, tags, backend}` where `tags` is read back off the file **after** the write, not echoed from the request. |
+| `POST /gallery_loader/tag`    | Add or remove ONE `dc:subject` keyword: `{type, subfolder, name, tag, present}`. A delta — the file's other keywords, its rating and every foreign XMP property survive. Answers `{ok, tags, backend}` where `tags` is read back off the file **after** the write, not echoed from the request. |
 | `GET /gallery_loader/pins`    | The pin list, every entry resolved: `{ok, max, pins}`, each pin carrying `exists` plus (for a live file pin) the same per-file keys `/list` emits. An unresolvable pin is returned with `exists: false`, never dropped. |
 | `POST /gallery_loader/pins`   | One **delta** — `{op: "add"\|"remove"\|"prune", item?}` — never a whole-list PUT (two open browsers would each send their own list and the second write would discard the first's pin). Answers with the same whole list as the GET. `add` on an existing pin is a successful no-op. |
+
+### The write perimeter
+
+Reads reach further than writes, on purpose.
+
+`/list`, `/thumb`, `/file` and `/metadata` accept `type=path` and serve
+an absolute path behind an extension whitelist — the VHS path browser
+has to preview files that live nowhere near `input/output/temp`.
+
+`/rating` and `/tag` do **not**. A metadata write is contained to
+`input`, `output` and `temp`: the address must name one of those three
+roots, the filename must be a single component with no separators, the
+extension must be on the media whitelist, and the resolved target is
+checked against the root both lexically and after `realpath`, so a
+symlinked subfolder cannot carry the write outside. Anything else is
+answered `400 {"error": "writes are only allowed in input/output/temp"}`.
+
+Consequences you will see in the UI: the star row and the 🙈
+mark-sensitive control are not offered in path mode, and a symlinked
+subfolder under `output/` can be browsed and previewed but not rated or
+tagged.
+
+Every mutating POST (`/rating`, `/tag`, `/pins`) also requires
+`Content-Type: application/json` and answers `415` otherwise. That is a
+CSRF gate rather than a parsing preference: it makes a cross-origin POST
+non-simple, so the browser must preflight it.
+
 
 ## Compatibility
 

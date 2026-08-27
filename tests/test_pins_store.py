@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -390,6 +391,10 @@ class TestPinsEndpoints:
 
     def _post(self, body):
         class _Req:
+            # The Content-Type guard on every mutating POST route answers 415
+            # before the handler runs — see tests/test_write_containment.py.
+            headers: ClassVar[dict[str, str]] = {"Content-Type": "application/json"}
+
             async def json(self):
                 return body
 

@@ -172,6 +172,73 @@ the pack directory breaks every fetch the frontend makes. Don't.
 adding new file types, widen the whitelist explicitly — never read
 arbitrary paths without the extension gate.
 
+### READS reach further than WRITES, and the two resolvers are separate
+
+`_resolve_listing_base` serves the READ side (`/list`, `/thumb`,
+`/metadata`, pin resolution). It accepts `type=path` deliberately — the
+VHS path browser exists to reach files that are not under
+input/output/temp — and it has **no realpath gate**, because
+`output/renders -> /mnt/nas/renders` is an ordinary setup and refusing
+to list it would break the pack for anyone keeping outputs on another
+volume.
+
+`_resolve_sandboxed_file` serves the WRITE side (`/rating`, `/tag`) and
+starts with the type gate:
+
+```python
+if type_name not in SANDBOXED_TYPES:
+    return None, "writes are only allowed in input/output/temp"
+```
+
+then bare filename, media extension, lexical containment, and a
+realpath re-check anchored on the **root** — not on the resolved base,
+which is the thing a traversed symlink moves. `os.path.abspath` is
+purely textual, so without that last check a link inside the root
+(`output/link -> /`) satisfies containment while landing the write
+outside it.
+
+Resolving a write through the listing resolver is what got 22 of this
+pack's 30 published versions banned from the registry: an XMP write
+rewrites a PNG/JPEG in place and creates `<path>.xmp` for every other
+container, so an arbitrary address is an arbitrary file write.
+`tests/test_write_containment.py` owns the perimeter; do not widen it
+to "make path mode work" — the frontend hides the star row and the
+mark-sensitive control there instead.
+
+### Every mutating POST goes through `_mutating_post`, never `routes.post`
+
+aiohttp parses a request body as JSON without ever inspecting
+Content-Type (`BaseRequest.json` -> `text()` -> `read()`), so a
+cross-origin `<form enctype="text/plain">` — CORS-simple, no preflight
+— reaches a handler with a body the parser accepts. `_mutating_post`
+requires `application/json`, which makes any cross-origin POST here
+non-simple and therefore preflighted.
+
+Register mutating routes with `@_mutating_post(path)`. It fills
+`MUTATING_POST_ROUTES`, and `tests/test_write_containment.py` reads the
+module's own decorators back with `ast` to prove nothing bypassed it —
+so a new route added the old way fails the suite rather than shipping
+unguarded.
+
+The Origin/Host compare is deliberately **not** added here, and the
+reason is narrower than "core already does it". Core applies
+`create_origin_only_middleware()` to every route (skipping it precisely
+when `--enable-cors-header` opts out), but the Host/Origin comparison
+inside it is gated on `is_loopback(host)` — `server.py:177`. Reached
+over a LAN by hostname (`--listen 0.0.0.0`, which is how the GPU lab
+runs) that gate is False and the comparison never executes; what
+remains is `Sec-Fetch-Site: cross-site` -> 403, which does not reject
+`same-site`. So on that deployment the Content-Type guard is not a
+duplicate of core — it is the only check standing between a same-site
+cross-origin POST and a write, and it works by making the request
+non-simple so the browser preflights and core answers the OPTIONS with
+no `Access-Control-Allow-Origin`.
+
+Adding a pack-level compare would not close that gap without also
+refusing the reverse-proxy and hostname-vs-IP setups core deliberately
+permits, and it would need `urllib`, whose name is itself one of the
+registry scanner tripwires `tests/test_publish_hygiene.py` guards.
+
 ### Value contract: don't churn input/ workflows
 
 When committing from the modal:

@@ -27,6 +27,7 @@ import {
   readSafeViewConfig,
   SAFE_VIEW_GLYPH_OFF,
   SAFE_VIEW_GLYPH_ON,
+  SANDBOXED_TYPES,
   type SafeViewConfig,
   SORT_OPTIONS,
   sensitiveKeyword,
@@ -726,6 +727,10 @@ export function attachGallery(node: GalleryNode): void {
     const svCfg = readSafeViewConfig();
     // The keyword 🙈 writes; null (empty keyword list) means no control at all.
     const safeKeyword = sensitiveKeyword(svCfg);
+    // Whether a metadata WRITE can reach this view's files at all. The
+    // /rating and /tag endpoints are contained to input/output/temp, so in
+    // path mode the stars and 🙈 would render as controls that always 400.
+    const writable = SANDBOXED_TYPES.includes(state.type);
     const svPath = safeViewPath();
     renderSafeViewToggle();
 
@@ -787,15 +792,19 @@ export function attachGallery(node: GalleryNode): void {
       const titleText = dims ? `${f.name}\n${dims}\n${stamp}` : `${f.name}\n${stamp}`;
       // 🙈 writes the user's first Safe View keyword into the file's
       // dc:subject — the same control, and the same keyword, as the modal
-      // picker's. Offered only when a keyword is configured.
-      const markBtn = safeKeyword
-        ? markSensitiveHTML("gl", safeKeyword, hasSensitiveTag(f, safeKeyword))
-        : "";
+      // picker's. Offered only when a keyword is configured, and only in a
+      // sandboxed root: the metadata WRITE endpoints refuse `type: "path"`
+      // outright, so rendering either control in path mode ships a button
+      // whose every press is a 400. Same reason the picker gates 📌.
+      const markBtn =
+        safeKeyword && writable
+          ? markSensitiveHTML("gl", safeKeyword, hasSensitiveTag(f, safeKeyword))
+          : "";
       c.innerHTML = `
                 <div class="gl-thumb"><img loading="lazy" decoding="async" data-src="${url}" alt="">${markBtn}</div>
                 <div class="gl-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="gl-dims">${dims}</div>` : ""}
-                ${starsHTML("gl", ratingOf(f))}
+                ${writable ? starsHTML("gl", ratingOf(f)) : ""}
             `;
       if (
         isSensitive({ name: f.name, path: svPath, tags: f.tags }, svCfg) &&

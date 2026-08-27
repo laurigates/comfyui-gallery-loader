@@ -543,8 +543,17 @@ class TestTagTierTopsThePageBackUp(_TaggedBase):
 
 
 class _FakePostRequest:
+    """A well-formed JSON POST.
+
+    `headers` is not decoration: every mutating route is registered behind a
+    Content-Type guard (`_mutating_post`), so a request without the header is
+    answered 415 before the handler runs. tests/test_write_containment.py owns
+    that guard's own coverage; here it just has to be satisfied.
+    """
+
     def __init__(self, body):
         self._body = body
+        self.headers = {"Content-Type": "application/json"}
 
     async def json(self):
         return self._body

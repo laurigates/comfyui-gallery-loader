@@ -2,7 +2,7 @@
   "command": [
     "bash",
     "-c",
-    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_safe_view.py tests/test_endpoints.py && bun run test"
+    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_safe_view.py tests/test_endpoints.py tests/test_write_containment.py && bun run test"
   ],
   "reporter": "exit-code",
   "mutations": [
@@ -389,6 +389,126 @@
       "file": "src/gallery_loader.ts",
       "before": "// so this is a presentation split, not two resolution rules. Pinned on both",
       "after": "// so this is a presentation split rather than two resolution rules. Pinned on both"
+    },
+    {
+      "label": "WRITE \u2014 the resolver takes the type=path address again (the banned arbitrary file write)",
+      "file": "gallery_loader.py",
+      "before": "    target, err = _resolve_sandboxed_file(parsed[\"type\"], parsed[\"subfolder\"], parsed[\"name\"])\n    if err:\n        return None, err, 400",
+      "after": "    base, err = _resolve_listing_base(parsed[\"type\"], parsed[\"subfolder\"], parsed[\"path\"])\n    if err:\n        return None, err, 400\n    target = os.path.abspath(os.path.join(base or \"\", parsed[\"name\"]))"
+    },
+    {
+      "label": "WRITE \u2014 the sandboxed-type gate is removed, so a non-sandboxed type reaches the listing resolver",
+      "file": "gallery_loader.py",
+      "before": "    if type_name not in SANDBOXED_TYPES:\n        return None, \"writes are only allowed in input/output/temp\"",
+      "after": "    if False:\n        return None, \"writes are only allowed in input/output/temp\""
+    },
+    {
+      "label": "WRITE \u2014 the bare-name gate is removed, so a traversing name is joined onto the root",
+      "file": "gallery_loader.py",
+      "before": "    if not _is_bare_name(name):\n        return None, \"invalid name\"\n    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):",
+      "after": "    if False:\n        return None, \"invalid name\"\n    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):"
+    },
+    {
+      "label": "WRITE \u2014 the media-extension gate is removed from the write resolver",
+      "file": "gallery_loader.py",
+      "before": "    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")",
+      "after": "    if False:\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")"
+    },
+    {
+      "label": "WRITE \u2014 the realpath gate is dropped, so a symlinked subfolder carries the write out of the root",
+      "file": "gallery_loader.py",
+      "before": "    if os.path.commonpath([resolved, root]) != root:\n        return None, \"name escapes root\"\n    return target, \"\"",
+      "after": "    return target, \"\""
+    },
+    {
+      "label": "WRITE \u2014 the realpath gate anchors on the resolved BASE, which is the thing a traversed link moves",
+      "file": "gallery_loader.py",
+      "before": "        root = os.path.realpath(str(folder_paths.get_directory_by_type(type_name)))",
+      "after": "        root = os.path.realpath(base)"
+    },
+    {
+      "label": "READ \u2014 the realpath gate leaks into the LISTING resolver, so a symlinked output subfolder stops listing",
+      "file": "gallery_loader.py",
+      "before": "        if os.path.commonpath([target, os.path.abspath(root)]) != os.path.abspath(root):\n            return None, \"subfolder escapes root\"\n        return target, \"\"",
+      "after": "        if os.path.commonpath([target, os.path.abspath(root)]) != os.path.abspath(root):\n            return None, \"subfolder escapes root\"\n        _r = os.path.realpath(root)\n        if os.path.commonpath([os.path.realpath(target), _r]) != _r:\n            return None, \"subfolder escapes root\"\n        return target, \"\""
+    },
+    {
+      "label": "CSRF \u2014 the Content-Type guard is inert, so a cross-origin text/plain form POST reaches the handler",
+      "file": "gallery_loader.py",
+      "before": "            if media_type.strip().lower() != JSON_MEDIA_TYPE:",
+      "after": "            if False:"
+    },
+    {
+      "label": "CSRF \u2014 the guard compares the whole header, so a legitimate 'application/json; charset=utf-8' is refused",
+      "file": "gallery_loader.py",
+      "before": "            media_type = (request.headers.get(\"Content-Type\") or \"\").split(\";\", 1)[0]",
+      "after": "            media_type = request.headers.get(\"Content-Type\") or \"\""
+    },
+    {
+      "label": "CSRF \u2014 the route is registered with the UNGUARDED handler while the registry keeps the guarded copy",
+      "file": "gallery_loader.py",
+      "before": "        return PromptServer.instance.routes.post(path)(guarded)",
+      "after": "        return PromptServer.instance.routes.post(path)(fn)"
+    },
+    {
+      "label": "PICKER \u2014 the star row is offered in path mode, where every rating write is refused",
+      "file": "src/image-picker.ts",
+      "before": "        mode === \"directory\" || missing || !writable ? \"\" : starsHTML(\"ip\", ratingOf(f));",
+      "after": "        mode === \"directory\" || missing ? \"\" : starsHTML(\"ip\", ratingOf(f));"
+    },
+    {
+      "label": "PICKER \u2014 the mark-sensitive control is offered in path mode, where every keyword write is refused",
+      "file": "src/image-picker.ts",
+      "before": "        mode !== \"directory\" && !missing && writable && safeKeyword",
+      "after": "        mode !== \"directory\" && !missing && safeKeyword"
+    },
+    {
+      "label": "NODE GRID \u2014 the star row is offered in path mode",
+      "file": "src/gallery_loader.ts",
+      "before": "                ${writable ? starsHTML(\"gl\", ratingOf(f)) : \"\"}",
+      "after": "                ${starsHTML(\"gl\", ratingOf(f))}"
+    },
+    {
+      "label": "NODE GRID \u2014 the mark-sensitive control is offered in path mode",
+      "file": "src/gallery_loader.ts",
+      "before": "        safeKeyword && writable",
+      "after": "        safeKeyword"
+    },
+    {
+      "label": "WRITE \u2014 the NUL refusal is removed, so a malformed address leaves the handler as a 500 with a traceback instead of a 400",
+      "file": "gallery_loader.py",
+      "before": "        return None, \"invalid path\"\n    if os.path.commonpath([resolved, root]) != root:",
+      "after": "        raise\n    if os.path.commonpath([resolved, root]) != root:"
+    },
+    {
+      "label": "WRITE \u2014 the NUL refusal fires on EVERY address, so no write resolves at all (the restrictive half: a refuse-everything resolver)",
+      "file": "gallery_loader.py",
+      "before": "        resolved = os.path.realpath(target)",
+      "after": "        resolved = os.path.realpath(target + \"\\x00\")"
+    },
+    {
+      "label": "WRITE \u2014 the subfolder type check is removed, so a non-string subfolder reaches os.path.join and raises TypeError",
+      "file": "gallery_loader.py",
+      "before": "    subfolder = body.get(\"subfolder\") or \"\"\n    if not isinstance(subfolder, str):\n        return None, \"invalid subfolder\"",
+      "after": "    subfolder = body.get(\"subfolder\") or \"\"\n    if False:\n        return None, \"invalid subfolder\""
+    },
+    {
+      "label": "WRITE \u2014 the subfolder type check refuses EVERY subfolder, including the empty string the frontend sends for a top-level folder",
+      "file": "gallery_loader.py",
+      "before": "    if not isinstance(subfolder, str):\n        return None, \"invalid subfolder\"",
+      "after": "    if True:\n        return None, \"invalid subfolder\""
+    },
+    {
+      "label": "NODE GRID \u2014 path mode renders a BARE card, so hiding the write controls takes the thumbnail and the name with them",
+      "file": "src/gallery_loader.ts",
+      "before": "      c.innerHTML = `\n                <div class=\"gl-thumb\"><img loading=\"lazy\" decoding=\"async\" data-src=\"${url}\" alt=\"\">${markBtn}</div>\n                <div class=\"gl-name\" title=\"${escapeHTML(titleText)}\">${escapeHTML(f.name)}</div>\n                ${dims ? `<div class=\"gl-dims\">${dims}</div>` : \"\"}\n                ${writable ? starsHTML(\"gl\", ratingOf(f)) : \"\"}\n            `;",
+      "after": "      c.innerHTML = writable\n        ? `\n                <div class=\"gl-thumb\"><img loading=\"lazy\" decoding=\"async\" data-src=\"${url}\" alt=\"\">${markBtn}</div>\n                <div class=\"gl-name\" title=\"${escapeHTML(titleText)}\">${escapeHTML(f.name)}</div>\n                ${dims ? `<div class=\"gl-dims\">${dims}</div>` : \"\"}\n                ${starsHTML(\"gl\", ratingOf(f))}\n            `\n        : \"\";"
+    },
+    {
+      "label": "CONTROL \u2014 write-containment comment text only; MUST be MISSED, or the containment assertions are over-triggering",
+      "file": "gallery_loader.py",
+      "before": "    Reads deliberately reach further than writes. ``/file``, ``/thumb`` and",
+      "after": "    Reads deliberately reach further than writes do. ``/file``, ``/thumb`` and"
     }
   ]
 }
