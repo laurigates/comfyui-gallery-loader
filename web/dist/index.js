@@ -2167,6 +2167,7 @@ function debug(...args) {
   if (DEBUG)
     console.debug(`[${EXT_NAME2}]`, ...args);
 }
+var AUDIO_EXTS = new Set([".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".aac"]);
 var SORT_STORAGE_KEY2 = "comfyui-gallery-loader:sort";
 var scrollMemory = createScrollMemory();
 var viewStore = createViewStore("comfyui-gallery-loader");
@@ -2267,9 +2268,11 @@ var VHS_PATH_LOADERS = new Set([
   "VHS_LoadImagePath",
   "VHS_LoadImagesPath",
   "VHS_LoadVideoPath",
-  "VHS_LoadVideoFFmpegPath"
+  "VHS_LoadVideoFFmpegPath",
+  "VHS_LoadAudio"
 ]);
 var VHS_VIDEO_EXTS = [".webm", ".mp4", ".mkv", ".gif", ".mov"];
+var VHS_AUDIO_EXTS = [".mp3", ".mp4", ".wav", ".ogg"];
 var VHS_COMBO_LOADERS = new Map([
   [
     "VHS_LoadVideo",
@@ -2292,20 +2295,41 @@ var VHS_COMBO_LOADERS = new Map([
     }
   ],
   [
+    "VHS_LoadAudioUpload",
+    {
+      widget: "audio",
+      mode: "file",
+      extensions: VHS_AUDIO_EXTS,
+      title: "Choose audio",
+      button: "\uD83D\uDCC1 Browse audio"
+    }
+  ],
+  [
     "VHS_LoadImages",
     { widget: "directory", mode: "directory", title: "Choose folder", button: "\uD83D\uDCC1 Browse folders" }
   ]
 ]);
-var UPLOAD_FLAGS = ["image_upload", "video_upload"];
+var UPLOAD_FLAGS = ["image_upload", "video_upload", "audio_upload"];
 var MEDIA_OF_FLAG = {
   image_upload: "image",
-  video_upload: "video"
+  video_upload: "video",
+  audio_upload: "audio"
+};
+var MEDIA_PICKER = {
+  image: { title: "Choose image", button: "\uD83D\uDCC1 Browse gallery" },
+  video: { extensions: [...VIDEO_EXTS], title: "Choose video", button: "\uD83D\uDCC1 Browse videos" },
+  audio: {
+    extensions: [...AUDIO_EXTS, ...VIDEO_EXTS],
+    title: "Choose audio",
+    button: "\uD83D\uDCC1 Browse audio"
+  }
 };
 var CORE_LOADERS = new Map([
   ["LoadImage", { widget: "image", media: "image" }],
   ["LoadImageMask", { widget: "image", media: "image" }],
   ["LoadImageOutput", { widget: "image", media: "image" }],
-  ["LoadVideo", { widget: "file", media: "video" }]
+  ["LoadVideo", { widget: "file", media: "video" }],
+  ["LoadAudio", { widget: "audio", media: "audio" }]
 ]);
 var BASE_PATHS = null;
 async function fetchBasePaths() {
@@ -2420,10 +2444,11 @@ function enhanceUploadComboNode(node) {
     media
   });
   addPickerHint(w);
-  wireOpeners(node, w, media === "video" ? "\uD83D\uDCC1 Browse videos" : "\uD83D\uDCC1 Browse gallery", {
+  const picker = MEDIA_PICKER[media];
+  wireOpeners(node, w, picker.button, {
     kind: "loadimage",
-    extensions: media === "video" ? [...VIDEO_EXTS] : undefined,
-    title: media === "video" ? "Choose video" : "Choose image"
+    extensions: picker.extensions,
+    title: picker.title
   });
 }
 function enhanceVHSComboNode(node) {
@@ -3429,6 +3454,9 @@ async function openImagePicker(widget, node, opts) {
       if (VIDEO_EXTS.has(ext)) {
         return { kind: "video", src: videoSrcURL("path", "", f.name, state.absPath) };
       }
+      if (AUDIO_EXTS.has(ext)) {
+        return { kind: "audio" };
+      }
       return { kind: "icon", text: "\uD83D\uDCC4" };
     }
     const sub = fileSub(f);
@@ -3437,6 +3465,9 @@ async function openImagePicker(widget, node, opts) {
     }
     if (VIDEO_EXTS.has(ext)) {
       return { kind: "video", src: videoSrcURL(type, sub, f.name) };
+    }
+    if (AUDIO_EXTS.has(ext)) {
+      return { kind: "audio" };
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
@@ -3524,7 +3555,7 @@ async function openImagePicker(widget, node, opts) {
 ${dims}
 ${when}` : `${f.name}
 ${when}`;
-      const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ip-thumb-icon">${t.text}</div>`;
+      const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : t.kind === "audio" ? `<div class="ip-thumb-icon is-audio">\uD83C\uDFB5</div>` : `<div class="ip-thumb-icon">${t.text}</div>`;
       const writable = SANDBOXED_TYPES.includes(fileType(f));
       const stars = mode === "directory" || missing || !writable ? "" : starsHTML("ip", ratingOf(f));
       const pinned = isFilePinned(f);

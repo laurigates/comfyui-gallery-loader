@@ -21,10 +21,11 @@ Three entry points share one picker UI:
    Output / Temp**; commits annotated values (`foo.png [output]`)
    that core's `folder_paths.get_annotated_filepath` resolves
    transparently.
-3. **Video + folder combo loaders** (`src/image-picker.ts`) — core
-   `LoadVideo` (detected by its `video_upload` flag, same defang path
-   as `image_upload`) and VHS's upload-flavour `VHS_LoadVideo`,
-   `VHS_LoadVideoFFmpeg`, `VHS_LoadImages` (detected by **class name** —
+3. **Video + audio + folder combo loaders** (`src/image-picker.ts`) —
+   core `LoadVideo` / `LoadAudio` (detected by their `video_upload` /
+   `audio_upload` flags, same defang path as `image_upload`) and VHS's
+   upload-flavour `VHS_LoadVideo`, `VHS_LoadVideoFFmpeg`,
+   `VHS_LoadAudioUpload`, `VHS_LoadImages` (detected by **class name** —
    VHS builds those widgets from its own JS and leaves no marker on the
    input spec). Same sandboxed tabs and annotated values; VHS resolves
    them through `get_annotated_filepath` after its own `strip_path`.
@@ -32,10 +33,10 @@ Three entry points share one picker UI:
 4. **VHS path-loader integration** (`src/image-picker.ts`) —
    detects nodes whose `STRING` widget has `vhs_path_extensions`
    (`VHS_LoadImagePath`, `VHS_LoadImagesPath`, `VHS_LoadVideoPath`,
-   `VHS_LoadVideoFFmpegPath`). Adds a `📁 Browse` button that opens
-   the modal in path-mode, rooted at `folder_paths.base_path`.
-   Commits raw absolute paths. Directory loaders get a footer
-   "Use this folder" button.
+   `VHS_LoadVideoFFmpegPath`, `VHS_LoadAudio`). Adds a `📁 Browse`
+   button that opens the modal in path-mode, rooted at
+   `folder_paths.base_path`. Commits raw absolute paths. Directory
+   loaders get a footer "Use this folder" button.
 
 All three surfaces show a **0–5 star rating** on each image card (click a
 star to set, click the active star to clear) and a **sort-by-rating**
@@ -344,11 +345,39 @@ an mtime sort, never during the walk — truncating in directory order silently
 omits the newest render, which is the one thing the flat view exists to surface.
 There is a test that fails against a during-walk cap.
 
-`extensions` is clamped to `IMG_EXTS|VIDEO_EXTS` **in the handler**, not inside
-`_parse_extensions`. That helper falls back to `IMG_EXTS` on an empty result, so
+`extensions` is clamped to `MEDIA_EXTS` (`IMG_EXTS|VIDEO_EXTS|AUDIO_EXTS`)
+**in the handler**, not inside `_parse_extensions`. That helper falls back to `IMG_EXTS` on an empty result, so
 moving the clamp into it would re-expand an empty intersection and break
 directory mode's `.__none__` sentinel into listing every image. There is a test
 named for that trap; the "cleaner" refactor is the wrong one.
+
+### AUDIO_EXTS lives in two places and there is no gate on the pair
+
+`gallery_loader.py` and `src/image-picker.ts` each declare their own
+`AUDIO_EXTS`. The kit exports `IMG_EXTS` / `VIDEO_EXTS` but has no audio
+equivalent yet, and adding one is a `comfy-modal-kit` change — which forces a
+13-pack fleet rollout for a set only this pack reads today. So the duplication
+is deliberate and **unguarded**: the backend clamps `/list` to `MEDIA_EXTS`, so
+an extension the frontend asks for and the backend lacks lists nothing, with no
+error anywhere. The mutation table carries a drift entry in each direction.
+Promoting it into the kit is tracked as a follow-up to issue #88.
+
+Three sets, three different jobs — do not collapse them:
+
+| Set | Source of truth | Fed to |
+|---|---|---|
+| `AUDIO_EXTS` (ours) | mimetype-audio extensions core `LoadAudio`'s combo picks up | core `LoadAudio`'s picker, and the card kind |
+| `VHS_AUDIO_EXTS` | VHS `audio_extensions` — **carries `.mp4`** | `VHS_LoadAudioUpload` only |
+| `vhs_path_extensions` | read off the widget at runtime | `VHS_LoadAudio` (path) |
+
+Core `LoadAudio` is offered `AUDIO_EXTS ∪ VIDEO_EXTS`, because its own combo is
+built by `filter_files_content_types(files, ["audio", "video"])`.
+
+An audio card is a 🎵 **glyph**, not an `<audio controls>`: the grid's click
+handler commits the file and closes the modal for any click that is not a star /
+📌 / 🙈 / ⓘ / subpath, so an inline player would dismiss the picker at its own
+play button. Preview belongs on a control that is explicitly not the select
+target — also a follow-up.
 
 ### Safe View: the Python matcher is a PORT, and the address is LOGICAL
 

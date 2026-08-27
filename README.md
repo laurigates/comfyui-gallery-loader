@@ -11,16 +11,17 @@ Four complementary entry points share one card-grid picker:
 2. **Modal picker over stock `LoadImage`** — clicking the `image`
    widget on any `LoadImage` / `LoadImageMask` / `LoadImageOutput`
    opens a card-grid modal with **Input / Output / Temp** tabs.
-3. **Modal picker over the video and folder loaders** — core
-   `LoadVideo`, plus VHS's `VHS_LoadVideo`, `VHS_LoadVideoFFmpeg` and
-   `VHS_LoadImages`. Same three tabs, video posters on the cards, and a
-   folder picker for the directory loader.
+3. **Modal picker over the video, audio and folder loaders** — core
+   `LoadVideo` and `LoadAudio`, plus VHS's `VHS_LoadVideo`,
+   `VHS_LoadVideoFFmpeg`, `VHS_LoadAudioUpload` and `VHS_LoadImages`.
+   Same three tabs, video posters on the cards, and a folder picker for
+   the directory loader.
 4. **Filesystem browser for VHS path-loader nodes** — `📁 Browse`
    button on `VHS_LoadImagePath`, `VHS_LoadImagesPath`,
-   `VHS_LoadVideoPath`, and `VHS_LoadVideoFFmpegPath` opens the modal
-   rooted at the ComfyUI install directory. Video files preview as
-   `<video>` thumbnails; directory loaders get a footer "Use this
-   folder" commit button.
+   `VHS_LoadVideoPath`, `VHS_LoadVideoFFmpegPath` and `VHS_LoadAudio`
+   opens the modal rooted at the ComfyUI install directory. Video files
+   preview as `<video>` thumbnails; directory loaders get a footer "Use
+   this folder" commit button.
 
 ## Why
 
@@ -76,17 +77,19 @@ A `📁 Browse gallery` button is also added below the widget so the
 picker is reachable even on frontends that hijack the combo's click
 through the Vue Asset Browser overlay.
 
-## Video and folder loaders
+## Video, audio and folder loaders
 
-The same modal, the same three tabs, over the upload-flavour video and
-directory combos:
+The same modal, the same three tabs, over the upload-flavour video,
+audio and directory combos:
 
-| Node                  | Widget      | Mode      | Lists                                  |
-|-----------------------|-------------|-----------|----------------------------------------|
-| `LoadVideo` (core)    | `file`      | File      | `.mp4 .webm .mov .mkv .avi .m4v .mpg .mpeg` |
-| `VHS_LoadVideo`       | `video`     | File      | `.webm .mp4 .mkv .gif .mov`            |
-| `VHS_LoadVideoFFmpeg` | `video`     | File      | `.webm .mp4 .mkv .gif .mov`            |
-| `VHS_LoadImages`      | `directory` | Directory | (folder picker)                        |
+| Node                   | Widget      | Mode      | Lists                                  |
+|------------------------|-------------|-----------|----------------------------------------|
+| `LoadVideo` (core)     | `file`      | File      | `.mp4 .webm .mov .mkv .avi .m4v .mpg .mpeg` |
+| `LoadAudio` (core)     | `audio`     | File      | audio formats **and** video containers  |
+| `VHS_LoadVideo`        | `video`     | File      | `.webm .mp4 .mkv .gif .mov`            |
+| `VHS_LoadVideoFFmpeg`  | `video`     | File      | `.webm .mp4 .mkv .gif .mov`            |
+| `VHS_LoadAudioUpload`  | `audio`     | File      | `.mp3 .mp4 .wav .ogg`                  |
+| `VHS_LoadImages`       | `directory` | Directory | (folder picker)                        |
 
 Every one of these resolves its value through
 `folder_paths.get_annotated_filepath`, so the `[output]` / `[temp]`
@@ -94,9 +97,22 @@ forms load exactly like the bare input names their native dropdowns
 offer — which is what lets you pick a render straight out of `output/`
 without copying it into `input/` first.
 
-The VHS video sets mirror VHS's own `video_extensions` list, so the
-grid shows precisely what each node's native dropdown would. `.gif` is
-in that list and renders as a still thumbnail rather than a `<video>`.
+The VHS video and audio sets mirror VHS's own `video_extensions` /
+`audio_extensions` lists, so the grid shows precisely what each node's
+native dropdown would. `.gif` is in the video list and renders as a
+still thumbnail rather than a `<video>`; `.mp4` is in the *audio* list
+because `VHS_LoadAudioUpload` reads the audio track out of a video
+container, and it still renders as a video card.
+
+Core `LoadAudio` is offered audio formats **and** video containers,
+because it builds its own combo with
+`folder_paths.filter_files_content_types(files, ["audio", "video"])` —
+an audio-only grid would hide files its native dropdown lists.
+
+Audio cards carry a 🎵 glyph rather than a player: every click inside a
+file card that is not a star / 📌 / 🙈 / ⓘ commits the file and closes
+the modal, so an inline `<audio controls>` would dismiss the picker at
+its own play button.
 
 `VHS_LoadImages` opens **inside** its currently selected folder: file
 cards are inert, clicking a folder descends, and the footer
@@ -245,6 +261,7 @@ the format VHS already accepts.
 | `VHS_LoadImagesPath`          | Directory | (folder picker) |
 | `VHS_LoadVideoPath`           | File      | Video formats   |
 | `VHS_LoadVideoFFmpegPath`     | File      | Video formats   |
+| `VHS_LoadAudio`               | File      | Audio formats   |
 
 Directory mode: file cards render but are inert; clicking a folder
 descends, clicking the footer **"Use this folder"** button commits

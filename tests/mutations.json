@@ -2,7 +2,7 @@
   "command": [
     "bash",
     "-c",
-    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_safe_view.py tests/test_endpoints.py tests/test_write_containment.py && bun run test"
+    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_helpers.py tests/test_safe_view.py tests/test_endpoints.py tests/test_write_containment.py && bun run test"
   ],
   "reporter": "exit-code",
   "mutations": [
@@ -405,13 +405,13 @@
     {
       "label": "WRITE \u2014 the bare-name gate is removed, so a traversing name is joined onto the root",
       "file": "gallery_loader.py",
-      "before": "    if not _is_bare_name(name):\n        return None, \"invalid name\"\n    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):",
-      "after": "    if False:\n        return None, \"invalid name\"\n    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):"
+      "before": "    if not _is_bare_name(name):\n        return None, \"invalid name\"\n",
+      "after": "    if False:\n        return None, \"invalid name\"\n"
     },
     {
       "label": "WRITE \u2014 the media-extension gate is removed from the write resolver",
       "file": "gallery_loader.py",
-      "before": "    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")",
+      "before": "    if os.path.splitext(name)[1].lower() not in MEDIA_EXTS:\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")",
       "after": "    if False:\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")"
     },
     {
@@ -509,6 +509,102 @@
       "file": "gallery_loader.py",
       "before": "    Reads deliberately reach further than writes. ``/file``, ``/thumb`` and",
       "after": "    Reads deliberately reach further than writes do. ``/file``, ``/thumb`` and"
+    },
+    {
+      "label": "AUDIO \u2014 AUDIO_EXTS is inert (empty), so every audio picker lists nothing",
+      "file": "gallery_loader.py",
+      "before": "AUDIO_EXTS = {\".mp3\", \".wav\", \".ogg\", \".oga\", \".opus\", \".flac\", \".m4a\", \".aac\"}",
+      "after": "AUDIO_EXTS = set()"
+    },
+    {
+      "label": "AUDIO \u2014 AUDIO_EXTS over-broad (the one-sided-control trap: a contains-only assertion passes here)",
+      "file": "gallery_loader.py",
+      "before": "AUDIO_EXTS = {\".mp3\", \".wav\", \".ogg\", \".oga\", \".opus\", \".flac\", \".m4a\", \".aac\"}",
+      "after": "AUDIO_EXTS = {\".mp3\", \".wav\", \".ogg\", \".oga\", \".opus\", \".flac\", \".m4a\", \".aac\", \".txt\"}"
+    },
+    {
+      "label": "AUDIO \u2014 /list clamp drops audio again, so an audio grid is empty with no error",
+      "file": "gallery_loader.py",
+      "before": "MEDIA_EXTS = IMG_EXTS | VIDEO_EXTS | AUDIO_EXTS",
+      "after": "MEDIA_EXTS = IMG_EXTS | VIDEO_EXTS"
+    },
+    {
+      "label": "AUDIO \u2014 /gallery_loader/file refuses audio again, so path-mode cannot serve it",
+      "file": "gallery_loader.py",
+      "before": "STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS | AUDIO_EXTS",
+      "after": "STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS"
+    },
+    {
+      "label": "AUDIO \u2014 the write-address gate refuses audio, so an audio card's stars always fail",
+      "file": "gallery_loader.py",
+      "before": "    if os.path.splitext(name)[1].lower() not in MEDIA_EXTS:\n        return None, \"unsupported file type\"\n    return {",
+      "after": "    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):\n        return None, \"unsupported file type\"\n    return {"
+    },
+    {
+      "label": "AUDIO \u2014 audio_upload is no longer defanged, so the Vue asset browser keeps the click",
+      "file": "src/image-picker.ts",
+      "before": "const UPLOAD_FLAGS = [\"image_upload\", \"video_upload\", \"audio_upload\"] as const;",
+      "after": "const UPLOAD_FLAGS = [\"image_upload\", \"video_upload\"] as const;"
+    },
+    {
+      "label": "AUDIO \u2014 core LoadAudio's picker drops VIDEO_EXTS, hiding containers its own dropdown offers",
+      "file": "src/image-picker.ts",
+      "before": "    extensions: [...AUDIO_EXTS, ...VIDEO_EXTS],\n    title: \"Choose audio\",",
+      "after": "    extensions: [...AUDIO_EXTS],\n    title: \"Choose audio\","
+    },
+    {
+      "label": "AUDIO \u2014 the audio picker asks for nothing, falling back to the backend's image default",
+      "file": "src/image-picker.ts",
+      "before": "    extensions: [...AUDIO_EXTS, ...VIDEO_EXTS],\n    title: \"Choose audio\",",
+      "after": "    extensions: undefined,\n    title: \"Choose audio\","
+    },
+    {
+      "label": "AUDIO \u2014 the class-name fallback loses LoadAudio, so a pre-hook node keeps its native combo",
+      "file": "src/image-picker.ts",
+      "before": "  [\"LoadAudio\", { widget: \"audio\", media: \"audio\" }],\n]);",
+      "after": "]);"
+    },
+    {
+      "label": "AUDIO \u2014 VHS_LoadAudioUpload is offered VHS's VIDEO set instead of its audio one",
+      "file": "src/image-picker.ts",
+      "before": "      widget: \"audio\",\n      mode: \"file\",\n      extensions: VHS_AUDIO_EXTS,",
+      "after": "      widget: \"audio\",\n      mode: \"file\",\n      extensions: VHS_VIDEO_EXTS,"
+    },
+    {
+      "label": "AUDIO \u2014 VHS_LoadAudio (path) is not taken over, so its STRING widget keeps the raw text box",
+      "file": "src/image-picker.ts",
+      "before": "  \"VHS_LoadAudio\",\n]);",
+      "after": "]);"
+    },
+    {
+      "label": "AUDIO \u2014 the frontend AUDIO_EXTS drifts wider than the backend's, so a .txt renders as audio",
+      "file": "src/image-picker.ts",
+      "before": "const AUDIO_EXTS = new Set([\".mp3\", \".wav\", \".ogg\", \".oga\", \".opus\", \".flac\", \".m4a\", \".aac\"]);",
+      "after": "const AUDIO_EXTS = new Set([\".mp3\", \".wav\", \".ogg\", \".oga\", \".opus\", \".flac\", \".m4a\", \".aac\", \".txt\"]);"
+    },
+    {
+      "label": "AUDIO \u2014 thumbForFile loses the audio branch, so audio falls back to the generic \ud83d\udcc4 card",
+      "file": "src/image-picker.ts",
+      "before": "    if (AUDIO_EXTS.has(ext)) {\n      return { kind: \"audio\" };\n    }\n    return { kind: \"icon\", text: \"\ud83d\udcc4\" };\n  }",
+      "after": "    return { kind: \"icon\", text: \"\ud83d\udcc4\" };\n  }"
+    },
+    {
+      "label": "AUDIO \u2014 the card mounts an <audio controls>, whose first tap commits the file and closes the picker",
+      "file": "src/image-picker.ts",
+      "before": "                `<div class=\"ip-thumb-icon is-audio\">\ud83c\udfb5</div>`",
+      "after": "                `<audio controls preload=\"none\"></audio>`"
+    },
+    {
+      "label": "CONTROL \u2014 audio comment text only; MUST be MISSED, or the audio assertions are over-triggering",
+      "file": "src/image-picker.ts",
+      "before": "// way. `.mp4` is in it \u2014 VHS_LoadAudioUpload will pull the audio track out of a\n// video container \u2014 so this is NOT our AUDIO_EXTS and must not be replaced by",
+      "after": "// way. `.mp4` is in it, since VHS_LoadAudioUpload pulls the audio track out of\n// a video container \u2014 so this is NOT our AUDIO_EXTS and must not be replaced by"
+    },
+    {
+      "label": "AUDIO \u2014 the write RESOLVER's gate refuses audio, so an audio file in a sandboxed root cannot be rated or tagged",
+      "file": "gallery_loader.py",
+      "before": "    if os.path.splitext(name)[1].lower() not in MEDIA_EXTS:\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")",
+      "after": "    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")"
     }
   ]
 }

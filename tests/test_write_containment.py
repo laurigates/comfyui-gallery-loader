@@ -371,6 +371,155 @@ class TestHandlersRefuseAnOutOfSandboxWrite(_SandboxBase):
 
 
 # ---------------------------------------------------------------------------
+# Audio is a writable kind, and the containment still holds for it
+# ---------------------------------------------------------------------------
+
+
+class TestAudioIsWritableInsideTheSandboxAndOnlyThere(_SandboxBase):
+    """The audio loaders made audio a listable kind, and every card the grid
+    paints carries stars and a 🙈. So the WRITE path has to accept audio in a
+    sandboxed root — otherwise the pack ships controls whose every press is a
+    400 — while still refusing the ``type=path`` address the containment fix
+    closed.
+
+    Both directions are asserted in the same test on the SAME file, because a
+    negative-only assertion passes just as happily against a resolver wired to
+    refuse everything, and that is exactly the state a too-narrow extension
+    gate would produce.
+    """
+
+    def _seed_audio(self, directory, name="track.flac"):
+        """Not a real FLAC, and it does not need to be.
+
+        ``_write_xmp`` dispatches on the EXTENSION: .png and .jpg/.jpeg get an
+        in-file rewrite and every other container falls through to the
+        ``<path>.xmp`` sidecar without opening the file. So the bytes are
+        irrelevant to what is under test here, and the sidecar arm is the one
+        audio takes — the same arm the video extensions already took.
+        """
+        path = Path(directory) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fLaC\x00")
+        return path
+
+    def test_the_two_extension_gates_agree(self):
+        """``_validate_media_address`` and ``_resolve_sandboxed_file`` guard the
+        same address on its way to the same write. A set that differs between
+        them is a kind the request grammar accepts and the resolver then
+        refuses — which is how audio would take stars and 400 on every press.
+        """
+        for ext in sorted(gallery_loader.AUDIO_EXTS):
+            parsed, err = gallery_loader._validate_media_address(
+                {"type": "output", "subfolder": "", "name": f"track{ext}"}
+            )
+            assert err == "", f"{ext} refused by the request grammar"
+            assert parsed is not None
+        # Control: a kind NEITHER gate accepts, so this is not a pair of gates
+        # that simply accept everything.
+        _, err = gallery_loader._validate_media_address(
+            {"type": "output", "subfolder": "", "name": "notes.txt"}
+        )
+        assert err == "unsupported file type"
+
+    @pytest.mark.parametrize("ext", sorted(gallery_loader.AUDIO_EXTS))
+    def test_an_audio_file_resolves_inside_the_root_and_is_refused_as_type_path(
+        self, tmp_path, monkeypatch, ext
+    ):
+        root = self._sandbox(tmp_path, monkeypatch)
+        self._seed_audio(root, f"track{ext}")
+
+        target, err, status = gallery_loader._resolve_write_target(
+            {"type": "output", "subfolder": "", "path": "", "name": f"track{ext}"}
+        )
+        assert (err, status) == ("", 200)
+        assert target == str(root / f"track{ext}")
+
+        # The same bytes, differing ONLY in `type`.
+        refused, err, status = gallery_loader._resolve_write_target(
+            {"type": "path", "subfolder": "", "path": str(root), "name": f"track{ext}"}
+        )
+        assert refused is None
+        assert err == "writes are only allowed in input/output/temp"
+        assert status == 400
+
+    def test_rating_an_audio_file_writes_a_sidecar_inside_the_root_and_not_outside(
+        self, tmp_path, monkeypatch
+    ):
+        """End to end through the handler, both directions.
+
+        The accepted arm proves the whole chain — request grammar, resolver,
+        writer — reaches disk for audio. The refused arm proves the ``type=path``
+        containment survived the widening, and asserts on the FILESYSTEM rather
+        than on the status code: a sidecar write CREATES ``<path>.xmp``, so
+        "no new file appeared beside the target" is the thing that matters.
+        """
+        root = self._sandbox(tmp_path, monkeypatch)
+        outside = tmp_path / "outside"
+        outside.mkdir(exist_ok=True)
+        self._seed_audio(outside, "track.flac")
+
+        resp = _call(
+            gallery_loader.gallery_set_rating,
+            _FakePostRequest(
+                {"type": "path", "path": str(outside), "name": "track.flac", "rating": 5}
+            ),
+        )
+        assert resp.status == 400
+        assert not (outside / "track.flac.xmp").exists()
+
+        inside = self._seed_audio(root, "track.flac")
+        resp = _call(
+            gallery_loader.gallery_set_rating,
+            _FakePostRequest(
+                {"type": "output", "subfolder": "", "name": "track.flac", "rating": 5}
+            ),
+        )
+        assert resp.status == 200
+        sidecar = Path(str(inside) + ".xmp")
+        assert sidecar.exists()
+        assert b"5" in sidecar.read_bytes()
+
+    def test_tagging_an_audio_file_is_accepted_inside_the_root_and_refused_outside(
+        self, tmp_path, monkeypatch
+    ):
+        root = self._sandbox(tmp_path, monkeypatch)
+        outside = tmp_path / "outside"
+        outside.mkdir(exist_ok=True)
+        self._seed_audio(outside, "track.wav")
+
+        resp = _call(
+            gallery_loader.gallery_set_tag,
+            _FakePostRequest(
+                {
+                    "type": "path",
+                    "path": str(outside),
+                    "name": "track.wav",
+                    "tag": "nsfw",
+                    "present": True,
+                }
+            ),
+        )
+        assert resp.status == 400
+        assert not (outside / "track.wav.xmp").exists()
+
+        inside = self._seed_audio(root, "track.wav")
+        resp = _call(
+            gallery_loader.gallery_set_tag,
+            _FakePostRequest(
+                {
+                    "type": "output",
+                    "subfolder": "",
+                    "name": "track.wav",
+                    "tag": "nsfw",
+                    "present": True,
+                }
+            ),
+        )
+        assert resp.status == 200
+        assert Path(str(inside) + ".xmp").exists()
+
+
+# ---------------------------------------------------------------------------
 # The Content-Type guard on every mutating POST
 # ---------------------------------------------------------------------------
 

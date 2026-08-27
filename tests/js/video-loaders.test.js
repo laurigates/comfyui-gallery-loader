@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 //
-// Node detection for the video / directory combo loaders: core LoadVideo, VHS's
-// upload-flavour VHS_LoadVideo / VHS_LoadVideoFFmpeg, and VHS_LoadImages.
+// Node detection for the video / audio / directory combo loaders: core
+// LoadVideo and LoadAudio, VHS's upload-flavour VHS_LoadVideo /
+// VHS_LoadVideoFFmpeg / VHS_LoadAudioUpload, and VHS_LoadImages.
 //
 // These drive the REGISTERED extension hooks rather than calling openImagePicker
 // directly, because the thing under test is the detection itself — which classes
@@ -27,8 +28,18 @@ function stubInertObserver() {
   );
 }
 
-/** Records every /list URL; serves one folder and one clip. */
-function stubFetchRecording() {
+/** The default listing: one folder and one clip. */
+const ONE_CLIP = [{ name: "clip.mp4", ext: ".mp4", mtime: 3, size: 99, rating: 0 }];
+
+/**
+ * Records every /list URL; serves one folder and whatever `files` says.
+ *
+ * The file list is a PARAMETER rather than a fixture constant: the audio tests
+ * need an audio row and a non-media row in the same grid, and adding those to
+ * the shared listing would silently change which card `.ip-card.is-file` picks
+ * for every commit test in this file.
+ */
+function stubFetchRecording(files = ONE_CLIP) {
   const calls = { list: [] };
   vi.stubGlobal(
     "fetch",
@@ -56,7 +67,7 @@ function stubFetchRecording() {
           type: "input",
           subfolder: "",
           dirs: [{ name: "sub", mtime: 1 }],
-          files: [{ name: "clip.mp4", ext: ".mp4", mtime: 3, size: 99, rating: 0 }],
+          files,
           exists: true,
         }),
       };
@@ -139,18 +150,30 @@ describe("upload-flag defang", () => {
   });
 
   // The flag is the only thing left on a constructed widget that says whether
-  // the combo lists images or videos, so a boolean "was defanged" marker would
-  // silently give every video loader the image extension set.
+  // the combo lists images, videos or audio, so a boolean "was defanged"
+  // marker would silently give every video loader the image extension set.
+  it("strips audio_upload too, now that the picker serves it", () => {
+    const out = defang({ required: { audio: ["COMBO", { audio_upload: true }] } });
+    expect(out.required.audio[1]).toMatchObject({
+      audio_upload: false,
+      _origUploadFlag: "audio_upload",
+    });
+  });
+
+  // The paired negative for the three assertions above: a defang hard-wired to
+  // strip every `*_upload` key would satisfy all of them and would also break
+  // the mesh combo's native control, which the picker cannot replace.
   it("leaves upload kinds the picker cannot serve alone", () => {
     const out = defang({
       required: {
-        audio: ["COMBO", { audio_upload: true }],
         mesh: ["COMBO", { mesh_upload: true }],
+        anim: ["COMBO", { animated_image_upload: true }],
       },
     });
-    expect(out.required.audio[1].audio_upload).toBe(true);
-    expect(out.required.audio[1]._origUploadFlag).toBeUndefined();
     expect(out.required.mesh[1].mesh_upload).toBe(true);
+    expect(out.required.mesh[1]._origUploadFlag).toBeUndefined();
+    expect(out.required.anim[1].animated_image_upload).toBe(true);
+    expect(out.required.anim[1]._origUploadFlag).toBeUndefined();
   });
 });
 
@@ -238,6 +261,155 @@ describe("VHS upload combos", () => {
     });
     document.querySelector(".ip-card.is-file").click();
     expect(widget.value).toBe("clip.mp4 [temp]");
+  });
+});
+
+describe("audio loaders (issue #88)", () => {
+  const audioWidget = (name, opts) => ({
+    name,
+    value: "take.flac",
+    type: "combo",
+    options: { values: [], ...opts },
+  });
+
+  // Core LoadAudio builds its own combo with
+  // filter_files_content_types(files, ["audio", "video"]) — it reads the audio
+  // track out of a video container — so an audio-only set would hide files the
+  // node's native dropdown offers. Asserted two-sided: the audio extension the
+  // widening exists for must be present AND the image default must be gone, so
+  // a picker that fell back to the backend's default (images) fails, and one
+  // that asked for every extension fails too.
+  it("core LoadAudio asks for audio AND video, never the image default", async () => {
+    stubInertObserver();
+    const calls = stubFetchRecording();
+    await openVia(fakeNode("LoadAudio", audioWidget("audio", { _origUploadFlag: "audio_upload" })));
+
+    const exts = lastExtensions(calls);
+    expect(exts).toContain(".flac");
+    expect(exts).toContain(".m4a");
+    expect(exts).toContain(".mp4");
+    expect(exts).not.toContain(".png");
+  });
+
+  it("core LoadAudio is still detected by class name when the defang never ran", async () => {
+    stubInertObserver();
+    const calls = stubFetchRecording();
+    await openVia(fakeNode("LoadAudio", audioWidget("audio")));
+
+    expect(lastExtensions(calls)).toContain(".flac");
+  });
+
+  // VHS's own `audio_extensions` is mp3/mp4/wav/ogg — narrower than our
+  // AUDIO_EXTS and, unlike it, carrying .mp4. The grid must offer exactly what
+  // the node's native dropdown does, so this is an EQUALITY assertion: a set
+  // that merely contains .mp3 would pass a containment check while listing
+  // files VHS_LoadAudioUpload cannot load.
+  it("VHS_LoadAudioUpload lists VHS's own audio set, not ours", async () => {
+    stubInertObserver();
+    const calls = stubFetchRecording();
+    await openVia(fakeNode("VHS_LoadAudioUpload", audioWidget("audio")));
+
+    expect(new Set(lastExtensions(calls))).toEqual(new Set([".mp3", ".mp4", ".wav", ".ogg"]));
+  });
+
+  it("VHS_LoadAudioUpload commits an annotated value", async () => {
+    stubInertObserver();
+    stubFetchRecording([{ name: "take.flac", ext: ".flac", mtime: 3, size: 42, rating: 0 }]);
+    const widget = audioWidget("audio");
+    await openVia(fakeNode("VHS_LoadAudioUpload", widget));
+
+    document.querySelector('.ip-tab[data-type="output"]').click();
+    await vi.waitFor(() => {
+      if (!document.querySelector(".ip-card.is-file")) throw new Error("grid not repainted");
+    });
+    document.querySelector(".ip-card.is-file").click();
+    expect(widget.value).toBe("take.flac [output]");
+  });
+
+  // VHS_LoadAudio is a PATH loader: it declares vhs_path_extensions on its
+  // `audio_file` STRING widget, so nothing about the extension set is
+  // hardcoded here — the only thing under test is that the class is in
+  // VHS_PATH_LOADERS at all. The set below is VHS's, verbatim.
+  it("VHS_LoadAudio (path) is taken over and asks for the widget's own set", async () => {
+    stubInertObserver();
+    const calls = stubFetchRecording();
+    const widget = {
+      name: "audio_file",
+      value: "input/",
+      type: "string",
+      options: { vhs_path_extensions: [".wav", ".mp3", ".ogg", ".m4a", ".flac"] },
+    };
+    await openVia(fakeNode("VHS_LoadAudio", widget));
+
+    expect(new Set(lastExtensions(calls))).toEqual(
+      new Set([".wav", ".mp3", ".ogg", ".m4a", ".flac"]),
+    );
+    expect(lastType(calls)).toBe("path");
+  });
+});
+
+describe("audio cards in the grid", () => {
+  // One listing, three kinds. Asserted in ONE test so the audio branch cannot
+  // be satisfied by a thumbForFile hard-wired to return the audio kind for
+  // everything: that implementation would paint the video and the .txt as
+  // audio too, and both paired assertions below would fail.
+  it("paints a 🎵 glyph for audio, a <video> for video, and 📄 for the rest", async () => {
+    stubInertObserver();
+    stubFetchRecording([
+      { name: "clip.mp4", ext: ".mp4", mtime: 3, size: 99, rating: 0 },
+      { name: "take.flac", ext: ".flac", mtime: 2, size: 42, rating: 0 },
+      { name: "notes.txt", ext: ".txt", mtime: 1, size: 7, rating: 0 },
+    ]);
+    await openVia(
+      fakeNode("LoadAudio", {
+        name: "audio",
+        value: "take.flac",
+        type: "combo",
+        options: { values: [], _origUploadFlag: "audio_upload" },
+      }),
+    );
+
+    const cardFor = (name) => document.querySelector(`.ip-card.is-file[data-name="${name}"]`);
+    const audio = cardFor("take.flac");
+    const video = cardFor("clip.mp4");
+    const other = cardFor("notes.txt");
+    // The grid must actually hold all three, or every assertion below is
+    // vacuously true against an empty query result.
+    expect([audio, video, other].every(Boolean)).toBe(true);
+
+    expect(audio.querySelector(".ip-thumb-icon.is-audio")?.textContent).toBe("🎵");
+    // ...and it is NOT the generic file icon, which is what it fell through to
+    // before this change.
+    expect(audio.querySelector(".ip-thumb-icon").textContent).not.toBe("📄");
+    expect(audio.querySelector(".ip-thumb video")).toBeNull();
+
+    expect(video.querySelector(".ip-thumb video")).not.toBeNull();
+    expect(video.querySelector(".ip-thumb-icon.is-audio")).toBeNull();
+
+    expect(other.querySelector(".ip-thumb-icon").textContent).toBe("📄");
+    expect(other.querySelector(".ip-thumb-icon.is-audio")).toBeNull();
+  });
+
+  // An <audio controls> inside .ip-thumb would sit under the grid's own click
+  // handler, which commits the file and closes the modal for any click that is
+  // not a star / 📌 / 🙈 / ⓘ / subpath — so the first tap at its play button
+  // would dismiss the picker. The card must carry no media element at all.
+  it("mounts no <audio> element, so a tap on the card still selects the file", async () => {
+    stubInertObserver();
+    stubFetchRecording([{ name: "take.flac", ext: ".flac", mtime: 3, size: 42, rating: 0 }]);
+    const widget = {
+      name: "audio",
+      value: "",
+      type: "combo",
+      options: { values: [], _origUploadFlag: "audio_upload" },
+    };
+    await openVia(fakeNode("LoadAudio", widget));
+
+    const card = document.querySelector(".ip-card.is-file");
+    expect(card.querySelector("audio")).toBeNull();
+    // The paired positive: the card is a live select target, not an inert one.
+    card.querySelector(".ip-thumb").click();
+    expect(widget.value).toBe("take.flac");
   });
 });
 
