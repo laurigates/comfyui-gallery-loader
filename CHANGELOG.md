@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.31](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.30...comfyui-gallery-loader-v0.1.31) (2026-08-27)
+
+
+### Features
+
+* **audio:** extend the gallery picker to the audio loaders ([#117](https://github.com/laurigates/comfyui-gallery-loader/issues/117)) ([deae030](https://github.com/laurigates/comfyui-gallery-loader/commit/deae030b9e5aaa7a746e4a5914530e11a10c8812)), closes [#88](https://github.com/laurigates/comfyui-gallery-loader/issues/88)
+
+
+### Bug Fixes
+
+* **endpoints:** contain metadata writes to the sandboxed roots ([#118](https://github.com/laurigates/comfyui-gallery-loader/issues/118)) ([2ec01b1](https://github.com/laurigates/comfyui-gallery-loader/commit/2ec01b1589c6df5e21afc0125cd62e710dc29174))
+
 ## [0.1.30](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.29...comfyui-gallery-loader-v0.1.30) (2026-08-16)
 
 
