@@ -1597,21 +1597,21 @@ function parseAnnotated(value) {
   const m = v.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
   if (m) {
     const rel = m[1].replace(/\\/g, "/");
-    const idx2 = rel.lastIndexOf("/");
+    const idx = rel.lastIndexOf("/");
     return {
       type: m[2],
-      subfolder: idx2 >= 0 ? rel.slice(0, idx2) : "",
-      name: idx2 >= 0 ? rel.slice(idx2 + 1) : rel,
+      subfolder: idx >= 0 ? rel.slice(0, idx) : "",
+      name: idx >= 0 ? rel.slice(idx + 1) : rel,
       isAbs: false
     };
   }
   if (v.startsWith("/") || /^[A-Za-z]:[\\/]/.test(v)) {
     const norm = v.replace(/\\/g, "/");
-    const idx2 = norm.lastIndexOf("/");
+    const idx = norm.lastIndexOf("/");
     return {
       type: "path",
-      subfolder: idx2 >= 0 ? norm.slice(0, idx2) : "",
-      name: idx2 >= 0 ? norm.slice(idx2 + 1) : norm,
+      subfolder: idx >= 0 ? norm.slice(0, idx) : "",
+      name: idx >= 0 ? norm.slice(idx + 1) : norm,
       isAbs: true
     };
   }
@@ -1739,7 +1739,12 @@ function attachGallery(node) {
     const cfg = readSafeViewConfig();
     return cfg.hide && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
   }
+  function safePromptKeywords() {
+    const cfg = readSafeViewConfig();
+    return cfg.matchPrompt && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
+  }
   let lastSafeHideKeywords = safeHideKeywords();
+  let lastSafePromptKeywords = safePromptKeywords();
   const disposeSafeViewSub = onSafeViewChange(() => {
     if (!root.isConnected) {
       disposeSafeViewSub();
@@ -1747,7 +1752,7 @@ function attachGallery(node) {
     }
     renderSafeViewToggle();
     const kw = safeHideKeywords();
-    if (kw !== lastSafeHideKeywords) {
+    if (kw !== lastSafeHideKeywords || safePromptKeywords() !== lastSafePromptKeywords) {
       loadAndRender();
       return;
     }
@@ -1818,19 +1823,19 @@ function attachGallery(node) {
     const mark = e.target.closest(".gl-mark-sensitive");
     if (mark) {
       e.stopPropagation();
-      const card2 = mark.closest(".gl-card");
-      const f = card2 ? state.files.find((x) => x.name === card2.dataset.name) : undefined;
+      const card = mark.closest(".gl-card");
+      const f = card ? state.files.find((x) => x.name === card.dataset.name) : undefined;
       if (f)
         toggleSensitiveTag(f, mark);
       return;
     }
     const star = e.target.closest(".gl-star");
     if (star) {
-      const card2 = star.closest(".gl-card");
+      const card = star.closest(".gl-card");
       const row = star.parentElement;
-      if (card2 && row) {
+      if (card && row) {
         const cur = Number(row.dataset.rating || "0");
-        setStarRating(card2.dataset.name, row, nextRating(cur, Number(star.dataset.val)));
+        setStarRating(card.dataset.name, row, nextRating(cur, Number(star.dataset.val)));
       }
       return;
     }
@@ -1946,6 +1951,7 @@ function attachGallery(node) {
   }
   async function loadAndRender() {
     lastSafeHideKeywords = safeHideKeywords();
+    lastSafePromptKeywords = safePromptKeywords();
     const here = locationKey();
     if (revealLocation !== null && revealLocation !== here)
       revealSet.clear();
@@ -1971,6 +1977,11 @@ function attachGallery(node) {
         params.set("safe_kw", kw);
         params.set("safe_hide", "1");
       }
+      const promptKw = safePromptKeywords();
+      if (promptKw) {
+        params.set("safe_kw", promptKw);
+        params.set("safe_prompt", "1");
+      }
       const res = await fetch(`${LIST_URL}?${params.toString()}`);
       if (!res.ok)
         throw new Error(`HTTP ${res.status}`);
@@ -1979,7 +1990,9 @@ function attachGallery(node) {
         throw new Error(data.error || "list failed");
       state.dirs = data.dirs || [];
       state.files = data.files || [];
-      refs.status.textContent = data.exists ? `${state.dirs.length} dir, ${state.files.length} img` : "Directory not found.";
+      const unscanned = promptKw ? Number(data.safe_unscanned) || 0 : 0;
+      const scanning = unscanned > 0 ? ` · \uD83D\uDD0D scanning ${unscanned}` : "";
+      refs.status.textContent = data.exists ? `${state.dirs.length} dir, ${state.files.length} img${scanning}` : "Directory not found.";
     } catch (e) {
       console.error("[gallery_loader] list failed:", e);
       refs.status.textContent = `Error: ${e.message}`;
@@ -2054,7 +2067,7 @@ ${stamp}`;
                 ${dims ? `<div class="gl-dims">${dims}</div>` : ""}
                 ${writable ? starsHTML("gl", ratingOf(f)) : ""}
             `;
-      if (isSensitive({ name: f.name, path: svPath, tags: f.tags }, svCfg) && !revealSet.has(state.type, state.subfolder, f.name)) {
+      if (isSensitive({ name: f.name, path: svPath, tags: f.tags, promptMatch: f.prompt_match }, svCfg) && !revealSet.has(state.type, state.subfolder, f.name)) {
         applySafeView(c, svCfg, () => {
           revealSet.reveal(state.type, state.subfolder, f.name);
           renderGrid();
@@ -2148,24 +2161,89 @@ ${stamp}`;
 }
 
 // src/image-picker.ts
+import { app as app3 } from "/scripts/app.js";
+
+// src/scan-warm.ts
 import { app as app2 } from "/scripts/app.js";
 var EXT_NAME2 = "comfyui-gallery-loader";
+var SAFEVIEW_WARM_URL = "/gallery_loader/safeview_warm";
+var MEDIA_KEYS = ["images", "video"];
+function itemsFromExecuted(detail) {
+  const output = detail?.output;
+  if (!output || typeof output !== "object")
+    return [];
+  const out = [];
+  const seen = new Set;
+  for (const key of MEDIA_KEYS) {
+    const arr = output[key];
+    if (!Array.isArray(arr))
+      continue;
+    for (const raw of arr) {
+      const item = raw;
+      const filename = item?.filename;
+      const type = item?.type;
+      if (typeof filename !== "string" || filename === "")
+        continue;
+      if (typeof type !== "string" || !SANDBOXED_TYPES.includes(type))
+        continue;
+      const subfolder = typeof item?.subfolder === "string" ? item.subfolder : "";
+      const id = `${type}:${subfolder}:${filename}`;
+      if (seen.has(id))
+        continue;
+      seen.add(id);
+      out.push({ type, subfolder, name: filename });
+    }
+  }
+  return out;
+}
+async function postWarm(items) {
+  const res = await fetch(SAFEVIEW_WARM_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items })
+  });
+  if (!res.ok)
+    throw new Error(`HTTP ${res.status}`);
+}
+function installScanWarm(host) {
+  const api = app2.api;
+  if (!api || typeof api.addEventListener !== "function")
+    return () => {};
+  const onExecuted = (event) => {
+    const cfg = host ? readSafeViewConfig(host) : readSafeViewConfig();
+    if (!cfg.matchPrompt)
+      return;
+    const items = itemsFromExecuted(event.detail);
+    if (items.length === 0)
+      return;
+    postWarm(items).catch((e) => {
+      console.warn(`[${EXT_NAME2}] ${SAFE_VIEW_SETTINGS.matchPrompt} warm failed`, e);
+    });
+  };
+  api.addEventListener("executed", onExecuted);
+  return () => api.removeEventListener("executed", onExecuted);
+}
+
+// src/image-picker.ts
+var EXT_NAME3 = "comfyui-gallery-loader";
 var LIST_URL2 = "/gallery_loader/list";
 var FILE_URL = "/gallery_loader/file";
 var BASE_URL = "/gallery_loader/base";
 var RATING_URL2 = "/gallery_loader/rating";
 var METADATA_URL = "/gallery_loader/metadata";
 var STYLE_ID4 = "ip-style";
+var SCAN_POLL_MS = 3000;
+var SCAN_POLL_MAX = 20;
 var DEBUG = (() => {
   try {
-    return localStorage.getItem(`${EXT_NAME2}:debug`) === "1";
+    return localStorage.getItem(`${EXT_NAME3}:debug`) === "1";
   } catch {
     return false;
   }
 })();
 function debug(...args) {
   if (DEBUG)
-    console.debug(`[${EXT_NAME2}]`, ...args);
+    console.debug(`[${EXT_NAME3}]`, ...args);
 }
 var AUDIO_EXTS = new Set([".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".aac"]);
 var SORT_STORAGE_KEY2 = "comfyui-gallery-loader:sort";
@@ -2234,7 +2312,7 @@ async function runLegacyPinMigration() {
       }
     }
   } catch (e) {
-    console.warn(`[${EXT_NAME2}] pin migration failed — will retry next load`, e);
+    console.warn(`[${EXT_NAME3}] pin migration failed — will retry next load`, e);
     return;
   }
   try {
@@ -2253,7 +2331,7 @@ function loadSavedSort2() {
     const [key, dir] = raw.split(":");
     return { key, dir };
   } catch (e) {
-    console.warn(`[${EXT_NAME2}] could not read saved sort`, e);
+    console.warn(`[${EXT_NAME3}] could not read saved sort`, e);
     return null;
   }
 }
@@ -2261,7 +2339,7 @@ function saveSort2(key, dir) {
   try {
     localStorage.setItem(SORT_STORAGE_KEY2, `${key}:${dir}`);
   } catch (e) {
-    console.warn(`[${EXT_NAME2}] could not save sort`, e);
+    console.warn(`[${EXT_NAME3}] could not save sort`, e);
   }
 }
 var VHS_PATH_LOADERS = new Set([
@@ -2345,7 +2423,7 @@ async function fetchBasePaths() {
       throw new Error(data.error || "base paths fetch failed");
     resolved = data;
   } catch (e) {
-    console.warn(`[${EXT_NAME2}] /gallery_loader/base failed`, e);
+    console.warn(`[${EXT_NAME3}] /gallery_loader/base failed`, e);
     resolved = { base_path: "/", input_dir: "", output_dir: "", temp_dir: "" };
   }
   BASE_PATHS = resolved;
@@ -2390,10 +2468,10 @@ function widgetNamed(node, name) {
 function findUploadWidget(node) {
   if (!node?.widgets)
     return null;
-  for (const w2 of node.widgets) {
-    const flag = w2?.options?._origUploadFlag;
+  for (const w of node.widgets) {
+    const flag = w?.options?._origUploadFlag;
     if (flag)
-      return { w: w2, media: MEDIA_OF_FLAG[flag] };
+      return { w, media: MEDIA_OF_FLAG[flag] };
   }
   const core = CORE_LOADERS.get(node.comfyClass || "") ?? CORE_LOADERS.get(node.type || "");
   if (!core)
@@ -2425,7 +2503,7 @@ function wireOpeners(node, w, buttonLabel, opts) {
   });
   appendButtonWidget(node, buttonLabel, () => {
     openImagePicker(w, node, opts);
-  }, { logPrefix: EXT_NAME2 });
+  }, { logPrefix: EXT_NAME3 });
 }
 function enhanceUploadComboNode(node) {
   if (!node?.widgets)
@@ -2510,7 +2588,7 @@ function enhanceVHSPathNode(node) {
       mode: isDirectoryMode ? "directory" : "file",
       extensions: exts
     });
-  }, { logPrefix: EXT_NAME2 });
+  }, { logPrefix: EXT_NAME3 });
 }
 function isAbsPath(v) {
   return v.startsWith("/") || /^[A-Za-z]:[\\/]/.test(v);
@@ -2522,11 +2600,11 @@ function parseLoadImageValue(v) {
   const ann = s.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
   if (ann) {
     const rel = ann[1].replace(/\\/g, "/");
-    const idx2 = rel.lastIndexOf("/");
+    const idx = rel.lastIndexOf("/");
     return {
       type: ann[2],
-      subfolder: idx2 >= 0 ? rel.slice(0, idx2) : "",
-      name: idx2 >= 0 ? rel.slice(idx2 + 1) : rel
+      subfolder: idx >= 0 ? rel.slice(0, idx) : "",
+      name: idx >= 0 ? rel.slice(idx + 1) : rel
     };
   }
   const norm = s.replace(/\\/g, "/");
@@ -2699,6 +2777,7 @@ async function openImagePicker(widget, node, opts) {
       disposeBackGuard = null;
       disposeSafeViewSub?.();
       disposeSafeViewSub = null;
+      cancelScanPoll();
       revealSet.clear();
     }
   });
@@ -2716,7 +2795,13 @@ async function openImagePicker(widget, node, opts) {
     return sub ? `${root}/${sub}` : root;
   }
   function isHiddenCard(f, cfg) {
-    if (!isSensitive({ name: f.name, path: safeViewPath(f), tags: f.tags }, cfg))
+    const target = {
+      name: f.name,
+      path: safeViewPath(f),
+      tags: f.tags,
+      promptMatch: f.prompt_match
+    };
+    if (!isSensitive(target, cfg))
       return false;
     return !revealSet.has(fileType(f), fileSub(f), f.name);
   }
@@ -2818,7 +2903,42 @@ async function openImagePicker(widget, node, opts) {
   safeViewEl.addEventListener("click", () => {
     toggleSafeView();
   });
-  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], ...pinToggleEl ? [pinToggleEl] : [], ...pruneEl ? [pruneEl] : [], safeViewEl, sortEl, refreshEl, ...pinsEl ? [pinsEl] : []);
+  const scanPillEl = document.createElement("button");
+  scanPillEl.type = "button";
+  scanPillEl.className = "ip-control ip-scan-pill";
+  scanPillEl.title = "Files whose generation prompt has not been scanned yet — blurred until it is. Tap to refresh.";
+  scanPillEl.style.display = "none";
+  let scanPollTimer = null;
+  let scanPollsLeft = 0;
+  let scanPollLocation = null;
+  function cancelScanPoll() {
+    if (scanPollTimer !== null) {
+      clearTimeout(scanPollTimer);
+      scanPollTimer = null;
+    }
+  }
+  function renderScanPill(unscanned) {
+    cancelScanPoll();
+    if (unscanned <= 0) {
+      scanPillEl.style.display = "none";
+      scanPollsLeft = 0;
+      return;
+    }
+    scanPillEl.style.display = "";
+    scanPillEl.textContent = `\uD83D\uDD0D scanning ${unscanned}`;
+    if (scanPollsLeft > 0) {
+      scanPollsLeft -= 1;
+      scanPollTimer = setTimeout(() => {
+        scanPollTimer = null;
+        loadAndRender({ preserveScroll: true });
+      }, SCAN_POLL_MS);
+    }
+  }
+  scanPillEl.addEventListener("click", () => {
+    scanPollsLeft = SCAN_POLL_MAX;
+    loadAndRender({ preserveScroll: true });
+  });
+  modal.toolbarEl.append(crumbsEl, ...viewToggleEl ? [viewToggleEl] : [], ...pinToggleEl ? [pinToggleEl] : [], ...pruneEl ? [pruneEl] : [], safeViewEl, scanPillEl, sortEl, refreshEl, ...pinsEl ? [pinsEl] : []);
   let pinEntries = [];
   let pinKeys = new Set;
   function adoptPins(entries) {
@@ -2830,7 +2950,7 @@ async function openImagePicker(widget, node, opts) {
       await migrateLegacyPins();
       adoptPins(await fetchPins());
     } catch (e) {
-      console.warn(`[${EXT_NAME2}] pin list unavailable`, e);
+      console.warn(`[${EXT_NAME3}] pin list unavailable`, e);
       adoptPins([]);
     }
   }
@@ -2838,7 +2958,7 @@ async function openImagePicker(widget, node, opts) {
     try {
       adoptPins(await postPinDelta(op, item));
     } catch (e) {
-      console.warn(`[${EXT_NAME2}] pin ${op} failed`, e);
+      console.warn(`[${EXT_NAME3}] pin ${op} failed`, e);
       notify({
         severity: "warn",
         summary: op === "remove" ? "Pin not removed" : "Pin not saved",
@@ -3164,7 +3284,7 @@ async function openImagePicker(widget, node, opts) {
       data = await fetchMetadata(fileType(f), fileSub(f), f.name, state.absPath);
     } catch (e) {
       close();
-      console.error(`[${EXT_NAME2}] metadata read failed:`, e);
+      console.error(`[${EXT_NAME3}] metadata read failed:`, e);
       notify({
         severity: "error",
         summary: "Metadata read failed",
@@ -3238,7 +3358,7 @@ async function openImagePicker(widget, node, opts) {
         f.rating = confirmed;
       }
     }).catch((e) => {
-      warnRating(EXT_NAME2, e);
+      warnRating(EXT_NAME3, e);
       notify({
         severity: "warn",
         summary: "Rating not saved",
@@ -3346,7 +3466,16 @@ async function openImagePicker(widget, node, opts) {
       p.set("safe_kw", kw);
       p.set("safe_hide", "1");
     }
+    const promptKw = safePromptKeywords();
+    if (promptKw) {
+      p.set("safe_kw", promptKw);
+      p.set("safe_prompt", "1");
+    }
     return `${LIST_URL2}?${p.toString()}`;
+  }
+  function safePromptKeywords() {
+    const cfg = readSafeViewConfig();
+    return cfg.matchPrompt && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
   }
   function safeHideKeywords() {
     const cfg = readSafeViewConfig();
@@ -3379,24 +3508,30 @@ async function openImagePicker(widget, node, opts) {
   }
   let revealLocation = null;
   let lastSafeHideKeywords = safeHideKeywords();
+  let lastSafePromptKeywords = safePromptKeywords();
   function locationKey() {
     return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}:${isFlat() ? "flat" : "folder"}`;
   }
   disposeSafeViewSub = onSafeViewChange(() => {
     renderSafeViewToggle();
     const kw = safeHideKeywords();
-    if (kw !== lastSafeHideKeywords) {
+    if (kw !== lastSafeHideKeywords || safePromptKeywords() !== lastSafePromptKeywords) {
       loadAndRender({ preserveScroll: true });
       return;
     }
     renderGrid();
   });
-  async function loadAndRender(opts2) {
+  async function loadAndRender(opts) {
     lastSafeHideKeywords = safeHideKeywords();
+    lastSafePromptKeywords = safePromptKeywords();
     const here = locationKey();
     if (revealLocation !== null && revealLocation !== here)
       revealSet.clear();
     revealLocation = here;
+    if (scanPollLocation !== here) {
+      scanPollLocation = here;
+      scanPollsLeft = SCAN_POLL_MAX;
+    }
     renderTabs();
     renderCrumbs();
     renderViewToggle();
@@ -3408,6 +3543,7 @@ async function openImagePicker(widget, node, opts) {
     if (isPinned()) {
       await pinsDone;
       applyPinnedListing();
+      renderScanPill(0);
     } else {
       try {
         const r = await fetch(buildListingURL());
@@ -3418,6 +3554,7 @@ async function openImagePicker(widget, node, opts) {
           throw new Error(data.error || "listing failed");
         state.dirs = data.dirs || [];
         state.files = data.files || [];
+        renderScanPill(lastSafePromptKeywords ? Number(data.safe_unscanned) || 0 : 0);
         modal.setStatus(data.exists ? "" : "Directory not found.");
         if (data.truncated) {
           notify({
@@ -3427,17 +3564,18 @@ async function openImagePicker(widget, node, opts) {
           });
         }
       } catch (e) {
-        console.error(`[${EXT_NAME2}] list failed:`, e);
+        console.error(`[${EXT_NAME3}] list failed:`, e);
         modal.setStatus(`Error: ${e.message}`);
         state.dirs = [];
         state.files = [];
+        renderScanPill(0);
       }
       await pinsDone;
     }
     modal.setBusy(false);
     renderPins();
     renderGrid({
-      scrollTo: opts2?.preserveScroll ? undefined : scrollMemory.get(locationKey())
+      scrollTo: opts?.preserveScroll ? undefined : scrollMemory.get(locationKey())
     });
     viewStore.markPending(false);
   }
@@ -3471,9 +3609,9 @@ async function openImagePicker(widget, node, opts) {
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
-  function renderGrid(opts2) {
+  function renderGrid(opts) {
     const q = state.query;
-    const targetScrollTop = opts2?.scrollTo ?? scroller.current();
+    const targetScrollTop = opts?.scrollTo ?? scroller.current();
     gridEl.innerHTML = "";
     const svCfg = readSafeViewConfig();
     const safeKeyword = sensitiveKeyword(svCfg);
@@ -3666,12 +3804,12 @@ ${when}`;
       widget.inputEl.value = value;
     }
     try {
-      widget.callback?.call(widget, value, app2.canvas, node);
+      widget.callback?.call(widget, value, app3.canvas, node);
     } catch (e) {
-      console.warn(`[${EXT_NAME2}] widget callback threw`, e);
+      console.warn(`[${EXT_NAME3}] widget callback threw`, e);
     }
     node?.setDirtyCanvas?.(true, true);
-    app2.graph?.setDirtyCanvas?.(true, true);
+    app3.graph?.setDirtyCanvas?.(true, true);
   }
   loadAndRender();
   if (savedView.recovered) {
@@ -3783,6 +3921,7 @@ var PICKER_CSS = `
     border-color: #5a4a2a;
 }
 .ip-prune:hover { background: #3a3320; color: #ffd866; }
+.ip-scan-pill { white-space: nowrap; color: #c8b06a; border-color: #4a4230; }
 
 /* Metadata overlay (in-dialog — a nested modal shell would dismiss the picker). */
 .ip-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }
@@ -4033,21 +4172,22 @@ function enhanceNode(node) {
   enhanceVHSPathNode(node);
 }
 try {
-  app2.registerExtension({
+  app3.registerExtension({
     name: "comfy.gallery-loader.image-picker",
     settings: safeViewSettings(),
     async beforeRegisterNodeDef(_nodeType, nodeData) {
       try {
         defangNodeData(nodeData);
       } catch (e) {
-        console.warn(`[${EXT_NAME2}] defang failed for ${nodeData?.name}`, e);
+        console.warn(`[${EXT_NAME3}] defang failed for ${nodeData?.name}`, e);
       }
     },
     setup() {
       ensureStyleOnce(STYLE_ID4, PICKER_CSS);
       registerSafeViewHubToggle();
+      installScanWarm();
       debug("image-picker setup running");
-      const nodes = app2?.graph?._nodes;
+      const nodes = app3?.graph?._nodes;
       if (Array.isArray(nodes)) {
         for (const n of nodes)
           enhanceNode(n);
@@ -4061,7 +4201,7 @@ try {
     }
   });
 } catch (e) {
-  console.error(`[${EXT_NAME2}] image-picker.js: registerExtension threw`, e);
+  console.error(`[${EXT_NAME3}] image-picker.js: registerExtension threw`, e);
 }
 export {
   openImagePicker

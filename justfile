@@ -80,6 +80,24 @@ check-image-meta-drift:
         && echo "image_meta.py matches canonical" \
         || { echo "DRIFT: image_meta.py differs from comfyui-image-browser@main — run 'just sync-image-meta' (or land the fix upstream first)"; exit 1; }
 
+# Canonical home of Safe View's prompt-tier cache (vendored verbatim here). It is
+# a thin cache in front of image_meta.py, so it lives where that does — in
+# comfyui-image-browser — and travels the same direction.
+safeview-store-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-image-browser/main/safeview_store.py"
+
+# Re-sync the vendored safeview_store.py from its canonical home.
+[group: "vendored"]
+sync-safeview-store:
+    curl -fsSL {{safeview-store-upstream}} -o safeview_store.py
+    @echo "safeview_store.py synced from comfyui-image-browser@main"
+
+# Fail if the vendored safeview_store.py has drifted from the canonical copy.
+[group: "vendored"]
+check-safeview-store-drift:
+    @curl -fsSL {{safeview-store-upstream}} | diff -u - safeview_store.py \
+        && echo "safeview_store.py matches canonical" \
+        || { echo "DRIFT: safeview_store.py differs from comfyui-image-browser@main — run 'just sync-safeview-store' (or land the fix upstream first)"; exit 1; }
+
 ##########
 # Assets
 ##########

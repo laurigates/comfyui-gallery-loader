@@ -181,6 +181,12 @@ jobs:
             echo "::error::image_meta.py drifted from its canonical home (comfyui-image-browser). Run 'just sync-image-meta' — or land the fix upstream first."
             exit 1
           }
+      - name: Diff safeview_store.py against comfyui-image-browser@main
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/laurigates/comfyui-image-browser/main/safeview_store.py | diff -u - safeview_store.py || {
+            echo "::error::safeview_store.py drifted from its canonical home (comfyui-image-browser). Run 'just sync-safeview-store' — or land the fix upstream first."
+            exit 1
+          }
 
   security:
     name: Security scanning
