@@ -60,25 +60,31 @@ probe:
 # Vendored
 ############
 
-# Canonical home of the shared embedded-metadata reader (vendored verbatim
-# here). image_meta.py lives in comfyui-image-browser: that pack owns the
-# /metadata feature and its 1200-line attacker-shaped parser test suite, so the
-# direction is deliberately the reverse of xmp_meta.py / thumb_cache.py, which
-# this pack is canonical for. Each file still has exactly one home.
-image-meta-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-image-browser/main/image_meta.py"
+# image_meta.py is vendored verbatim from comfyui-image-browser at the commit in
+# scripts/vendored-pin. That pack owns the /metadata feature and its
+# attacker-shaped parser test suite, so the direction is deliberately the
+# reverse of xmp_meta.py / thumb_cache.py / pins_store.py, which this pack is
+# canonical for. Each file still has exactly one home.
+#
+# The check diffs against the PINNED commit, never against canonical main, so a
+# canonical merge cannot turn an unrelated PR here red (#92). The scheduled
+# "Vendored sync" workflow opens the PR that moves the pin; to move it by hand,
+# run `just bump-vendored`. Logic lives in scripts/vendored.sh.
 
-# Re-sync the vendored image_meta.py from its canonical home.
+# Move the pin to a canonical ref (default: main) and re-fetch image_meta.py.
+[group: "vendored"]
+bump-vendored ref="main":
+    scripts/vendored.sh bump {{ref}}
+
+# Restore the vendored image_meta.py from the pinned canonical commit.
 [group: "vendored"]
 sync-image-meta:
-    curl -fsSL {{image-meta-upstream}} -o image_meta.py
-    @echo "image_meta.py synced from comfyui-image-browser@main"
+    scripts/vendored.sh sync image_meta.py
 
-# Fail if the vendored image_meta.py has drifted from the canonical copy.
+# Fail if the vendored image_meta.py differs from the pinned canonical commit.
 [group: "vendored"]
 check-image-meta-drift:
-    @curl -fsSL {{image-meta-upstream}} | diff -u - image_meta.py \
-        && echo "image_meta.py matches canonical" \
-        || { echo "DRIFT: image_meta.py differs from comfyui-image-browser@main — run 'just sync-image-meta' (or land the fix upstream first)"; exit 1; }
+    @scripts/vendored.sh check image_meta.py
 
 ##########
 # Assets
