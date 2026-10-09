@@ -153,7 +153,10 @@ Three consequences, each pinned by a mutation:
   measured +40% on the metadata pass over a 2000-file directory, for nothing.
 
 `tests/mutations.json` pins all of this — `just mutation-check
-comfyui-gallery-loader` from the workspace root. There is a SECOND table,
+comfyui-gallery-loader` from the workspace root. The rating/keyword read cache
+(`read_meta_cached`, an LRU whose cap must exceed the most probes one listing
+can make) has its own table, `tests/mutations-xmp-cache.json`, which runs only
+the two pytest files that cover it. There is a SECOND table,
 `tests/mutations-e2e.json`, for the scroll wiring: its mutations are only
 observable in a real browser, so it rebuilds the bundle and runs the Playwright
 suite per mutation (`just mutation-check comfyui-gallery-loader

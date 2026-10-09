@@ -1,0 +1,35 @@
+{
+  "command": [
+    "bash",
+    "-c",
+    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_helpers.py"
+  ],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "XMP CACHE — overflow clears the whole cache again, so a full listing makes the next one cold",
+      "file": "xmp_meta.py",
+      "before": "        while len(_META_CACHE) >= _CACHE_MAX:\n            del _META_CACHE[next(iter(_META_CACHE))]",
+      "after": "        if len(_META_CACHE) >= _CACHE_MAX:\n            _META_CACHE.clear()"
+    },
+    {
+      "label": "XMP CACHE — a hit no longer refreshes the entry, so eviction is FIFO and a hot file is dropped first",
+      "file": "xmp_meta.py",
+      "before": "    val = _META_CACHE.pop(key, None)\n    if val is None:",
+      "after": "    val = _META_CACHE.get(key)\n    if val is None:"
+    },
+    {
+      "label": "XMP CACHE — the cap is back to FLAT_LIST_CAP, so one capped listing fills it exactly",
+      "file": "xmp_meta.py",
+      "before": "_CACHE_MAX = 25_000",
+      "after": "_CACHE_MAX = 5000"
+    },
+    {
+      "label": "CONTROL — cache comment text only; MUST be MISSED, or this table is lying",
+      "file": "xmp_meta.py",
+      "before": "# cold again. An entry is a few hundred bytes, so the cap costs a few megabytes.",
+      "after": "# cold again. Each entry is a few hundred bytes; the cap costs a few megabytes.",
+      "control": true
+    }
+  ]
+}
