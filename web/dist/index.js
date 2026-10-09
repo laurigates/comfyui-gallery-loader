@@ -2777,6 +2777,7 @@ async function openImagePicker(widget, node, opts) {
       disposeBackGuard = null;
       disposeSafeViewSub?.();
       disposeSafeViewSub = null;
+      scanPollClosed = true;
       cancelScanPoll();
       revealSet.clear();
     }
@@ -2911,6 +2912,7 @@ async function openImagePicker(widget, node, opts) {
   let scanPollTimer = null;
   let scanPollsLeft = 0;
   let scanPollLocation = null;
+  let scanPollClosed = false;
   function cancelScanPoll() {
     if (scanPollTimer !== null) {
       clearTimeout(scanPollTimer);
@@ -2926,7 +2928,7 @@ async function openImagePicker(widget, node, opts) {
     }
     scanPillEl.style.display = "";
     scanPillEl.textContent = `\uD83D\uDD0D scanning ${unscanned}`;
-    if (scanPollsLeft > 0) {
+    if (scanPollsLeft > 0 && !scanPollClosed) {
       scanPollsLeft -= 1;
       scanPollTimer = setTimeout(() => {
         scanPollTimer = null;

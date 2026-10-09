@@ -339,6 +339,47 @@ describe("image picker — the scanning pill", () => {
     expect(listCalls(calls).length).toBe(afterClose);
   });
 
+  it("stops when the picker closes WHILE a poll's listing is still in flight", async () => {
+    // cancelScanPoll() in onClose clears a PENDING timer, but a poll whose
+    // fetch is mid-flight has no timer to clear: its response lands after the
+    // close and, without a liveness check, renderScanPill arms a fresh timer
+    // against the detached grid — re-listing every 3 s until the budget runs
+    // out. The poll's fetch is held open here so the close lands inside it.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const calls = [];
+    stubSettings(TIER_ON);
+    const real = stubFetch({ "": { files: FILES, unscanned: 3 } }, calls);
+    await openPicker();
+    let release;
+    const held = new Promise((r) => {
+      release = r;
+    });
+    let holdNext = true;
+    let heldStarted = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        // `real` records the URL itself, so a held request is counted once,
+        // when it is released — after the close.
+        if (holdNext && String(url).includes("/gallery_loader/list")) {
+          holdNext = false;
+          heldStarted = true;
+          await held;
+        }
+        return real(url, init);
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(heldStarted).toBe(true); // the poll fired, and its fetch is in flight
+
+    closePicker();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    const afterRelease = listCalls(calls).length;
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(listCalls(calls).length).toBe(afterRelease);
+  });
+
   it("the poll is BOUNDED per location — a stalled sweep does not poll forever", async () => {
     // Re-arming the budget per LOAD rather than per location would make it
     // unbounded: each poll is a load, so it would top up what it just spent.

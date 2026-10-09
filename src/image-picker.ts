@@ -1191,7 +1191,11 @@ export async function openImagePicker(
       disposeSafeViewSub?.();
       disposeSafeViewSub = null;
       // Same rule again: the scan poll is a timer, and a timer that outlives
-      // the modal re-lists a dead grid every few seconds forever.
+      // the modal re-lists a dead grid every few seconds forever. The flag is
+      // what stops a poll whose fetch is still in flight: its response lands
+      // after this point, finds no timer to have been cancelled, and would
+      // otherwise arm a fresh one.
+      scanPollClosed = true;
       cancelScanPoll();
       // Reveals are per modal SESSION. Not clearing here would carry a reveal
       // into the next open of the picker, which is exactly the "someone else
@@ -1468,6 +1472,7 @@ export async function openImagePicker(
   let scanPollTimer: ReturnType<typeof setTimeout> | null = null;
   let scanPollsLeft = 0;
   let scanPollLocation: string | null = null;
+  let scanPollClosed = false;
 
   function cancelScanPoll(): void {
     if (scanPollTimer !== null) {
@@ -1486,7 +1491,7 @@ export async function openImagePicker(
     }
     scanPillEl.style.display = "";
     scanPillEl.textContent = `🔍 scanning ${unscanned}`;
-    if (scanPollsLeft > 0) {
+    if (scanPollsLeft > 0 && !scanPollClosed) {
       scanPollsLeft -= 1;
       scanPollTimer = setTimeout(() => {
         scanPollTimer = null;

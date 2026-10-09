@@ -757,6 +757,12 @@
       "after": "      // Reveals are per modal SESSION."
     },
     {
+      "label": "PILL — a poll in flight at close re-arms the timer (a dead grid re-lists until the budget runs out)",
+      "file": "src/image-picker.ts",
+      "before": "    if (scanPollsLeft > 0 && !scanPollClosed) {",
+      "after": "    if (scanPollsLeft > 0) {"
+    },
+    {
       "label": "PILL \u2014 the poll budget is re-armed per LOAD, so a stalled sweep polls forever",
       "file": "src/image-picker.ts",
       "before": "    if (scanPollLocation !== here) {",
