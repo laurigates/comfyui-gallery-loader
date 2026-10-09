@@ -1,9 +1,11 @@
 """Registry-tarball hygiene guard.
 
 The Comfy Registry security scan flags a node version on ANY finding —
-even info severity — and a Flagged version is not served to installers
-(see Comfy-Org/registry-backend#180, Comfy-Org/ComfyUI-Manager#2927).
-Every shipped file is scan surface.
+even info severity (see Comfy-Org/registry-backend#180,
+Comfy-Org/ComfyUI-Manager#2927). A Flagged version still installs but drops
+out of the registry's Active-only listing; a Banned one is skipped by
+installs (laurigates/comfyui-image-browser#111). Every shipped file is scan
+surface.
 
 comfy-cli builds node.zip as: git-tracked files - .comfyignore matches,
 with [tool.comfy] includes force-kept (see comfy_cli/file_utils.py
