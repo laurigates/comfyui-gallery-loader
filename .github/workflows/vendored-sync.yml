@@ -1,0 +1,96 @@
+name: Vendored sync
+
+# Moves the vendored-module pin (scripts/vendored-pin) to the canonical repo's
+# main and opens -- or refreshes -- one PR when that changes a vendored file.
+#
+# CI's "Vendored modules match canonical" job diffs against the PIN, so a
+# canonical merge never turns an unrelated PR here red
+# (laurigates/comfyui-gallery-loader#92). Nothing in a PR would notice canonical
+# moving any more, so this workflow does: daily, or on demand, in a PR whose
+# only job is the sync. Merging that PR is the deliberate step that takes the
+# canonical change; until then every PR here is judged against the old pin.
+#
+# The PR is opened with the release-please App token rather than GITHUB_TOKEN:
+# a PR created with GITHUB_TOKEN does not trigger the CI workflow, so the sync
+# would sit with no checks at all.
+
+on:
+  schedule:
+    - cron: "37 6 * * *" # daily 06:37 UTC
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Canonical ref to pin (branch, tag or commit SHA)"
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendored-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Bump the vendored-module pin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Move the pin and re-fetch the vendored files
+        id: bump
+        env:
+          TARGET_REF: ${{ inputs.ref || 'main' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          old=$(tr -d '[:space:]' < scripts/vendored-pin)
+          scripts/vendored.sh bump "$TARGET_REF"
+          new=$(tr -d '[:space:]' < scripts/vendored-pin)
+          mapfile -t vendored < <(scripts/vendored.sh files)
+          mapfile -t changed < <(git diff --name-only -- "${vendored[@]}")
+          if [ "${#changed[@]}" -eq 0 ]; then
+            # Canonical moved without touching a vendored file: keep the old
+            # pin rather than open a PR that only churns the SHA.
+            git checkout -- scripts/vendored-pin
+            echo "No vendored file differs at ${new:0:12}; the pin stays at ${old:0:12}."
+            echo "changed=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          paths=$(printf '%s,' scripts/vendored-pin "${changed[@]}")
+          {
+            echo "changed=${changed[*]}"
+            echo "paths=${paths%,}"
+            echo "old=${old}"
+            echo "new=${new}"
+            echo "short=${new:0:12}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or refresh the sync PR
+        if: steps.bump.outputs.changed != ''
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: chore/vendored-sync
+          delete-branch: true
+          add-paths: ${{ steps.bump.outputs.paths }}
+          commit-message: "chore(vendored): sync from comfyui-image-browser@${{ steps.bump.outputs.short }}"
+          title: "chore(vendored): sync from comfyui-image-browser@${{ steps.bump.outputs.short }}"
+          body: |
+            Moves `scripts/vendored-pin` to laurigates/comfyui-image-browser@${{ steps.bump.outputs.new }} and re-fetches the vendored files that changed: `${{ steps.bump.outputs.changed }}`.
+
+            Canonical changes since the previous pin: https://github.com/laurigates/comfyui-image-browser/compare/${{ steps.bump.outputs.old }}...${{ steps.bump.outputs.new }}
+
+            Opened by the `Vendored sync` workflow. Review it as the canonical change landing here: the vendored code ships in this pack. CI checks the vendored copies against the new pin.
+          labels: chore
+          assignees: laurigates

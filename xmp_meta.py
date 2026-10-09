@@ -1151,18 +1151,26 @@ def write_tags(
 # (the common "refresh after rating") doesn't re-read every file. Rating and
 # keywords share one entry because they come from one read — caching them
 # separately would double the file opens the cache exists to avoid.
+#
+# Least-recently-used, on a plain dict's insertion order: a hit moves the entry
+# to the end, an overflow drops the front. The cap must exceed the most probes
+# one listing can make — the listing cap times the Safe View top-up factor —
+# so a listing can never evict its own entries; each pack that vendors this file
+# pins that against its own constants with a tripwire test. Before this the cap
+# EQUALLED the flat-listing cap and overflow cleared everything, so one full
+# flat listing filled the cache and the next insert made the following listing
+# cold again. An entry is a few hundred bytes, so the cap costs a few megabytes.
 _META_CACHE: dict[tuple[str, int, int], tuple[int, list[str]]] = {}
-_CACHE_MAX = 5000
+_CACHE_MAX = 25_000
 
 
 def read_meta_cached(path: str, st: os.stat_result) -> tuple[int, list[str]]:
     key = (path, st.st_mtime_ns, st.st_size)
-    val = _META_CACHE.get(key)
-    if val is not None:
-        return val
-    val = read_meta(path, head_only=True)
-    if len(_META_CACHE) >= _CACHE_MAX:
-        _META_CACHE.clear()
+    val = _META_CACHE.pop(key, None)
+    if val is None:
+        val = read_meta(path, head_only=True)
+        while len(_META_CACHE) >= _CACHE_MAX:
+            del _META_CACHE[next(iter(_META_CACHE))]
     _META_CACHE[key] = val
     return val
 

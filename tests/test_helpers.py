@@ -462,3 +462,15 @@ class TestListCapsAndClamps(_ListEndpointBase):
         assert resp._body["files"] == []
         # Fell back to the folder listing, so dirs are still present.
         assert [d["name"] for d in resp._body["dirs"]] == ["sub"]
+
+
+def test_xmp_cache_holds_the_largest_listing_the_endpoints_can_probe():
+    # Tripwire: a listing probes at most cap * PROBE_BUDGET_FACTOR files (the
+    # Safe View tag-tier top-up), and every probe is an xmp_meta cache insert.
+    # A cache smaller than that lets one listing evict its own entries, so the
+    # next identical listing is cold again (comfyui-image-browser#42). Raise
+    # xmp_meta._CACHE_MAX when a cap or the factor grows.
+    import xmp_meta
+
+    worst = max(gallery_loader.FLAT_LIST_CAP, gallery_loader.DIR_LIST_CAP)
+    assert worst * gallery_loader.PROBE_BUDGET_FACTOR < xmp_meta._CACHE_MAX
