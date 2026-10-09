@@ -1597,21 +1597,21 @@ function parseAnnotated(value) {
   const m = v.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
   if (m) {
     const rel = m[1].replace(/\\/g, "/");
-    const idx2 = rel.lastIndexOf("/");
+    const idx = rel.lastIndexOf("/");
     return {
       type: m[2],
-      subfolder: idx2 >= 0 ? rel.slice(0, idx2) : "",
-      name: idx2 >= 0 ? rel.slice(idx2 + 1) : rel,
+      subfolder: idx >= 0 ? rel.slice(0, idx) : "",
+      name: idx >= 0 ? rel.slice(idx + 1) : rel,
       isAbs: false
     };
   }
   if (v.startsWith("/") || /^[A-Za-z]:[\\/]/.test(v)) {
     const norm = v.replace(/\\/g, "/");
-    const idx2 = norm.lastIndexOf("/");
+    const idx = norm.lastIndexOf("/");
     return {
       type: "path",
-      subfolder: idx2 >= 0 ? norm.slice(0, idx2) : "",
-      name: idx2 >= 0 ? norm.slice(idx2 + 1) : norm,
+      subfolder: idx >= 0 ? norm.slice(0, idx) : "",
+      name: idx >= 0 ? norm.slice(idx + 1) : norm,
       isAbs: true
     };
   }
@@ -1818,19 +1818,19 @@ function attachGallery(node) {
     const mark = e.target.closest(".gl-mark-sensitive");
     if (mark) {
       e.stopPropagation();
-      const card2 = mark.closest(".gl-card");
-      const f = card2 ? state.files.find((x) => x.name === card2.dataset.name) : undefined;
+      const card = mark.closest(".gl-card");
+      const f = card ? state.files.find((x) => x.name === card.dataset.name) : undefined;
       if (f)
         toggleSensitiveTag(f, mark);
       return;
     }
     const star = e.target.closest(".gl-star");
     if (star) {
-      const card2 = star.closest(".gl-card");
+      const card = star.closest(".gl-card");
       const row = star.parentElement;
-      if (card2 && row) {
+      if (card && row) {
         const cur = Number(row.dataset.rating || "0");
-        setStarRating(card2.dataset.name, row, nextRating(cur, Number(star.dataset.val)));
+        setStarRating(card.dataset.name, row, nextRating(cur, Number(star.dataset.val)));
       }
       return;
     }
@@ -2390,10 +2390,10 @@ function widgetNamed(node, name) {
 function findUploadWidget(node) {
   if (!node?.widgets)
     return null;
-  for (const w2 of node.widgets) {
-    const flag = w2?.options?._origUploadFlag;
+  for (const w of node.widgets) {
+    const flag = w?.options?._origUploadFlag;
     if (flag)
-      return { w: w2, media: MEDIA_OF_FLAG[flag] };
+      return { w, media: MEDIA_OF_FLAG[flag] };
   }
   const core = CORE_LOADERS.get(node.comfyClass || "") ?? CORE_LOADERS.get(node.type || "");
   if (!core)
@@ -2522,11 +2522,11 @@ function parseLoadImageValue(v) {
   const ann = s.match(/^(.*?)\s*\[(input|output|temp)\]\s*$/);
   if (ann) {
     const rel = ann[1].replace(/\\/g, "/");
-    const idx2 = rel.lastIndexOf("/");
+    const idx = rel.lastIndexOf("/");
     return {
       type: ann[2],
-      subfolder: idx2 >= 0 ? rel.slice(0, idx2) : "",
-      name: idx2 >= 0 ? rel.slice(idx2 + 1) : rel
+      subfolder: idx >= 0 ? rel.slice(0, idx) : "",
+      name: idx >= 0 ? rel.slice(idx + 1) : rel
     };
   }
   const norm = s.replace(/\\/g, "/");
@@ -3391,7 +3391,7 @@ async function openImagePicker(widget, node, opts) {
     }
     renderGrid();
   });
-  async function loadAndRender(opts2) {
+  async function loadAndRender(opts) {
     lastSafeHideKeywords = safeHideKeywords();
     const here = locationKey();
     if (revealLocation !== null && revealLocation !== here)
@@ -3411,11 +3411,11 @@ async function openImagePicker(widget, node, opts) {
     } else {
       try {
         const r = await fetch(buildListingURL());
+        const data = await r.json().catch(() => null);
         if (!r.ok)
-          throw new Error(`HTTP ${r.status}`);
-        const data = await r.json();
-        if (!data.ok)
-          throw new Error(data.error || "listing failed");
+          throw new Error(data?.error || `HTTP ${r.status}`);
+        if (!data?.ok)
+          throw new Error(data?.error || "listing failed");
         state.dirs = data.dirs || [];
         state.files = data.files || [];
         modal.setStatus(data.exists ? "" : "Directory not found.");
@@ -3437,7 +3437,7 @@ async function openImagePicker(widget, node, opts) {
     modal.setBusy(false);
     renderPins();
     renderGrid({
-      scrollTo: opts2?.preserveScroll ? undefined : scrollMemory.get(locationKey())
+      scrollTo: opts?.preserveScroll ? undefined : scrollMemory.get(locationKey())
     });
     viewStore.markPending(false);
   }
@@ -3471,9 +3471,9 @@ async function openImagePicker(widget, node, opts) {
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
-  function renderGrid(opts2) {
+  function renderGrid(opts) {
     const q = state.query;
-    const targetScrollTop = opts2?.scrollTo ?? scroller.current();
+    const targetScrollTop = opts?.scrollTo ?? scroller.current();
     gridEl.innerHTML = "";
     const svCfg = readSafeViewConfig();
     const safeKeyword = sensitiveKeyword(svCfg);
