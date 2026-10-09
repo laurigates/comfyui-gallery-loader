@@ -73,6 +73,7 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | `.node-version` | `26`. The Node the **jsdom** suite runs under, in CI and locally (the browser tier is excluded — see the `ci.yml` row). Node put its built-in `localStorage` accessor on `globalThis` unflagged in **v25**, and it shadows jsdom's Storage (vitest copies jsdom's globals across only where absent), so the runtime decides which `Storage` implementation `tests/js/` exercises. Measured with `setupFiles` removed: 24.19.0 green on jsdom's own Storage; 25.0.0 and 26.5.0 red with `TypeError: Cannot read properties of undefined (reading 'clear')`. `comfyui-image-browser` pins the same file to the same value. |
 | `.pre-commit-config.yaml` | Pre-commit hooks: ruff, biome (2.4.15), gitleaks, file hygiene. |
 | `biome.json` | Biome (TS/JSON) lint + format config. |
+| `tests/mutations-read-reach.json` | Read-reach mutation table (issue #121): `just mutation-check comfyui-gallery-loader tests/mutations-read-reach.json`. Scoped to `tests/test_read_reach.py` + `tests/js/list-refusal.test.js`; its CONTROL is declared, so a healthy run exits 0. |
 | `tests/mutations.json` / `tests/mutations-e2e.json` | Mutation tables driving `just mutation-check comfyui-gallery-loader [tests/mutations-e2e.json]` from the workspace root. Two files because the tiers differ: the first runs vitest+pytest, the second rebuilds the bundle and runs the **browser** suite, because the scroll wiring is not observable anywhere else. Each carries a deliberate **CONTROL** mutation (a comment edit) the suite must MISS — a harness reporting everything as CAUGHT is indistinguishable from a broken one — so a healthy run exits **1**. Read the per-mutation lines, not the exit code. |
 | `tests/` | pytest suite for the Python backend + Vitest suite (`tests/js/`) for the kit's pure helpers. **No layout engine** — see `tests/e2e/` for the half of the picker's behaviour this suite structurally cannot see. |
 | `tests/conftest.py` | The stub layer that makes endpoint-level pytest possible at all: `web.json_response` → `_stub_json_response`, and `web.Response` / `web.FileResponse` → `_stub_response` / `_stub_file_response`. Without the latter two the non-JSON handlers hand back MagicMocks, so `/thumb`'s ETag/304 logic and `/file`'s whitelist have nothing assertable. `FakeGetRequest` (exposed as the `get_request` fixture) carries `.headers` as well as `.rel_url.query` — the `_FakeGetRequest` in `test_helpers.py` does not, and a conditional-request test written against that one silently takes the unconditional branch. |
@@ -169,20 +170,30 @@ the CONTROL correctly MISSED, so a healthy run exits 1).
 `/extensions/comfyui-gallery-loader/js/image-picker.js`. Renaming
 the pack directory breaks every fetch the frontend makes. Don't.
 
-### Arbitrary-path endpoints are extension-whitelisted
+### Absolute-path reads: inside ComfyUI's directories, and extension-whitelisted
 
-`/gallery_loader/thumb` and `/gallery_loader/file` accept an absolute
-`path` query parameter. They both enforce an extension whitelist
-(images for `thumb`, images + common video formats for `file`). When
-adding new file types, widen the whitelist explicitly — never read
-arbitrary paths without the extension gate.
+`/list?type=path`, `/thumb?path=`, `/metadata?path=` and `/file` accept an
+absolute path, and so does the `GalleryLoadImage` node. Two gates apply, and
+neither replaces the other:
+
+- **Reach.** The path must lie inside `_read_roots()`: `base_path`,
+  input/output/temp/user, and every `folder_paths.folder_names_and_paths`
+  entry. Check it before any stat. A new read route that takes a path calls
+  `_within_read_roots` first. Widening is done on the server's filesystem
+  (`extra_model_paths.yaml`, or a symlink inside the tree). Never widen it
+  through a ComfyUI setting, which core's `POST /settings/{id}` lets any
+  caller write, and never through `os.environ`, a scanner tripwire. ADR-0004's
+  2026-10 amendment covers this, and `tests/test_read_reach.py` pins it.
+- **Kind.** The extension whitelist (images for `thumb`/`metadata`, images and
+  common video formats for `file`). When adding new file types, widen the
+  whitelist explicitly.
 
 ### READS reach further than WRITES, and the two resolvers are separate
 
 `_resolve_listing_base` serves the READ side (`/list`, `/thumb`,
 `/metadata`, pin resolution). It accepts `type=path` deliberately — the
 VHS path browser exists to reach files that are not under
-input/output/temp — and it has **no realpath gate**, because
+input/output/temp, though only inside `_read_roots()` (above) — and it has **no realpath gate**, because
 `output/renders -> /mnt/nas/renders` is an ordinary setup and refusing
 to list it would break the pack for anyone keeping outputs on another
 volume.
@@ -708,9 +719,9 @@ See `RELEASE-CHECKLIST.md` for the full playbook. High level:
 
 ## Things not to do
 
-- **Don't read arbitrary paths without the extension whitelist.** The
-  `/thumb` and `/file` endpoints are the security perimeter; widen
-  the allowed extensions explicitly.
+- **Don't read an absolute path without both gates**: `_within_read_roots`
+  first, then the extension whitelist. Widen the allowed extensions
+  explicitly, and widen the reach only on the server's filesystem.
 - **Don't break the value contract** for the Input source (bare
   relative form). It's how existing workflows serialize.
 - **Don't add a Python dependency.** Backend libs must be the ones

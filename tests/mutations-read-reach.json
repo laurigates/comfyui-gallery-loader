@@ -1,0 +1,72 @@
+{
+  "_comment": [
+    "Read-reach mutation table (issue #121) — run it from the workspace root:",
+    "  just mutation-check comfyui-gallery-loader tests/mutations-read-reach.json",
+    "Scoped to the two suites that pin the reach, so CAUGHT means one of THEM",
+    "caught it; exit-code reporting names no individual test.",
+    "The last entry is a CONTROL that MUST be MISSED."
+  ],
+  "command": [
+    "bash",
+    "-c",
+    "uv run pytest -q -p no:cacheprovider tests/test_read_reach.py && bunx vitest run tests/js/list-refusal.test.js"
+  ],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "/list?type=path no longer checks the reach",
+      "file": "gallery_loader.py",
+      "before": "        if not _within_read_roots(target):\n            return None, READ_REACH_REFUSAL\n        return target, \"\"\n    return None, f\"unknown type: {type_name}\"",
+      "after": "        return target, \"\"\n    return None, f\"unknown type: {type_name}\""
+    },
+    {
+      "label": "/file streams any absolute path again",
+      "file": "gallery_loader.py",
+      "before": "    if not _within_read_roots(path):\n        return web.Response(status=403)\n    if not os.path.isfile(path):\n        return web.Response(status=404)",
+      "after": "    if not os.path.isfile(path):\n        return web.Response(status=404)"
+    },
+    {
+      "label": "/thumb and /metadata ?path= no longer check the reach",
+      "file": "gallery_loader.py",
+      "before": "    if not _within_read_roots(path):\n        return None, READ_REACH_REFUSAL\n    return path, \"\"",
+      "after": "    return path, \"\""
+    },
+    {
+      "label": "the node loads any path /prompt names",
+      "file": "gallery_loader.py",
+      "before": "    if not _within_read_roots(path):\n        raise ValueError(f\"Gallery Load Image: {READ_REACH_REFUSAL}\")",
+      "after": "    if False:\n        raise ValueError(f\"Gallery Load Image: {READ_REACH_REFUSAL}\")"
+    },
+    {
+      "label": "containment becomes a string-prefix test (/x/comfy-private passes as /x/comfy)",
+      "file": "gallery_loader.py",
+      "before": "            if os.path.commonpath([target, root]) == root:",
+      "after": "            if target.startswith(root):"
+    },
+    {
+      "label": "a relative folder_paths entry is admitted (resolves against the server cwd)",
+      "file": "gallery_loader.py",
+      "before": "    return [os.path.abspath(c) for c in candidates if isinstance(c, str) and os.path.isabs(c)]",
+      "after": "    return [os.path.abspath(c) for c in candidates if isinstance(c, str) and c]"
+    },
+    {
+      "label": "registered model folders are dropped from the reach",
+      "file": "gallery_loader.py",
+      "before": "                candidates.extend(entry[0])",
+      "after": "                pass"
+    },
+    {
+      "label": "the picker reports the status code instead of the backend's reason",
+      "file": "src/image-picker.ts",
+      "before": "        if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);",
+      "after": "        if (!r.ok) throw new Error(`HTTP ${r.status}`);"
+    },
+    {
+      "label": "CONTROL: docstring prose no test can see",
+      "file": "gallery_loader.py",
+      "before": "    \"\"\"True when ``path`` lies lexically inside one of ``_read_roots()``.",
+      "after": "    \"\"\"True when ``path`` sits lexically inside one of ``_read_roots()``.",
+      "control": true
+    }
+  ]
+}

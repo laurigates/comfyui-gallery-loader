@@ -126,10 +126,12 @@ def test_resolve_listing_base_requires_path_for_path_type():
     assert "missing path" in err
 
 
-def test_resolve_listing_base_normalizes_path_type():
-    base, err = gallery_loader._resolve_listing_base("path", "", "/tmp/../tmp/x")
+def test_resolve_listing_base_normalizes_path_type(tmp_path):
+    base, err = gallery_loader._resolve_listing_base(
+        "path", "", f"{tmp_path}/../{tmp_path.name}/x"
+    )
     assert err == ""
-    assert base == "/tmp/x"
+    assert base == str(tmp_path / "x")
 
 
 # ---------- _validate_rating_request --------------------------------
