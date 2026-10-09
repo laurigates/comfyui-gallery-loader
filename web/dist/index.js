@@ -2577,7 +2577,7 @@ function imageThumbURLAbs(absDir, f) {
   const full = joinAbs(absDir, f.name);
   return `/gallery_loader/thumb?path=${encodeURIComponent(full)}&v=${encodeURIComponent(thumbVersion(f))}`;
 }
-function videoSrcURL(type, subfolder, name, absDir) {
+function mediaSrcURL(type, subfolder, name, absDir) {
   if (type === "path") {
     const full = joinAbs(absDir || "", name);
     return `${FILE_URL}?path=${encodeURIComponent(full)}`;
@@ -2699,6 +2699,7 @@ async function openImagePicker(widget, node, opts) {
       disposeBackGuard = null;
       disposeSafeViewSub?.();
       disposeSafeViewSub = null;
+      stopPreview();
       revealSet.clear();
     }
   });
@@ -3063,9 +3064,79 @@ async function openImagePicker(widget, node, opts) {
       return;
     toggleSensitiveTag(f, btn);
   });
+  let previewEl = null;
+  let previewSrc = null;
+  function previewPlayer() {
+    if (previewEl)
+      return previewEl;
+    const el = document.createElement("audio");
+    el.preload = "none";
+    el.hidden = true;
+    el.addEventListener("ended", () => {
+      previewSrc = null;
+      syncPreviewButtons();
+    });
+    modal.dialog.appendChild(el);
+    previewEl = el;
+    return el;
+  }
+  function stopPreview() {
+    previewSrc = null;
+    if (previewEl) {
+      previewEl.pause();
+      previewEl.removeAttribute("src");
+      previewEl.load();
+    }
+    syncPreviewButtons();
+  }
+  function startPreview(src) {
+    const el = previewPlayer();
+    el.pause();
+    el.src = src;
+    previewSrc = src;
+    syncPreviewButtons();
+    Promise.resolve(el.play()).catch((err) => {
+      if (previewSrc !== src)
+        return;
+      previewSrc = null;
+      syncPreviewButtons();
+      notify({
+        severity: "warn",
+        summary: "Can't preview that file",
+        detail: err instanceof Error && err.message ? err.message : "The browser could not play it."
+      });
+    });
+  }
+  function syncPreviewButtons() {
+    let shown = false;
+    for (const b of gridEl.querySelectorAll(".ip-play")) {
+      const on = previewSrc !== null && b.dataset.src === previewSrc;
+      if (on)
+        shown = true;
+      b.classList.toggle("is-playing", on);
+      b.setAttribute("aria-pressed", String(on));
+      b.textContent = on ? "■" : "▶";
+      b.title = on ? "Stop preview" : "Preview";
+    }
+    if (previewSrc !== null && !shown)
+      stopPreview();
+  }
+  gridEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".ip-play");
+    if (!btn)
+      return;
+    e.stopPropagation();
+    const src = btn.dataset.src;
+    if (!src)
+      return;
+    if (previewSrc === src)
+      stopPreview();
+    else
+      startPreview(src);
+  });
   gridEl.addEventListener("click", (e) => {
     const target = e.target;
-    if (target.closest(".ip-star") || target.closest(".ip-pin-file") || target.closest(".ip-mark-sensitive"))
+    if (target.closest(".ip-star") || target.closest(".ip-pin-file") || target.closest(".ip-mark-sensitive") || target.closest(".ip-play"))
       return;
     const card = target.closest(".ip-card");
     if (!card)
@@ -3452,10 +3523,10 @@ async function openImagePicker(widget, node, opts) {
         return { kind: "img", src: imageThumbURLAbs(state.absPath, f) };
       }
       if (VIDEO_EXTS.has(ext)) {
-        return { kind: "video", src: videoSrcURL("path", "", f.name, state.absPath) };
+        return { kind: "video", src: mediaSrcURL("path", "", f.name, state.absPath) };
       }
       if (AUDIO_EXTS.has(ext)) {
-        return { kind: "audio" };
+        return { kind: "audio", src: mediaSrcURL("path", "", f.name, state.absPath) };
       }
       return { kind: "icon", text: "\uD83D\uDCC4" };
     }
@@ -3464,10 +3535,10 @@ async function openImagePicker(widget, node, opts) {
       return { kind: "img", src: imageThumbURL(type, sub, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
-      return { kind: "video", src: videoSrcURL(type, sub, f.name) };
+      return { kind: "video", src: mediaSrcURL(type, sub, f.name) };
     }
     if (AUDIO_EXTS.has(ext)) {
-      return { kind: "audio" };
+      return { kind: "audio", src: mediaSrcURL(type, sub, f.name) };
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
@@ -3561,6 +3632,7 @@ ${when}`;
       const pinned = isFilePinned(f);
       const pinBtn = mode !== "directory" && SANDBOXED_TYPES.includes(fileType(f)) ? `<button type="button" class="ip-pin-file${pinned ? " is-pinned" : ""}" aria-pressed="${pinned}" title="${pinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
       const infoBtn = mode !== "directory" && !missing && IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>` : "";
+      const playBtn = mode !== "directory" && t.kind === "audio" && t.src ? `<button type="button" class="ip-play" data-src="${escapeHTML(t.src)}" aria-pressed="false" title="Preview">▶</button>` : "";
       const markBtn = mode !== "directory" && !missing && writable && safeKeyword ? markSensitiveHTML("ip", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
       const subLabel = pinnedView ? (() => {
         const ft = fileType(f);
@@ -3570,7 +3642,7 @@ ${when}`;
       })() : flat ? f.subpath ? `<button type="button" class="ip-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ip-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
                 ${subLabel}
-                <div class="ip-thumb">${thumbInner}${infoBtn}${pinBtn}${markBtn}</div>
+                <div class="ip-thumb">${thumbInner}${infoBtn}${playBtn}${pinBtn}${markBtn}</div>
                 <div class="ip-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
@@ -3603,6 +3675,7 @@ ${when}`;
       useFolderEl.textContent = state.type === "path" ? `Use ${shortenPath(state.absPath)}` : `Use ${state.type}${state.subfolder ? `/${state.subfolder}` : ""}`;
     }
     setCount(visible, state.files.length);
+    syncPreviewButtons();
     let target = targetScrollTop;
     if (!state.didInitialScroll) {
       state.didInitialScroll = true;
@@ -3736,6 +3809,18 @@ var PICKER_CSS = `
     font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit;
 }
 .ip-info:hover { background: #2f3a52; color: #9ec6ff; }
+/* ▶ audio preview. Takes ⓘ's top-right corner: ⓘ is image-only, so the two
+   never share a card. Plain values only — tests assert the corner through
+   getComputedStyle, and jsdom drops min()/calc(). */
+.ip-play {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #b8b8c0;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.ip-play:hover { background: #2f3a52; color: #9ec6ff; }
+.ip-play.is-playing { background: #2f3a52; border-color: #4a6a9a; color: #9ec6ff; }
 /* \uD83D\uDCCC file-pin toggle, mirroring ⓘ in the thumbnail's other corner. */
 .ip-pin-file {
     position: absolute; top: 4px; left: 4px;

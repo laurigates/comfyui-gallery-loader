@@ -78,7 +78,7 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | `tests/` | pytest suite for the Python backend + Vitest suite (`tests/js/`) for the kit's pure helpers. **No layout engine** — see `tests/e2e/` for the half of the picker's behaviour this suite structurally cannot see. |
 | `tests/conftest.py` | The stub layer that makes endpoint-level pytest possible at all: `web.json_response` → `_stub_json_response`, and `web.Response` / `web.FileResponse` → `_stub_response` / `_stub_file_response`. Without the latter two the non-JSON handlers hand back MagicMocks, so `/thumb`'s ETag/304 logic and `/file`'s whitelist have nothing assertable. `FakeGetRequest` (exposed as the `get_request` fixture) carries `.headers` as well as `.rel_url.query` — the `_FakeGetRequest` in `test_helpers.py` does not, and a conditional-request test written against that one silently takes the unconditional branch. |
 | `tests/test_endpoints.py` | `/thumb`, `/file`, `/base` at the handler level — status ladder, extension whitelist, and the conditional-request contract (ETag stable, `If-None-Match` → 304 with no body but WITH the cache headers, ETag moves on mtime **or** size). Every rejection is paired with the acceptance of a file differing only in the thing under test, so none of it passes against a handler wired to refuse everything. |
-| `tests/e2e/` | **Browser suite** — Playwright driving real Chromium at a 390×844 phone viewport (`bun run test:e2e`, `just test-e2e`). It exists because the jsdom suite **cannot fail** for anything about scrolling: jsdom performs no layout, so it accepts `scrollTop = 500` on a zero-height scroller and reads it back verbatim — detached or not. A real engine **clamps** the assignment to `scrollHeight - clientHeight` at the instant of the write, and answers **0** from a detached element (the state the kit's teardown leaves the dialog in before `onClose` runs). `server.mjs` is a stdlib-only stub ComfyUI serving the **built** `web/dist/index.js` at its real extension URL plus `/gallery_loader/{base,list,thumb,file,pins}` — real PNG bytes, because a 404 thumb changes the layout under test; listing size is derived from the folder name (`bulk-400` holds 400 files) so the server stays stateless. `fixture.html` opens the picker through the bundle's exported `openImagePicker()` with a stub widget+node. `harness.js` holds the drivers, `probe.js` the `scrollTop`-setter spy that separates "clamped at assignment" from "moved afterwards" (both PORTS of `comfyui-image-browser`'s, which is where they were written). **Navigation goes through `tapWithoutScrolling`**, never Playwright's pointer: Playwright scrolls a target into view first, and folder / `..` cards sit at the TOP of the grid, so at a deep offset the harness moves the scroller to ~0 before `rememberScroll()` runs — measured here on the first run, five tests failing with a remembered 0 against a parked 743. The two gesture tests throttle the renderer (`Emulation.setCPUThrottlingRate`) so the ~200 ms restore window cannot close before an out-of-process CDP keypress arrives; do not replace that with a sleep or a retry, which hides the race instead of removing it. **Chromium-only**: no WebKit exists here, so iOS **momentum scrolling is NOT covered** by any test. |
+| `tests/e2e/` | **Browser suite** — Playwright driving real Chromium at a 390×844 phone viewport (`bun run test:e2e`, `just test-e2e`). It exists because the jsdom suite **cannot fail** for anything about scrolling: jsdom performs no layout, so it accepts `scrollTop = 500` on a zero-height scroller and reads it back verbatim — detached or not. A real engine **clamps** the assignment to `scrollHeight - clientHeight` at the instant of the write, and answers **0** from a detached element (the state the kit's teardown leaves the dialog in before `onClose` runs). `server.mjs` is a stdlib-only stub ComfyUI serving the **built** `web/dist/index.js` at its real extension URL plus `/gallery_loader/{base,list,thumb,file,pins}` — real PNG bytes, because a 404 thumb changes the layout under test; listing size is derived from the folder name (`bulk-400` holds 400 files) so the server stays stateless. `fixture.html` opens the picker through the bundle's exported `openImagePicker()` with a stub widget+node. `harness.js` holds the drivers, `probe.js` the `scrollTop`-setter spy that separates "clamped at assignment" from "moved afterwards" (both PORTS of `comfyui-image-browser`'s, which is where they were written). **Navigation goes through `tapWithoutScrolling`**, never Playwright's pointer: Playwright scrolls a target into view first, and folder / `..` cards sit at the TOP of the grid, so at a deep offset the harness moves the scroller to ~0 before `rememberScroll()` runs — measured here on the first run, five tests failing with a remembered 0 against a parked 743. The two gesture tests throttle the renderer (`Emulation.setCPUThrottlingRate`) so the ~200 ms restore window cannot close before an out-of-process CDP keypress arrives; do not replace that with a sleep or a retry, which hides the race instead of removing it. **Chromium-only**: no WebKit exists here, so iOS **momentum scrolling is NOT covered** by any test. `audio-preview.spec.js` is the one non-scroll spec: an `audio-<N>` folder (reachable by name only, so the scroll tree is unchanged) lists N `.wav` takes, and `/api/view` + `/gallery_loader/file` serve a real 10 s WAV for them, so it can assert the ▶ preview actually PLAYS (`currentTime` advancing) — which jsdom, with no media pipeline, cannot. |
 | `screenshots/` | Containerized Playwright pipeline that regenerates `docs/picker.png` + `docs/gallery.png` (`capture.mjs`, `seed_images.py`, `Dockerfile`, `entrypoint.sh`, `workflow.json`). |
 | `justfile` | `lint`, `test`, `format`, `check`, `screenshots` recipes. |
 | `RELEASE-CHECKLIST.md` | One-time and per-release publish steps. |
@@ -393,9 +393,29 @@ built by `filter_files_content_types(files, ["audio", "video"])`.
 
 An audio card is a 🎵 **glyph**, not an `<audio controls>`: the grid's click
 handler commits the file and closes the modal for any click that is not a star /
-📌 / 🙈 / ⓘ / subpath, so an inline player would dismiss the picker at its own
-play button. Preview belongs on a control that is explicitly not the select
-target — also a follow-up.
+📌 / 🙈 / ⓘ / ▶ / subpath, so an inline player would dismiss the picker at its
+own play button. Preview is the **▶** button in the thumb's top-right corner
+(ⓘ's corner — ⓘ is image-only, so the two never share a card), and it is on that
+handler's skip list. Its own listener's `stopPropagation()` does NOT keep the
+commit handler from running, because both listen on `gridEl`; the skip-list
+entry is the load-bearing half, and a mutation pins it.
+
+▶ drives **one `<audio>` per modal**, created on first tap and parked in the
+dialog rather than the grid (every render wipes the grid). Playing a second take
+reuses it, so the first stops; tapping the playing take's button (■) stops it;
+`onClose` pauses it, drops its `src` and calls `load()` to release the fetch.
+The URL is the video cards' (`mediaSrcURL`): `/gallery_loader/file?path=` in
+path mode, `/api/view` for sandboxed roots. The pressed state is keyed by URL and
+repainted at the end of every `renderGrid`, and a render that drops the playing
+card (a filter, a folder change) **stops** the preview — nothing on screen could
+stop it otherwise. jsdom has no media pipeline, so `tests/js/video-loaders.test.js`
+spies on `HTMLMediaElement.prototype.play/pause/load`: that suite asserts which
+element was asked to play which URL. `tests/e2e/audio-preview.spec.js` is where
+playback itself is asserted, in Chromium against the stub server's WAV bytes.
+
+No duration label yet (issue #116's other half): `image_meta.py` reads image and
+video containers only, and the kit's `installLazyMedia` promotes only `<video>`
+from `preload="none"` (laurigates/comfy-modal-kit#38).
 
 ### Safe View: the Python matcher is a PORT, and the address is LOGICAL
 
@@ -618,7 +638,8 @@ tests can import the ComfyUI `app` without a real frontend. The
 fuzzy-matcher tests don't need that hook today.
 
 jsdom suites: `image-picker.test.js` (lazy-thumb root, flat view, folder pins,
-highlighting), `video-loaders.test.js` (node detection), `pins.test.js` (the
+highlighting), `video-loaders.test.js` (node detection, audio cards and the ▶
+preview), `pins.test.js` (the
 pinned tab + the `fileType()` address sweep), `pins-migration.test.js` (the
 one-shot localStorage drain — its own file because the migration guard is
 module-level, so a second run in the same registry is a no-op by design),
@@ -702,6 +723,7 @@ After non-trivial frontend changes, verify in browser:
 | `VHS_LoadImages` | Opens inside the currently selected folder in directory mode; file cards inert; "Use this folder" commits `frames` (input) / `frames [output]`. At a root it commits `.` and the node still loads. |
 | Flat view (`≣`) | On a sandboxed tab, folds the current folder's subtree into one newest-first grid; each card labelled with its subpath. Tapping a label drops to folder view there. Picking a nested file commits `sub/dir/foo.png [output]`. Hidden on the path tab and in directory mode. Preference persists; a huge tree toasts "truncated". |
 | Flat view — same-named files | Two subfolders each holding `ComfyUI_00001_.png`: clicking each card commits ITS OWN path, and starring one rates only that one. |
+| Audio preview (`▶`) | Core `LoadAudio`: tap ▶ on a 🎵 card → it plays, the button turns ■, and the picker stays open with the widget unchanged. Tap ▶ on a second card → the first stops, the second plays. Tap ■ → silence. Close the picker mid-take → silence. Same on `VHS_LoadAudio` (path mode, served by `/gallery_loader/file`). Tapping the card anywhere else still commits. |
 | Metadata (`ⓘ`) | On an image card (including on a path picker) → in-dialog overlay, painted immediately with "Reading metadata…", then a source line, one row per recognised field with its own Copy, Copy all, and a collapsed raw disclosure. No `ⓘ` on video cards. A read failure closes the overlay FIRST, then toasts. |
 | Pins (`📌`) — folders | Toolbar `📌` pins the current folder; chips render on their own toolbar row — tap to navigate, ✕ to unpin. Hidden on a path picker. Persist across reloads **and across browsers**: the list is server-side (`<user_dir>/comfy-pins.json`), not `localStorage`. An old `localStorage` list is drained into it once on first open and the key removed. |
 | Pins (`📌`) — media | `📌` on a file card pins that file (highlighted when already pinned); the tap must NOT commit or close. The **📌 pinned** tab shows every pinned file across roots, each labelled with its full address (`output/2026-08-04/`) — tapping the label navigates there, **tapping the card commits in one tap** (a pinned `output/…/a.png` commits `…/a.png [output]` with no navigation). Tab hidden in directory mode; flat view and the folder-`📌` are hidden while on it. |

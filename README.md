@@ -110,10 +110,12 @@ because it builds its own combo with
 `folder_paths.filter_files_content_types(files, ["audio", "video"])` —
 an audio-only grid would hide files its native dropdown lists.
 
-Audio cards carry a 🎵 glyph rather than a player: every click inside a
-file card that is not a star / 📌 / 🙈 / ⓘ commits the file and closes
-the modal, so an inline `<audio controls>` would dismiss the picker at
-its own play button.
+Audio cards carry a 🎵 glyph and a **▶** button in the thumbnail's
+corner. Tapping ▶ previews the file without selecting it or closing the
+picker; tapping it again (■) stops. One take plays at a time — starting
+another stops the first — and closing the picker stops playback. Tapping
+anywhere else on the card selects it as usual. There is no duration label
+yet.
 
 `VHS_LoadImages` opens **inside** its currently selected folder: file
 cards are inert, clicking a folder descends, and the footer
