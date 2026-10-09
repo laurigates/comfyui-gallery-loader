@@ -8,6 +8,7 @@ splice is lossless (other chunks/segments survive byte-for-byte).
 import os
 import struct
 import zlib
+from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -780,3 +781,61 @@ def test_read_meta_cached_is_invalidated_by_a_tag_write(tmp_path):
         "beach & sand",
         "nsfw",
     ]
+
+
+# ---------- read_meta_cached: eviction --------------------------------
+#
+# The cache exists so a re-listing does not re-open every file. Until this
+# was fixed it was cleared WHOLESALE on overflow, with a cap equal to
+# FLAT_LIST_CAP — so one capped flat listing exactly filled it, and the next
+# insert threw all of it away. A second large listing was then as cold as the
+# first (comfyui-image-browser#42).
+
+
+def _counting_reader(monkeypatch):
+    """Swap the uncached reader for a counter, and start from an empty cache."""
+    calls: list[str] = []
+
+    def fake_read_meta(path, head_only=False):
+        calls.append(path)
+        return (0, [])
+
+    monkeypatch.setattr(xmp_meta, "_META_CACHE", {})
+    monkeypatch.setattr(xmp_meta, "read_meta", fake_read_meta)
+    return calls
+
+
+def _st(n: int):
+    return SimpleNamespace(st_mtime_ns=n, st_size=n)
+
+
+def test_overflow_evicts_the_oldest_entry_not_the_whole_cache(monkeypatch):
+    calls = _counting_reader(monkeypatch)
+    monkeypatch.setattr(xmp_meta, "_CACHE_MAX", 4)
+    for i in range(4):  # one "listing" that exactly fills the cache
+        xmp_meta.read_meta_cached(f"/f{i}", _st(i))
+    xmp_meta.read_meta_cached("/new", _st(9))  # the insert that overflows
+    calls.clear()
+    for i in range(1, 4):
+        xmp_meta.read_meta_cached(f"/f{i}", _st(i))
+    # Both directions in one test: the three newest survive (a wholesale clear
+    # re-reads all three) AND the oldest is really gone (a cache that never
+    # evicts would also pass the first half).
+    assert calls == []
+    xmp_meta.read_meta_cached("/f0", _st(0))
+    assert calls == ["/f0"]
+    assert len(xmp_meta._META_CACHE) == 4
+
+
+def test_a_hit_refreshes_an_entry_so_it_outlives_colder_ones(monkeypatch):
+    calls = _counting_reader(monkeypatch)
+    monkeypatch.setattr(xmp_meta, "_CACHE_MAX", 3)
+    for i in range(3):
+        xmp_meta.read_meta_cached(f"/f{i}", _st(i))
+    xmp_meta.read_meta_cached("/f0", _st(0))  # hit: /f0 is now the newest
+    xmp_meta.read_meta_cached("/new", _st(9))  # evicts /f1, not /f0
+    calls.clear()
+    xmp_meta.read_meta_cached("/f0", _st(0))
+    assert calls == []
+    xmp_meta.read_meta_cached("/f1", _st(1))
+    assert calls == ["/f1"]
