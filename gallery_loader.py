@@ -304,6 +304,11 @@ def _resolve_input_string(image: str) -> str:
         # Bare relative path — fall back to input dir.
         path = folder_paths.get_annotated_filepath(image)
 
+    # Return the FOLDED path, the one _within_read_roots judged. Handed the raw
+    # string, the OS resolves ``..`` after following a directory symlink, so
+    # ``input/link/../../x.png`` (lexically inside) opens wherever link's
+    # grandparent is.
+    path = os.path.abspath(path)
     if not _within_read_roots(path):
         raise ValueError(f"Gallery Load Image: {READ_REACH_REFUSAL}")
     return path

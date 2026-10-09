@@ -232,3 +232,25 @@ def test_node_refuses_an_annotated_path_that_traverses_out(layout, monkeypatch):
     assert gallery_loader._resolve_input_string("photo.png [input]") == os.path.join(
         str(layout["comfy"] / "input"), "photo.png"
     )
+
+
+def test_node_opens_the_path_it_checked_not_one_a_symlink_reroutes(layout):
+    # The check folds ``..`` lexically, so the node must open that FOLDED
+    # path. Handed the raw string, the OS resolves ``..`` after following a
+    # directory symlink, and an operator's link inside the tree
+    # (input/link -> outside/deep/a) turns ``input/link/../../secret.png``
+    # — lexically comfy/secret.png, inside — into outside/secret.png.
+    outside = layout["tmp"] / "outside"
+    (outside / "deep" / "a").mkdir(parents=True)
+    (outside / "secret.png").write_bytes(b"\x89PNG fake")
+    link = layout["comfy"] / "input" / "link"
+    link.symlink_to(outside / "deep" / "a", target_is_directory=True)
+    raw = os.path.join(str(link), "..", "..", "secret.png")
+    assert os.path.isfile(raw)  # the OS really does reach outside/secret.png
+
+    assert gallery_loader.GalleryLoadImage.VALIDATE_INPUTS(raw) is not True
+    try:
+        path = gallery_loader._resolve_input_string(raw)
+    except ValueError:
+        return
+    assert not os.path.exists(path) or not os.path.samefile(path, outside / "secret.png")
