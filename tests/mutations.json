@@ -661,6 +661,12 @@
       "after": "      if (previewSrc !== src) return;"
     },
     {
+      "label": "AUDIO PREVIEW — the first take's AbortError, landing after a second take started, unpresses the second and warns",
+      "file": "src/image-picker.ts",
+      "before": "      if (previewSrc !== src) return;\n      previewSrc = null;",
+      "after": "      previewSrc = null;"
+    },
+    {
       "label": "AUDIO PREVIEW — ▶ offered on any streamed card, video included",
       "file": "src/image-picker.ts",
       "before": "        mode !== \"directory\" && t.kind === \"audio\" && t.src",

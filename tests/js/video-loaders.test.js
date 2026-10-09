@@ -658,6 +658,47 @@ describe("audio preview (issue #116)", () => {
     expect(document.querySelector(".cmp-dialog")).not.toBeNull();
   });
 
+  // A real engine's play() stays pending until enough of the take has loaded,
+  // and a pause() while it is pending rejects it with AbortError in a LATER
+  // task. Tapping take B while take A is still loading therefore delivers A's
+  // rejection after B already owns the element. That rejection is not a
+  // failure of B: B's button must stay pressed and no warning may appear.
+  it("switching takes while the first is still loading neither unpresses nor warns", async () => {
+    stubInertObserver();
+    const pending = new Map();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(function () {
+      return new Promise((_resolve, reject) => pending.set(this, reject));
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(function () {
+      const reject = pending.get(this);
+      if (!reject) return;
+      pending.delete(this);
+      setTimeout(() =>
+        reject(
+          Object.assign(new Error("The play() request was interrupted by a call to pause()."), {
+            name: "AbortError",
+          }),
+        ),
+      );
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    playBtn("take-a.flac").click();
+    playBtn("take-b.wav").click();
+    // Let A's AbortError land (a task, then the catch's microtask).
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(playBtn("take-b.wav").getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector("audio").getAttribute("src")).toBe(
+      "/api/view?filename=take-b.wav&type=input&subfolder=",
+    );
+    expect(document.querySelector("#cmn-notify-container")?.textContent ?? "").not.toContain(
+      "Can't preview",
+    );
+  });
+
   it("no ▶ in directory mode, where file cards are inert", async () => {
     stubInertObserver();
     stubMedia();
