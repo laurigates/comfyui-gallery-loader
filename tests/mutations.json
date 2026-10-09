@@ -2,7 +2,7 @@
   "command": [
     "bash",
     "-c",
-    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_helpers.py tests/test_safe_view.py tests/test_safe_prompt.py tests/test_endpoints.py tests/test_write_containment.py && bun run test"
+    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_helpers.py tests/test_safe_view.py tests/test_safe_prompt.py tests/test_endpoints.py tests/test_write_containment.py tests/test_rating_endpoint.py tests/test_scan_dimensions.py && bun run test"
   ],
   "reporter": "exit-code",
   "mutations": [
@@ -105,7 +105,7 @@
     {
       "label": "ENDPOINTS \u2014 /thumb reports a resolver error as 404, hiding a rejected address behind 'not found'",
       "file": "gallery_loader.py",
-      "before": "    path, err = _resolve_thumb_target(request.rel_url.query)\n    if err:\n        return web.Response(status=400)",
+      "before": "    path, err = _resolve_thumb_target(request.rel_url.query)\n    if err:\n        return web.Response(status=403 if err == READ_REACH_REFUSAL else 400)",
       "after": "    path, err = _resolve_thumb_target(request.rel_url.query)\n    if err:\n        return web.Response(status=404)"
     },
     {
@@ -141,8 +141,8 @@
     {
       "label": "ENDPOINTS \u2014 /file skips abspath normalisation, so the served path is not the one that was probed",
       "file": "gallery_loader.py",
-      "before": "    path = os.path.abspath(os.path.expanduser(abs_path))",
-      "after": "    path = os.path.expanduser(abs_path)"
+      "before": "    path = os.path.abspath(os.path.expanduser(abs_path))\n    # Reach first, before any stat, so an outside path is no existence oracle.",
+      "after": "    path = os.path.expanduser(abs_path)\n    # Reach first, before any stat, so an outside path is no existence oracle."
     },
     {
       "label": "ENDPOINTS \u2014 /base stops reporting user_dir, which is where the shared pin store and thumb cache live",
@@ -351,8 +351,8 @@
     {
       "label": "TAGS picker \u2014 the card handler does not skip a mark tap, so \ud83d\ude48 commits the file and closes the modal",
       "file": "src/image-picker.ts",
-      "before": "      target.closest(\".ip-mark-sensitive\")\n    )\n      return;",
-      "after": "      false\n    )\n      return;"
+      "before": "      target.closest(\".ip-mark-sensitive\") ||\n      target.closest(\".ip-play\")\n    )\n      return;",
+      "after": "      false ||\n      target.closest(\".ip-play\")\n    )\n      return;"
     },
     {
       "label": "TAGS picker \u2014 the repaint uses the optimistic guess rather than what the server stored",
@@ -585,7 +585,7 @@
     {
       "label": "AUDIO \u2014 thumbForFile loses the audio branch, so audio falls back to the generic \ud83d\udcc4 card",
       "file": "src/image-picker.ts",
-      "before": "    if (AUDIO_EXTS.has(ext)) {\n      return { kind: \"audio\" };\n    }\n    return { kind: \"icon\", text: \"\ud83d\udcc4\" };\n  }",
+      "before": "    if (AUDIO_EXTS.has(ext)) {\n      return { kind: \"audio\", src: mediaSrcURL(type, sub, f.name) };\n    }\n    return { kind: \"icon\", text: \"\ud83d\udcc4\" };\n  }",
       "after": "    return { kind: \"icon\", text: \"\ud83d\udcc4\" };\n  }"
     },
     {
@@ -753,8 +753,8 @@
     {
       "label": "PILL \u2014 the poll is not cancelled on close (a dead grid re-lists every 3 s)",
       "file": "src/image-picker.ts",
-      "before": "      cancelScanPoll();\n      // Reveals are per modal SESSION.",
-      "after": "      // Reveals are per modal SESSION."
+      "before": "      cancelScanPoll();\n      // The preview player must not outlive the modal",
+      "after": "      // The preview player must not outlive the modal"
     },
     {
       "label": "PILL — a poll in flight at close re-arms the timer (a dead grid re-lists until the budget runs out)",
@@ -833,6 +833,366 @@
       "file": "src/scan-warm.ts",
       "before": "    if (items.length === 0) return;",
       "after": "    if (true) return;"
+    },
+    {
+      "label": "AUDIO PREVIEW — ▶ is dropped from the commit handler's skip list, so tapping it commits and closes the picker",
+      "file": "src/image-picker.ts",
+      "before": "      target.closest(\".ip-mark-sensitive\") ||\n      target.closest(\".ip-play\")\n    )\n      return;",
+      "after": "      target.closest(\".ip-mark-sensitive\")\n    )\n      return;"
+    },
+    {
+      "label": "AUDIO PREVIEW — a fresh <audio> per tap instead of one per modal, so a second take plays over the first",
+      "file": "src/image-picker.ts",
+      "before": "    if (previewEl) return previewEl;\n    const el = document.createElement(\"audio\");",
+      "after": "    const el = document.createElement(\"audio\");"
+    },
+    {
+      "label": "AUDIO PREVIEW — switching takes no longer pauses the first before swapping the source",
+      "file": "src/image-picker.ts",
+      "before": "    const el = previewPlayer();\n    el.pause();\n    el.src = src;",
+      "after": "    const el = previewPlayer();\n    el.src = src;"
+    },
+    {
+      "label": "AUDIO PREVIEW — onClose no longer stops the player, so it outlives the modal",
+      "file": "src/image-picker.ts",
+      "before": "      // and a stopped element still holds its fetch until its src is dropped.\n      stopPreview();",
+      "after": "      // and a stopped element still holds its fetch until its src is dropped."
+    },
+    {
+      "label": "AUDIO PREVIEW — a re-render that drops the playing card leaves it playing with no control on screen",
+      "file": "src/image-picker.ts",
+      "before": "    if (previewSrc !== null && !shown) stopPreview();",
+      "after": ""
+    },
+    {
+      "label": "AUDIO PREVIEW — renderGrid stops syncing ▶, so a re-rendered grid forgets which take is playing",
+      "file": "src/image-picker.ts",
+      "before": "    setCount(visible, state.files.length);\n    syncPreviewButtons();",
+      "after": "    setCount(visible, state.files.length);"
+    },
+    {
+      "label": "AUDIO PREVIEW — tapping the playing take's button restarts it instead of stopping it",
+      "file": "src/image-picker.ts",
+      "before": "    if (previewSrc === src) stopPreview();\n    else startPreview(src);",
+      "after": "    startPreview(src);"
+    },
+    {
+      "label": "AUDIO PREVIEW — the take ending leaves its button pressed",
+      "file": "src/image-picker.ts",
+      "before": "    el.addEventListener(\"ended\", () => {\n      previewSrc = null;\n      syncPreviewButtons();\n    });\n",
+      "after": ""
+    },
+    {
+      "label": "AUDIO PREVIEW — a rejected play() leaves the button pressed over silence",
+      "file": "src/image-picker.ts",
+      "before": "      if (previewSrc !== src) return;\n      previewSrc = null;\n      syncPreviewButtons();",
+      "after": "      if (previewSrc !== src) return;"
+    },
+    {
+      "label": "AUDIO PREVIEW — the first take's AbortError, landing after a second take started, unpresses the second and warns",
+      "file": "src/image-picker.ts",
+      "before": "      if (previewSrc !== src) return;\n      previewSrc = null;",
+      "after": "      previewSrc = null;"
+    },
+    {
+      "label": "AUDIO PREVIEW — ▶ offered on any streamed card, video included",
+      "file": "src/image-picker.ts",
+      "before": "        mode !== \"directory\" && t.kind === \"audio\" && t.src",
+      "after": "        mode !== \"directory\" && t.src"
+    },
+    {
+      "label": "AUDIO PREVIEW — ▶ offered in directory mode, where file cards are inert",
+      "file": "src/image-picker.ts",
+      "before": "        mode !== \"directory\" && t.kind === \"audio\" && t.src",
+      "after": "        t.kind === \"audio\" && t.src"
+    },
+    {
+      "label": "AUDIO PREVIEW — path-mode audio is addressed as a sandboxed /api/view file",
+      "file": "src/image-picker.ts",
+      "before": "        return { kind: \"audio\", src: mediaSrcURL(\"path\", \"\", f.name, state.absPath) };",
+      "after": "        return { kind: \"audio\", src: mediaSrcURL(\"input\", \"\", f.name) };"
+    },
+    {
+      "label": "AUDIO PREVIEW — ▶ loses its corner rule and flows under the glyph",
+      "file": "src/image-picker.ts",
+      "before": ".ip-play {\n    position: absolute; top: 4px; right: 4px;",
+      "after": ".ip-play {"
+    },
+    {
+      "label": "RATING endpoint \u2014 a body that is not JSON answers 500 instead of 400",
+      "file": "gallery_loader.py",
+      "before": "\"invalid json\"}, status=400)\n\n    parsed, err = _validate_rating_request(body)",
+      "after": "\"invalid json\"}, status=500)\n\n    parsed, err = _validate_rating_request(body)"
+    },
+    {
+      "label": "RATING endpoint \u2014 the validator's message is swallowed, every rejection reads 'bad request'",
+      "file": "gallery_loader.py",
+      "before": "parsed, err = _validate_rating_request(body)\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)",
+      "after": "parsed, err = _validate_rating_request(body)\n    if err:\n        return web.json_response({\"ok\": False, \"error\": \"bad request\"}, status=400)"
+    },
+    {
+      "label": "RATING endpoint \u2014 the resolver's status is flattened to 400, so a missing file is not a 404",
+      "file": "gallery_loader.py",
+      "before": "return web.json_response({\"ok\": False, \"error\": terr}, status=status)\n\n    ok, backend = xmp_meta.write_rating(",
+      "after": "return web.json_response({\"ok\": False, \"error\": terr}, status=400)\n\n    ok, backend = xmp_meta.write_rating("
+    },
+    {
+      "label": "RATING endpoint \u2014 a write the writer refused is answered ok",
+      "file": "gallery_loader.py",
+      "before": "    if not ok:\n        return web.json_response({\"ok\": False, \"error\": backend}, status=500)\n    return web.json_response({\"ok\": True, \"rating\"",
+      "after": "    return web.json_response({\"ok\": True, \"rating\""
+    },
+    {
+      "label": "RATING endpoint \u2014 the success body hardcodes the backend instead of reporting where the star went",
+      "file": "gallery_loader.py",
+      "before": "\"rating\": parsed[\"rating\"], \"backend\": backend})",
+      "after": "\"rating\": parsed[\"rating\"], \"backend\": \"sidecar\"})"
+    },
+    {
+      "label": "RATING endpoint \u2014 the requested rating is not what gets written",
+      "file": "gallery_loader.py",
+      "before": "xmp_meta.write_rating(target, parsed[\"rating\"])",
+      "after": "xmp_meta.write_rating(target, 5)"
+    },
+    {
+      "label": "CONTROL \u2014 /rating docstring text only; MUST be MISSED, or the rating assertions are over-triggering",
+      "file": "gallery_loader.py",
+      "before": "    the picker already uses. Rating is metadata-only; the value contract",
+      "after": "    the picker uses already. A rating is metadata only; the value contract"
+    },
+    {
+      "label": "DIMENSIONS \u2014 the size probe's result is dropped, so every row reports None",
+      "file": "gallery_loader.py",
+      "before": "                width, height = im.size",
+      "after": "                pass"
+    },
+    {
+      "label": "DIMENSIONS \u2014 width and height are swapped",
+      "file": "gallery_loader.py",
+      "before": "                width, height = im.size",
+      "after": "                height, width = im.size"
+    },
+    {
+      "label": "DIMENSIONS \u2014 the image gate is removed, so every video is handed to PIL",
+      "file": "gallery_loader.py",
+      "before": "    if ext in image_subset:\n        try:\n            # PIL.Image.open is lazy",
+      "after": "    if True:\n        try:\n            # PIL.Image.open is lazy"
+    },
+    {
+      "label": "PICKER dir mode \u2014 file cards are not marked inert",
+      "file": "src/image-picker.ts",
+      "before": "      if (mode === \"directory\") {\n        c.classList.add(\"is-inert\");\n      }",
+      "after": "      if (mode === \"directory\") {\n      }"
+    },
+    {
+      "label": "PICKER dir mode \u2014 a tap on a file card commits it",
+      "file": "src/image-picker.ts",
+      "before": "      if (mode === \"directory\") return; // files are inert in dir mode",
+      "after": "      // files are inert in dir mode"
+    },
+    {
+      "label": "PICKER dir mode \u2014 a path picker without extensions lists every file instead of the .__none__ sentinel",
+      "file": "src/image-picker.ts",
+      "before": "      : mode === \"directory\"\n        ? [\".__none__\"]\n        : null;",
+      "after": "      : null;"
+    },
+    {
+      "label": "PICKER dir mode \u2014 a path picker opens the committed folder's PARENT",
+      "file": "src/image-picker.ts",
+      "before": "mode === \"directory\" && parsed.name ? joinAbs(parsed.dir, parsed.name) : parsed.dir;",
+      "after": "parsed.dir;"
+    },
+    {
+      "label": "PICKER dir mode \u2014 a path picker's folder commit goes through the sandboxed grammar",
+      "file": "src/image-picker.ts",
+      "before": "    if (state.type === \"path\") {\n      applyValue(state.absPath || \"/\");",
+      "after": "    if (false) {\n      applyValue(state.absPath || \"/\");"
+    },
+    {
+      "label": "PICKER path mode \u2014 a picked file commits its bare name, not the absolute path",
+      "file": "src/image-picker.ts",
+      "before": "      value = joinAbs(state.absPath, f.name);",
+      "after": "      value = f.name;"
+    },
+    {
+      "label": "PICKER path mode \u2014 an empty widget ignores /base and lists /",
+      "file": "src/image-picker.ts",
+      "before": "      state.absPath = bp.base_path || \"/\";",
+      "after": "      state.absPath = \"/\";"
+    },
+    {
+      "label": "PICKER path mode \u2014 a non-empty widget is ignored and /base listed instead",
+      "file": "src/image-picker.ts",
+      "before": "    const parsed = parseAbsPath(widget.value);\n    if (parsed.dir) {",
+      "after": "    const parsed = parseAbsPath(widget.value);\n    if (false) {"
+    },
+    {
+      "label": "PICKER nav \u2014 a path folder card replaces the directory instead of joining onto it",
+      "file": "src/image-picker.ts",
+      "before": "      state.absPath = joinAbs(state.absPath, name);",
+      "after": "      state.absPath = `/${name}`;"
+    },
+    {
+      "label": "PICKER nav \u2014 a sandboxed folder card replaces the subfolder instead of joining onto it",
+      "file": "src/image-picker.ts",
+      "before": "      state.subfolder = base ? `${base}/${name}` : name;",
+      "after": "      state.subfolder = name;"
+    },
+    {
+      "label": "PICKER nav \u2014 .. on a path picker jumps straight to /",
+      "file": "src/image-picker.ts",
+      "before": "      state.absPath = i <= 0 ? \"/\" : p.slice(0, i);",
+      "after": "      state.absPath = \"/\";"
+    },
+    {
+      "label": "PICKER nav \u2014 .. on a sandboxed root jumps straight to the root",
+      "file": "src/image-picker.ts",
+      "before": "      state.subfolder = i <= 0 ? \"\" : p.slice(0, i);",
+      "after": "      state.subfolder = \"\";"
+    },
+    {
+      "label": "PICKER nav \u2014 a .. card is offered at / on a path picker",
+      "file": "src/image-picker.ts",
+      "before": "!flat && (state.type === \"path\" ? state.absPath && state.absPath !== \"/\" : !!state.subfolder);",
+      "after": "!flat && (state.type === \"path\" ? !!state.absPath : !!state.subfolder);"
+    },
+    {
+      "label": "PICKER nav \u2014 a path breadcrumb is read as a subfolder, so tapping it goes nowhere",
+      "file": "src/image-picker.ts",
+      "before": "    if (c.dataset.abs !== undefined) {",
+      "after": "    if (false) {"
+    },
+    {
+      "label": "PICKER nav \u2014 path breadcrumbs are emitted with data-sub",
+      "file": "src/image-picker.ts",
+      "before": "        crumbsEl.appendChild(mk(p, \"data-abs\", acc));",
+      "after": "        crumbsEl.appendChild(mk(p, \"data-sub\", acc));"
+    },
+    {
+      "label": "PICKER nav \u2014 sandboxed breadcrumbs carry only the leaf segment, not the path to it",
+      "file": "src/image-picker.ts",
+      "before": "        acc = acc ? `${acc}/${p}` : p;\n        crumbsEl.appendChild(mk(p, \"data-sub\", acc));",
+      "after": "        acc = p;\n        crumbsEl.appendChild(mk(p, \"data-sub\", acc));"
+    },
+    {
+      "label": "PICKER nav \u2014 path breadcrumbs carry only the leaf segment, not the path to it",
+      "file": "src/image-picker.ts",
+      "before": "        acc = `${acc}/${p}`;\n        crumbsEl.appendChild(mk(p, \"data-abs\", acc));",
+      "after": "        acc = `/${p}`;\n        crumbsEl.appendChild(mk(p, \"data-abs\", acc));"
+    },
+    {
+      "label": "PICKER nav \u2014 a tab switch keeps the old subfolder",
+      "file": "src/image-picker.ts",
+      "before": "      state.type = b.dataset.type as string;\n      state.subfolder = \"\";",
+      "after": "      state.type = b.dataset.type as string;"
+    },
+    {
+      "label": "PICKER nav \u2014 tapping the active tab reloads it",
+      "file": "src/image-picker.ts",
+      "before": "      if (state.type === b.dataset.type) return;",
+      "after": "      // (no same-tab guard)"
+    },
+    {
+      "label": "CONTROL \u2014 picker navigation comment text only; MUST be MISSED",
+      "file": "src/image-picker.ts",
+      "before": "  // ---- Render ----------------------------------------------------",
+      "after": "  // ---- Rendering -------------------------------------------------"
+    },
+    {
+      "label": "NODE GRID chips \u2014 the old subfolder carries over to the new root",
+      "file": "src/gallery_loader.ts",
+      "before": "    if (state.type !== \"path\") state.subfolder = \"\";",
+      "after": "    // (subfolder kept)"
+    },
+    {
+      "label": "NODE GRID chips \u2014 the path field shows on every chip",
+      "file": "src/gallery_loader.ts",
+      "before": "    refs.path.style.display = state.type === \"path\" ? \"\" : \"none\";",
+      "after": "    refs.path.style.display = \"\";"
+    },
+    {
+      "label": "NODE GRID chips \u2014 the path chip lists an empty path instead of asking for one",
+      "file": "src/gallery_loader.ts",
+      "before": "        if (!state.absDir) {\n          refs.status.textContent = \"Type an absolute path and press Enter.\";",
+      "after": "        if (false) {\n          refs.status.textContent = \"Type an absolute path and press Enter.\";"
+    },
+    {
+      "label": "NODE GRID chips \u2014 a chip switch forgets the absolute directory",
+      "file": "src/gallery_loader.ts",
+      "before": "    state.type = t.dataset.type as string;\n    if (state.type !== \"path\") state.subfolder = \"\";",
+      "after": "    state.type = t.dataset.type as string;\n    state.absDir = \"\";\n    if (state.type !== \"path\") state.subfolder = \"\";"
+    },
+    {
+      "label": "NODE GRID path field \u2014 Enter does not commit",
+      "file": "src/gallery_loader.ts",
+      "before": "    if (e.key === \"Enter\") {\n      e.preventDefault();\n      commitPath();",
+      "after": "    if (e.key === \"Tab\") {\n      e.preventDefault();\n      commitPath();"
+    },
+    {
+      "label": "NODE GRID path field \u2014 Enter commits but is not consumed",
+      "file": "src/gallery_loader.ts",
+      "before": "      e.preventDefault();\n      commitPath();",
+      "after": "      commitPath();"
+    },
+    {
+      "label": "NODE GRID path field \u2014 any key commits",
+      "file": "src/gallery_loader.ts",
+      "before": "    if (e.key === \"Enter\") {\n      e.preventDefault();\n      commitPath();",
+      "after": "    if (e.key) {\n      e.preventDefault();\n      commitPath();"
+    },
+    {
+      "label": "NODE GRID path field \u2014 blur does not commit",
+      "file": "src/gallery_loader.ts",
+      "before": "  refs.path.addEventListener(\"blur\", commitPath);",
+      "after": "  // (no blur commit)"
+    },
+    {
+      "label": "NODE GRID path field \u2014 a blur on a sandboxed chip re-lists",
+      "file": "src/gallery_loader.ts",
+      "before": "    if (state.type === \"path\") {\n      state.absDir = v;",
+      "after": "    if (true) {\n      state.absDir = v;"
+    },
+    {
+      "label": "NODE GRID path field \u2014 the typed value is not trimmed",
+      "file": "src/gallery_loader.ts",
+      "before": "    const v = refs.path.value.trim();",
+      "after": "    const v = refs.path.value;"
+    },
+    {
+      "label": "NODE GRID mount \u2014 hideOnZoom is not requested",
+      "file": "src/gallery_loader.ts",
+      "before": "    hideOnZoom: true,",
+      "after": "    hideOnZoom: false,"
+    },
+    {
+      "label": "NODE GRID mount \u2014 the gallery DOM widget is serialized into widgets_values",
+      "file": "src/gallery_loader.ts",
+      "before": "    serialize: false,\n    // Hide the gallery DOM",
+      "after": "    serialize: true,\n    // Hide the gallery DOM"
+    },
+    {
+      "label": "NODE GRID mount \u2014 the image widget is left visible",
+      "file": "src/gallery_loader.ts",
+      "before": "  widget.hidden = true;",
+      "after": "  widget.hidden = false;"
+    },
+    {
+      "label": "NODE GRID mount \u2014 an undersized node is not grown",
+      "file": "src/gallery_loader.ts",
+      "before": "  if (node.size[1] < MIN_NODE_H) node.size[1] = MIN_NODE_H;",
+      "after": ""
+    },
+    {
+      "label": "NODE GRID mount \u2014 pointer/key events reach LiteGraph",
+      "file": "src/gallery_loader.ts",
+      "before": "    root.addEventListener(ev, stop, { capture: false });",
+      "after": "    void ev;"
+    },
+    {
+      "label": "CONTROL \u2014 node grid surfaces comment text only; MUST be MISSED",
+      "file": "src/gallery_loader.ts",
+      "before": "  // Path field commits on Enter (for type=path) or blur.",
+      "after": "  // The path field commits on Enter (type=path only) or on blur."
     }
   ]
 }

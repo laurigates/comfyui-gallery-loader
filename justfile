@@ -60,43 +60,45 @@ probe:
 # Vendored
 ############
 
-# Canonical home of the shared embedded-metadata reader (vendored verbatim
-# here). image_meta.py lives in comfyui-image-browser: that pack owns the
-# /metadata feature and its 1200-line attacker-shaped parser test suite, so the
-# direction is deliberately the reverse of xmp_meta.py / thumb_cache.py, which
-# this pack is canonical for. Each file still has exactly one home.
-image-meta-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-image-browser/main/image_meta.py"
+# image_meta.py is vendored verbatim from comfyui-image-browser at the commit in
+# scripts/vendored-pin. That pack owns the /metadata feature and its
+# attacker-shaped parser test suite, so the direction is deliberately the
+# reverse of xmp_meta.py / thumb_cache.py / pins_store.py, which this pack is
+# canonical for. Each file still has exactly one home.
+#
+# The check diffs against the PINNED commit, never against canonical main, so a
+# canonical merge cannot turn an unrelated PR here red (#92). The scheduled
+# "Vendored sync" workflow opens the PR that moves the pin; to move it by hand,
+# run `just bump-vendored`. Logic lives in scripts/vendored.sh.
 
-# Re-sync the vendored image_meta.py from its canonical home.
+# Move the pin to a canonical ref (default: main) and re-fetch every vendored file.
+[group: "vendored"]
+bump-vendored ref="main":
+    scripts/vendored.sh bump {{ref}}
+
+# Restore the vendored image_meta.py from the pinned canonical commit.
 [group: "vendored"]
 sync-image-meta:
-    curl -fsSL {{image-meta-upstream}} -o image_meta.py
-    @echo "image_meta.py synced from comfyui-image-browser@main"
+    scripts/vendored.sh sync image_meta.py
 
-# Fail if the vendored image_meta.py has drifted from the canonical copy.
+# Fail if the vendored image_meta.py differs from the pinned canonical commit.
 [group: "vendored"]
 check-image-meta-drift:
-    @curl -fsSL {{image-meta-upstream}} | diff -u - image_meta.py \
-        && echo "image_meta.py matches canonical" \
-        || { echo "DRIFT: image_meta.py differs from comfyui-image-browser@main — run 'just sync-image-meta' (or land the fix upstream first)"; exit 1; }
+    @scripts/vendored.sh check image_meta.py
 
-# Canonical home of Safe View's prompt-tier cache (vendored verbatim here). It is
-# a thin cache in front of image_meta.py, so it lives where that does — in
-# comfyui-image-browser — and travels the same direction.
-safeview-store-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-image-browser/main/safeview_store.py"
+# safeview_store.py, Safe View's prompt-tier cache, is vendored the same way and
+# the same direction: it is a thin cache in front of image_meta.py, so it lives
+# where that does.
 
-# Re-sync the vendored safeview_store.py from its canonical home.
+# Restore the vendored safeview_store.py from the pinned canonical commit.
 [group: "vendored"]
 sync-safeview-store:
-    curl -fsSL {{safeview-store-upstream}} -o safeview_store.py
-    @echo "safeview_store.py synced from comfyui-image-browser@main"
+    scripts/vendored.sh sync safeview_store.py
 
-# Fail if the vendored safeview_store.py has drifted from the canonical copy.
+# Fail if the vendored safeview_store.py differs from the pinned canonical commit.
 [group: "vendored"]
 check-safeview-store-drift:
-    @curl -fsSL {{safeview-store-upstream}} | diff -u - safeview_store.py \
-        && echo "safeview_store.py matches canonical" \
-        || { echo "DRIFT: safeview_store.py differs from comfyui-image-browser@main — run 'just sync-safeview-store' (or land the fix upstream first)"; exit 1; }
+    @scripts/vendored.sh check safeview_store.py
 
 ##########
 # Assets

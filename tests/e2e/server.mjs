@@ -27,7 +27,10 @@
 //   GET /gallery_loader/base                     → well-known dirs
 //   GET /gallery_loader/list                     → virtual tree (below)
 //   GET /gallery_loader/thumb                    → real PNG bytes
-//   GET /gallery_loader/file                     → same bytes (video/full size)
+//   GET /gallery_loader/file                     → same bytes (video/full size);
+//                                                   a real WAV for a `.wav` name
+//   GET /api/view                                → a real WAV (the sandboxed
+//                                                   audio preview's source)
 //   GET/POST /gallery_loader/pins                → empty pin list (the picker
 //                                                  fetches it on EVERY load)
 //   POST /gallery_loader/{rating,tag}            → stateless success
@@ -55,6 +58,12 @@ export const DEFAULT_PORT = 8299;
 // stateless — no cross-test ordering hazard, and a test can be read in
 // isolation because the URL it drives to fully determines what it will see.
 const BULK_RE = /^bulk-(\d+)$/;
+
+// Same idea for the audio preview (issue #116): a folder called `audio-<N>`
+// holds N `.wav` takes and no subfolders. It is reachable only by NAME — no
+// listing offers it — so adding it changes nothing about the scroll suite's
+// tree.
+const AUDIO_RE = /^audio-(\d+)$/;
 
 // Subfolders offered at each depth. Finite by construction (depth >= 3 is a
 // leaf) so the recursive/flat listing terminates without a visited set.
@@ -103,6 +112,8 @@ function leafOf(subfolder) {
 export function folderSpec(subfolder) {
   const bulk = BULK_RE.exec(leafOf(subfolder));
   if (bulk) return { fileCount: Number(bulk[1]), dirs: [] };
+  const audio = AUDIO_RE.exec(leafOf(subfolder));
+  if (audio) return { fileCount: Number(audio[1]), dirs: [], audio: true };
   return {
     fileCount: FILES_PER_PLAIN_DIR,
     dirs: DIRS_BY_DEPTH[depthOf(subfolder)] ?? [],
@@ -124,11 +135,21 @@ function makeFile(i, subpath) {
   return f;
 }
 
+function makeAudioFile(i) {
+  return {
+    name: `take-${String(i + 1).padStart(4, "0")}.wav`,
+    ext: ".wav",
+    mtime: BASE_MTIME - i * 60,
+    size: WAV.length,
+  };
+}
+
 function listFolder(subfolder) {
   const spec = folderSpec(subfolder);
+  const make = spec.audio ? makeAudioFile : makeFile;
   return {
     dirs: spec.dirs.map((name, i) => ({ name, mtime: BASE_MTIME - i * 3600 })),
-    files: Array.from({ length: spec.fileCount }, (_, i) => makeFile(i)),
+    files: Array.from({ length: spec.fileCount }, (_, i) => make(i)),
   };
 }
 
@@ -232,6 +253,48 @@ function thumbFor(key) {
   let h = 0;
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
   return THUMBS[Math.abs(h) % THUMBS.length];
+}
+
+// ============================================================
+// Real WAV bytes (stdlib encoder)
+// ============================================================
+//
+// The audio preview spec asserts the element is actually PLAYING (currentTime
+// advancing), so the body must be decodable audio — a PNG behind a `.wav` name
+// rejects play() with NotSupportedError. Ten seconds of a quiet 440 Hz tone,
+// 8 kHz mono 16-bit PCM: long enough that a take cannot end mid-assertion.
+function sineWAV(seconds, rate = 8000, hz = 440) {
+  const n = seconds * rate;
+  const data = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) {
+    data.writeInt16LE(Math.round(Math.sin((2 * Math.PI * hz * i) / rate) * 3000), i * 2);
+  }
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0, "latin1");
+  h.writeUInt32LE(36 + data.length, 4);
+  h.write("WAVE", 8, "latin1");
+  h.write("fmt ", 12, "latin1");
+  h.writeUInt32LE(16, 16); // PCM fmt chunk size
+  h.writeUInt16LE(1, 20); // format: PCM
+  h.writeUInt16LE(1, 22); // channels
+  h.writeUInt32LE(rate, 24);
+  h.writeUInt32LE(rate * 2, 28); // byte rate
+  h.writeUInt16LE(2, 32); // block align
+  h.writeUInt16LE(16, 34); // bits per sample
+  h.write("data", 36, "latin1");
+  h.writeUInt32LE(data.length, 40);
+  return Buffer.concat([h, data]);
+}
+
+const WAV = sineWAV(10);
+
+function sendWAV(res) {
+  res.writeHead(200, {
+    "content-type": "audio/wav",
+    "content-length": WAV.length,
+    "cache-control": "no-store",
+  });
+  res.end(WAV);
 }
 
 // ============================================================
@@ -365,6 +428,17 @@ function createFixtureServer() {
       handleList(url, res);
       return;
     }
+    // Core's /api/view stands in only for the sandboxed audio preview: video
+    // cards would use it too, but this tree serves no video.
+    if (p === "/api/view") {
+      if ((url.searchParams.get("filename") || "").endsWith(".wav")) {
+        sendWAV(res);
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("fixture server: /api/view serves .wav only");
+      return;
+    }
     if (p === "/gallery_loader/thumb" || p === "/gallery_loader/file") {
       // Per-test latency shaping belongs in the TEST (page.route + route.fetch),
       // not here: one shared server cannot hold two tests' different delays.
@@ -373,6 +447,10 @@ function createFixtureServer() {
         url.searchParams.get("filename") ||
         url.searchParams.get("path") ||
         "";
+      if (p === "/gallery_loader/file" && key.endsWith(".wav")) {
+        sendWAV(res);
+        return;
+      }
       const buf = thumbFor(key);
       res.writeHead(200, {
         "content-type": "image/png",

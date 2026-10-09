@@ -126,10 +126,12 @@ def test_resolve_listing_base_requires_path_for_path_type():
     assert "missing path" in err
 
 
-def test_resolve_listing_base_normalizes_path_type():
-    base, err = gallery_loader._resolve_listing_base("path", "", "/tmp/../tmp/x")
+def test_resolve_listing_base_normalizes_path_type(tmp_path):
+    base, err = gallery_loader._resolve_listing_base(
+        "path", "", f"{tmp_path}/../{tmp_path.name}/x"
+    )
     assert err == ""
-    assert base == "/tmp/x"
+    assert base == str(tmp_path / "x")
 
 
 # ---------- _validate_rating_request --------------------------------
@@ -462,3 +464,15 @@ class TestListCapsAndClamps(_ListEndpointBase):
         assert resp._body["files"] == []
         # Fell back to the folder listing, so dirs are still present.
         assert [d["name"] for d in resp._body["dirs"]] == ["sub"]
+
+
+def test_xmp_cache_holds_the_largest_listing_the_endpoints_can_probe():
+    # Tripwire: a listing probes at most cap * PROBE_BUDGET_FACTOR files (the
+    # Safe View tag-tier top-up), and every probe is an xmp_meta cache insert.
+    # A cache smaller than that lets one listing evict its own entries, so the
+    # next identical listing is cold again (comfyui-image-browser#42). Raise
+    # xmp_meta._CACHE_MAX when a cap or the factor grows.
+    import xmp_meta
+
+    worst = max(gallery_loader.FLAT_LIST_CAP, gallery_loader.DIR_LIST_CAP)
+    assert worst * gallery_loader.PROBE_BUDGET_FACTOR < xmp_meta._CACHE_MAX

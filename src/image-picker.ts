@@ -927,7 +927,10 @@ function imageThumbURLAbs(absDir: string, f: ListingFile): string {
   return `/gallery_loader/thumb?path=${encodeURIComponent(full)}&v=${encodeURIComponent(thumbVersion(f))}`;
 }
 
-function videoSrcURL(type: string, subfolder: string, name: string, absDir?: string): string {
+// The raw-bytes URL for a streamed card: a video's <video> src, and the audio
+// preview's source. Path mode goes through the pack's /file endpoint (which
+// whitelists images, video and audio); sandboxed roots through core /api/view.
+function mediaSrcURL(type: string, subfolder: string, name: string, absDir?: string): string {
   if (type === "path") {
     const full = joinAbs(absDir || "", name);
     return `${FILE_URL}?path=${encodeURIComponent(full)}`;
@@ -1197,6 +1200,10 @@ export async function openImagePicker(
       // otherwise arm a fresh one.
       scanPollClosed = true;
       cancelScanPoll();
+      // The preview player must not outlive the modal: the shell detaching
+      // the dialog is not a pause an engine is obliged to honour promptly,
+      // and a stopped element still holds its fetch until its src is dropped.
+      stopPreview();
       // Reveals are per modal SESSION. Not clearing here would carry a reveal
       // into the next open of the picker, which is exactly the "someone else
       // walked up" case the filter exists for.
@@ -1815,12 +1822,101 @@ export async function openImagePicker(
     void toggleSensitiveTag(f, btn);
   });
 
+  // ---- Audio preview (▶) -----------------------------------------
+  // ONE <audio> per modal, created on first use and parked in the dialog (not
+  // the grid, which every render wipes). Playing a second take reuses it, so
+  // the first necessarily stops; onClose pauses it and releases its source.
+  //
+  // `previewSrc` is the take that is playing or starting, by URL. It is this
+  // module's own state rather than `audio.paused`, because a play() that has
+  // not resolved yet already reads as "playing" to the user who just tapped.
+  let previewEl: HTMLAudioElement | null = null;
+  let previewSrc: string | null = null;
+
+  function previewPlayer(): HTMLAudioElement {
+    if (previewEl) return previewEl;
+    const el = document.createElement("audio");
+    el.preload = "none";
+    el.hidden = true;
+    el.addEventListener("ended", () => {
+      previewSrc = null;
+      syncPreviewButtons();
+    });
+    modal.dialog.appendChild(el);
+    previewEl = el;
+    return el;
+  }
+
+  /** Stop the preview and release the element's source (decoder + fetch). */
+  function stopPreview(): void {
+    previewSrc = null;
+    if (previewEl) {
+      previewEl.pause();
+      previewEl.removeAttribute("src");
+      previewEl.load();
+    }
+    syncPreviewButtons();
+  }
+
+  function startPreview(src: string): void {
+    const el = previewPlayer();
+    el.pause();
+    el.src = src;
+    previewSrc = src;
+    syncPreviewButtons();
+    Promise.resolve(el.play()).catch((err: unknown) => {
+      // A newer tap (or a stop) owns the element now; its pause() is what
+      // rejected this play() with an AbortError, and that is not a failure.
+      if (previewSrc !== src) return;
+      previewSrc = null;
+      syncPreviewButtons();
+      notify({
+        severity: "warn",
+        summary: "Can't preview that file",
+        detail:
+          err instanceof Error && err.message ? err.message : "The browser could not play it.",
+      });
+    });
+  }
+
+  /**
+   * Paint every ▶ from `previewSrc`. A preview whose card is no longer in the
+   * grid (a filter or a folder change dropped it) is stopped: nothing on
+   * screen could stop it otherwise.
+   */
+  function syncPreviewButtons(): void {
+    let shown = false;
+    for (const b of gridEl.querySelectorAll<HTMLButtonElement>(".ip-play")) {
+      const on = previewSrc !== null && b.dataset.src === previewSrc;
+      if (on) shown = true;
+      b.classList.toggle("is-playing", on);
+      b.setAttribute("aria-pressed", String(on));
+      b.textContent = on ? "■" : "▶";
+      b.title = on ? "Stop preview" : "Preview";
+    }
+    if (previewSrc !== null && !shown) stopPreview();
+  }
+
+  // Same shape as the star / pin / 🙈 handlers. stopPropagation alone does NOT
+  // keep the commit handler below from running — both listen on gridEl — which
+  // is why `.ip-play` is also on that handler's skip list.
+  gridEl.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest(".ip-play") as HTMLButtonElement | null;
+    if (!btn) return;
+    e.stopPropagation();
+    const src = btn.dataset.src;
+    if (!src) return;
+    if (previewSrc === src) stopPreview();
+    else startPreview(src);
+  });
+
   gridEl.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
     if (
       target.closest(".ip-star") ||
       target.closest(".ip-pin-file") ||
-      target.closest(".ip-mark-sensitive")
+      target.closest(".ip-mark-sensitive") ||
+      target.closest(".ip-play")
     )
       return;
     const card = target.closest(".ip-card") as HTMLElement | null;
@@ -2325,9 +2421,11 @@ export async function openImagePicker(
     } else {
       try {
         const r = await fetch(buildListingURL());
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const data = await r.json();
-        if (!data.ok) throw new Error(data.error || "listing failed");
+        // Read the body BEFORE judging the status: a 403 for a path outside
+        // ComfyUI's directories carries the reason and the fix in `error`.
+        const data = await r.json().catch(() => null);
+        if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+        if (!data?.ok) throw new Error(data?.error || "listing failed");
         state.dirs = data.dirs || [];
         state.files = data.files || [];
         // Read only when this request asked for the tier: a count the request
@@ -2386,10 +2484,10 @@ export async function openImagePicker(
         return { kind: "img", src: imageThumbURLAbs(state.absPath, f) };
       }
       if (VIDEO_EXTS.has(ext)) {
-        return { kind: "video", src: videoSrcURL("path", "", f.name, state.absPath) };
+        return { kind: "video", src: mediaSrcURL("path", "", f.name, state.absPath) };
       }
       if (AUDIO_EXTS.has(ext)) {
-        return { kind: "audio" };
+        return { kind: "audio", src: mediaSrcURL("path", "", f.name, state.absPath) };
       }
       return { kind: "icon", text: "📄" };
     }
@@ -2398,10 +2496,10 @@ export async function openImagePicker(
       return { kind: "img", src: imageThumbURL(type, sub, f) };
     }
     if (VIDEO_EXTS.has(ext)) {
-      return { kind: "video", src: videoSrcURL(type, sub, f.name) };
+      return { kind: "video", src: mediaSrcURL(type, sub, f.name) };
     }
     if (AUDIO_EXTS.has(ext)) {
-      return { kind: "audio" };
+      return { kind: "audio", src: mediaSrcURL(type, sub, f.name) };
     }
     return { kind: "icon", text: "📄" };
   }
@@ -2543,11 +2641,11 @@ export async function openImagePicker(
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
             : t.kind === "audio"
               ? // A GLYPH, not an <audio controls>. Every click inside a file
-                // card that is not a star / 📌 / 🙈 / ⓘ / subpath commits the
-                // file and closes the modal (see the grid click handler), so an
-                // inline player would commit-and-close on the first tap at its
-                // play button. Preview belongs on a control that is explicitly
-                // not the select target; tracked as a follow-up to #88.
+                // card that is not a star / 📌 / 🙈 / ⓘ / ▶ / subpath commits
+                // the file and closes the modal (see the grid click handler), so
+                // an inline player would commit-and-close on the first tap at
+                // its play button. Preview is the separate ▶ control below,
+                // driving the modal's one shared player.
                 `<div class="ip-thumb-icon is-audio">🎵</div>`
               : `<div class="ip-thumb-icon">${t.text}</div>`;
       // Whether a metadata WRITE can reach this card's file. /rating and /tag
@@ -2579,6 +2677,15 @@ export async function openImagePicker(
       const infoBtn =
         mode !== "directory" && !missing && IMG_EXTS.has((f.ext || "").toLowerCase())
           ? `<button type="button" class="ip-info" title="Generation metadata">ⓘ</button>`
+          : "";
+      // ▶ previews an audio card through the modal's one shared player. It
+      // takes ⓘ's top-right corner, which an audio card never has (ⓘ is
+      // IMG_EXTS-gated). Pressed state is painted by syncPreviewButtons, which
+      // runs at the end of every render, so a re-rendered grid comes back with
+      // the playing take still marked.
+      const playBtn =
+        mode !== "directory" && t.kind === "audio" && t.src
+          ? `<button type="button" class="ip-play" data-src="${escHTML(t.src)}" aria-pressed="false" title="Preview">▶</button>`
           : "";
       // 🙈 writes the user's first Safe View keyword into the file's
       // dc:subject. Offered only when there IS such a keyword (see
@@ -2613,7 +2720,7 @@ export async function openImagePicker(
           : "";
       c.innerHTML = `
                 ${subLabel}
-                <div class="ip-thumb">${thumbInner}${infoBtn}${pinBtn}${markBtn}</div>
+                <div class="ip-thumb">${thumbInner}${infoBtn}${playBtn}${pinBtn}${markBtn}</div>
                 <div class="ip-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
                 ${dims ? `<div class="ip-meta">${dims}</div>` : ""}
                 ${stars}
@@ -2665,6 +2772,7 @@ export async function openImagePicker(
     }
 
     setCount(visible, state.files.length);
+    syncPreviewButtons();
 
     // On the FIRST paint of a modal, centring the currently loaded image beats
     // any remembered offset: the user opened the picker to change this widget's
@@ -2860,6 +2968,18 @@ const PICKER_CSS = `
     font-size: 14px; line-height: 1; cursor: pointer; font-family: inherit;
 }
 .ip-info:hover { background: #2f3a52; color: #9ec6ff; }
+/* ▶ audio preview. Takes ⓘ's top-right corner: ⓘ is image-only, so the two
+   never share a card. Plain values only — tests assert the corner through
+   getComputedStyle, and jsdom drops min()/calc(). */
+.ip-play {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 30px; min-height: 30px; padding: 0;
+    background: rgba(20, 20, 26, 0.78); color: #b8b8c0;
+    border: 1px solid #33333f; border-radius: 4px;
+    font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.ip-play:hover { background: #2f3a52; color: #9ec6ff; }
+.ip-play.is-playing { background: #2f3a52; border-color: #4a6a9a; color: #9ec6ff; }
 /* 📌 file-pin toggle, mirroring ⓘ in the thumbnail's other corner. */
 .ip-pin-file {
     position: absolute; top: 4px; left: 4px;
