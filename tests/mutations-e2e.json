@@ -47,6 +47,24 @@
       "file": "src/image-picker.ts",
       "before": "// Per-directory scroll offsets. MODULE level, not per modal",
       "after": "// Per-directory scroll offsets. Module scope, incidentally"
+    },
+    {
+      "label": "LAZY \u2014 the observer is rooted on the grid, so every card loads on first paint",
+      "file": "src/image-picker.ts",
+      "before": "installLazyMedia(rootEl, { root: modal.bodyEl, rootMargin: \"300px\" });",
+      "after": "installLazyMedia(rootEl, { root: rootEl, rootMargin: \"300px\" });"
+    },
+    {
+      "label": "LAZY \u2014 the observer is never installed, so no thumbnail ever loads",
+      "file": "src/image-picker.ts",
+      "before": "    scroller.restore(target);\n    installLazyThumbs(gridEl);",
+      "after": "    scroller.restore(target);"
+    },
+    {
+      "label": "LAZY \u2014 the root margin swallows the listing, so the 'lazy' band is everything",
+      "file": "src/image-picker.ts",
+      "before": "installLazyMedia(rootEl, { root: modal.bodyEl, rootMargin: \"300px\" });",
+      "after": "installLazyMedia(rootEl, { root: modal.bodyEl, rootMargin: \"100000px\" });"
     }
   ]
 }
