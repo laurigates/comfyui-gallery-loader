@@ -9,7 +9,7 @@
 // are taken over, which widget is hooked, and which extension set the picker
 // then asks the backend for. Calling openImagePicker with hand-built opts would
 // assert the harness, not the code.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { extensionNamed } from "./__mocks__/app.js";
 // Imported for the side-effect: the module registers its extension on load.
 import "../../src/image-picker.ts";
@@ -392,9 +392,10 @@ describe("audio cards in the grid", () => {
 
   // An <audio controls> inside .ip-thumb would sit under the grid's own click
   // handler, which commits the file and closes the modal for any click that is
-  // not a star / 📌 / 🙈 / ⓘ / subpath — so the first tap at its play button
-  // would dismiss the picker. The card must carry no media element at all.
-  it("mounts no <audio> element, so a tap on the card still selects the file", async () => {
+  // not a star / 📌 / 🙈 / ⓘ / ▶ / subpath — so the first tap at its play
+  // button would dismiss the picker. The card itself carries no media element;
+  // the preview player is ONE per modal (see "audio preview" below).
+  it("mounts no <audio> element in the card, so a tap on the card still selects the file", async () => {
     stubInertObserver();
     stubFetchRecording([{ name: "take.flac", ext: ".flac", mtime: 3, size: 42, rating: 0 }]);
     const widget = {
@@ -410,6 +411,266 @@ describe("audio cards in the grid", () => {
     // The paired positive: the card is a live select target, not an inert one.
     card.querySelector(".ip-thumb").click();
     expect(widget.value).toBe("take.flac");
+  });
+});
+
+// Issue #116 — the PREVIEW half. jsdom implements no media pipeline (play()
+// logs "not implemented" and returns undefined), so the HTMLMediaElement
+// methods are spied on the prototype: that records WHICH element was asked to
+// play WHICH url, which is exactly the contract — one shared element per modal,
+// the right URL per root, and a stop on teardown. Whether audio actually comes
+// out of a speaker is a real-browser question.
+describe("audio preview (issue #116)", () => {
+  /** Spies on play/pause/load; each entry records the element and its src. */
+  function stubMedia({ reject } = {}) {
+    const log = { play: [], pause: [], load: [] };
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(function () {
+      log.play.push({ el: this, src: this.getAttribute("src") });
+      return reject ? Promise.reject(reject) : Promise.resolve();
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(function () {
+      log.pause.push({ el: this, src: this.getAttribute("src") });
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(function () {
+      log.load.push({ el: this, src: this.getAttribute("src") });
+    });
+    return log;
+  }
+
+  const TWO_TAKES = [
+    { name: "take-a.flac", ext: ".flac", mtime: 3, size: 42, rating: 0 },
+    { name: "take-b.wav", ext: ".wav", mtime: 2, size: 43, rating: 0 },
+  ];
+
+  function audioWidget() {
+    return {
+      name: "audio",
+      value: "",
+      type: "combo",
+      options: { values: [], _origUploadFlag: "audio_upload" },
+    };
+  }
+
+  const cardFor = (name) => document.querySelector(`.ip-card.is-file[data-name="${name}"]`);
+  const playBtn = (name) => cardFor(name)?.querySelector(".ip-thumb .ip-play");
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("puts ▶ on audio cards only — never on a video, image or other card", async () => {
+    stubInertObserver();
+    stubMedia();
+    stubFetchRecording([
+      { name: "take.flac", ext: ".flac", mtime: 4, size: 42, rating: 0 },
+      { name: "clip.mp4", ext: ".mp4", mtime: 3, size: 99, rating: 0 },
+      { name: "still.png", ext: ".png", mtime: 2, size: 9, rating: 0 },
+      { name: "notes.txt", ext: ".txt", mtime: 1, size: 7, rating: 0 },
+    ]);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    expect(playBtn("take.flac")?.textContent).toBe("▶");
+    expect(playBtn("take.flac").getAttribute("aria-pressed")).toBe("false");
+    for (const name of ["clip.mp4", "still.png", "notes.txt"]) {
+      expect(cardFor(name)).not.toBeNull();
+      expect(playBtn(name)).toBeNull();
+    }
+  });
+
+  // The free corner: 📌 is top-left, 🙈 bottom-right, Safe View's reveal
+  // bottom-left. Top-right belongs to ⓘ, which an audio card never carries.
+  it("sits absolutely in the thumb's top-right corner", async () => {
+    stubInertObserver();
+    stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    const cs = getComputedStyle(playBtn("take-a.flac"));
+    expect(cs.position).toBe("absolute");
+    expect(cs.top).toBe("4px");
+    expect(cs.right).toBe("4px");
+  });
+
+  it("tapping ▶ previews without committing or closing the picker", async () => {
+    stubInertObserver();
+    const media = stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    const widget = audioWidget();
+    await openVia(fakeNode("LoadAudio", widget));
+
+    playBtn("take-a.flac").click();
+
+    expect(widget.value).toBe("");
+    expect(document.querySelector(".cmp-dialog")).not.toBeNull();
+    expect(media.play).toHaveLength(1);
+    // Sandboxed roots go through /api/view, exactly like a video card's src.
+    expect(media.play[0].src).toBe("/api/view?filename=take-a.flac&type=input&subfolder=");
+    expect(playBtn("take-a.flac").getAttribute("aria-pressed")).toBe("true");
+
+    // The paired positive: the rest of the card is still the select target.
+    cardFor("take-a.flac").querySelector(".ip-name").click();
+    expect(widget.value).toBe("take-a.flac");
+  });
+
+  it("one <audio> per modal: playing a second take stops the first", async () => {
+    stubInertObserver();
+    const media = stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    playBtn("take-a.flac").click();
+    playBtn("take-b.wav").click();
+
+    expect(media.play).toHaveLength(2);
+    // The SAME element both times — not one player per card.
+    expect(media.play[1].el).toBe(media.play[0].el);
+    expect(media.play[1].src).toBe("/api/view?filename=take-b.wav&type=input&subfolder=");
+    // ...and it was paused while still holding the FIRST take, before the swap.
+    expect(media.pause.some((p) => p.el === media.play[0].el && p.src === media.play[0].src)).toBe(
+      true,
+    );
+    expect(document.querySelectorAll("audio")).toHaveLength(1);
+    // Only the take actually playing reads as pressed.
+    expect(playBtn("take-a.flac").getAttribute("aria-pressed")).toBe("false");
+    expect(playBtn("take-b.wav").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("tapping the playing take's button again stops it", async () => {
+    stubInertObserver();
+    const media = stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    playBtn("take-a.flac").click();
+    playBtn("take-a.flac").click();
+
+    expect(media.play).toHaveLength(1);
+    expect(media.pause.at(-1)?.el).toBe(media.play[0].el);
+    expect(playBtn("take-a.flac").getAttribute("aria-pressed")).toBe("false");
+    expect(playBtn("take-a.flac").textContent).toBe("▶");
+  });
+
+  it("the take finishing resets its button", async () => {
+    stubInertObserver();
+    const media = stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    playBtn("take-a.flac").click();
+    expect(playBtn("take-a.flac").getAttribute("aria-pressed")).toBe("true");
+    media.play[0].el.dispatchEvent(new Event("ended"));
+    expect(playBtn("take-a.flac").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("is torn down with the modal: paused and its source released", async () => {
+    stubInertObserver();
+    const media = stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    playBtn("take-a.flac").click();
+    const el = media.play[0].el;
+    const pausesBefore = media.pause.length;
+    document.querySelector(".cmp-close").click();
+
+    expect(document.querySelector(".cmp-dialog")).toBeNull();
+    expect(media.pause.slice(pausesBefore).some((p) => p.el === el)).toBe(true);
+    expect(el.getAttribute("src")).toBeNull();
+    expect(media.load.some((l) => l.el === el)).toBe(true);
+  });
+
+  // A sound whose control is no longer on screen cannot be stopped from the
+  // picker, so a re-render that drops the playing card (a filter, a folder
+  // change) stops it.
+  it("stops when a re-render drops the playing card from the grid", async () => {
+    stubInertObserver();
+    const media = stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    playBtn("take-a.flac").click();
+    const el = media.play[0].el;
+    const input = document.querySelector(".cmp-search");
+    input.value = "wav";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => {
+      if (cardFor("take-a.flac")) throw new Error("filter did not apply");
+    });
+
+    expect(cardFor("take-b.wav")).not.toBeNull();
+    expect(el.getAttribute("src")).toBeNull();
+  });
+
+  // The paired control for the test above: a re-render that KEEPS the card
+  // must not stop the preview, and the fresh button must come back pressed.
+  it("keeps playing, and re-presses the button, when the card survives a re-render", async () => {
+    stubInertObserver();
+    const media = stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    playBtn("take-a.flac").click();
+    const el = media.play[0].el;
+    const input = document.querySelector(".cmp-search");
+    input.value = "flac";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => {
+      if (cardFor("take-b.wav")) throw new Error("filter did not apply");
+    });
+
+    expect(el.getAttribute("src")).toBe("/api/view?filename=take-a.flac&type=input&subfolder=");
+    expect(playBtn("take-a.flac").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("path mode streams through /gallery_loader/file", async () => {
+    stubInertObserver();
+    const media = stubMedia();
+    stubFetchRecording([{ name: "take.wav", ext: ".wav", mtime: 3, size: 42, rating: 0 }]);
+    const widget = {
+      name: "audio_file",
+      value: "/music/take.wav",
+      type: "string",
+      options: { vhs_path_extensions: [".wav", ".mp3"] },
+    };
+    await openVia(fakeNode("VHS_LoadAudio", widget));
+
+    playBtn("take.wav").click();
+
+    expect(widget.value).toBe("/music/take.wav");
+    expect(media.play).toHaveLength(1);
+    const url = new URL(media.play[0].src, "http://localhost");
+    expect(url.pathname).toBe("/gallery_loader/file");
+    expect(url.searchParams.get("path")).toBe("/music/take.wav");
+  });
+
+  it("a take the browser cannot play resets its button", async () => {
+    stubInertObserver();
+    stubMedia({ reject: Object.assign(new Error("no decoder"), { name: "NotSupportedError" }) });
+    stubFetchRecording(TWO_TAKES);
+    await openVia(fakeNode("LoadAudio", audioWidget()));
+
+    playBtn("take-a.flac").click();
+    await vi.waitFor(() => {
+      if (playBtn("take-a.flac").getAttribute("aria-pressed") !== "false") {
+        throw new Error("still pressed");
+      }
+    });
+    expect(document.querySelector(".cmp-dialog")).not.toBeNull();
+  });
+
+  it("no ▶ in directory mode, where file cards are inert", async () => {
+    stubInertObserver();
+    stubMedia();
+    stubFetchRecording(TWO_TAKES);
+    await openVia(
+      fakeNode("VHS_LoadImages", {
+        name: "directory",
+        value: "",
+        type: "combo",
+        options: { values: [] },
+      }),
+    );
+    expect(document.querySelector(".ip-play")).toBeNull();
   });
 });
 

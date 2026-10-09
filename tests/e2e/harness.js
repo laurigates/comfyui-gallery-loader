@@ -36,7 +36,10 @@ export const SELECTED_CARD = ".ip-card.is-selected";
  * `value` is the widget's current value — the picker parses it for the initial
  * root/subfolder and for which card is `is-selected`.
  */
-export async function openPicker(page, { storage, value = "", mode = "file" } = {}) {
+export async function openPicker(
+  page,
+  { storage, value = "", mode = "file", kind = "loadimage" } = {},
+) {
   await page.goto("/");
   await page.waitForFunction(() => window.__GL_E2E_READY__ === true);
   if (storage) {
@@ -44,7 +47,7 @@ export async function openPicker(page, { storage, value = "", mode = "file" } = 
       for (const [k, v] of Object.entries(entries)) localStorage.setItem(k, v);
     }, storage);
   }
-  await page.evaluate((opts) => window.__GL_E2E__.open(opts), { value, mode });
+  await page.evaluate((opts) => window.__GL_E2E__.open(opts), { value, mode, kind });
   await expect(page.locator(DIALOG)).toBeVisible();
   await page.locator(GRID).waitFor();
 }
