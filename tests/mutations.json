@@ -2,7 +2,7 @@
   "command": [
     "bash",
     "-c",
-    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_helpers.py tests/test_safe_view.py tests/test_endpoints.py tests/test_write_containment.py && bun run test"
+    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_helpers.py tests/test_safe_view.py tests/test_endpoints.py tests/test_write_containment.py tests/test_rating_endpoint.py && bun run test"
   ],
   "reporter": "exit-code",
   "mutations": [
@@ -605,6 +605,48 @@
       "file": "gallery_loader.py",
       "before": "    if os.path.splitext(name)[1].lower() not in MEDIA_EXTS:\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")",
       "after": "    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")"
+    },
+    {
+      "label": "RATING endpoint \u2014 a body that is not JSON answers 500 instead of 400",
+      "file": "gallery_loader.py",
+      "before": "\"invalid json\"}, status=400)\n\n    parsed, err = _validate_rating_request(body)",
+      "after": "\"invalid json\"}, status=500)\n\n    parsed, err = _validate_rating_request(body)"
+    },
+    {
+      "label": "RATING endpoint \u2014 the validator's message is swallowed, every rejection reads 'bad request'",
+      "file": "gallery_loader.py",
+      "before": "parsed, err = _validate_rating_request(body)\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)",
+      "after": "parsed, err = _validate_rating_request(body)\n    if err:\n        return web.json_response({\"ok\": False, \"error\": \"bad request\"}, status=400)"
+    },
+    {
+      "label": "RATING endpoint \u2014 the resolver's status is flattened to 400, so a missing file is not a 404",
+      "file": "gallery_loader.py",
+      "before": "return web.json_response({\"ok\": False, \"error\": terr}, status=status)\n\n    ok, backend = xmp_meta.write_rating(",
+      "after": "return web.json_response({\"ok\": False, \"error\": terr}, status=400)\n\n    ok, backend = xmp_meta.write_rating("
+    },
+    {
+      "label": "RATING endpoint \u2014 a write the writer refused is answered ok",
+      "file": "gallery_loader.py",
+      "before": "    if not ok:\n        return web.json_response({\"ok\": False, \"error\": backend}, status=500)\n    return web.json_response({\"ok\": True, \"rating\"",
+      "after": "    return web.json_response({\"ok\": True, \"rating\""
+    },
+    {
+      "label": "RATING endpoint \u2014 the success body hardcodes the backend instead of reporting where the star went",
+      "file": "gallery_loader.py",
+      "before": "\"rating\": parsed[\"rating\"], \"backend\": backend})",
+      "after": "\"rating\": parsed[\"rating\"], \"backend\": \"sidecar\"})"
+    },
+    {
+      "label": "RATING endpoint \u2014 the requested rating is not what gets written",
+      "file": "gallery_loader.py",
+      "before": "xmp_meta.write_rating(target, parsed[\"rating\"])",
+      "after": "xmp_meta.write_rating(target, 5)"
+    },
+    {
+      "label": "CONTROL \u2014 /rating docstring text only; MUST be MISSED, or the rating assertions are over-triggering",
+      "file": "gallery_loader.py",
+      "before": "    the picker already uses. Rating is metadata-only; the value contract",
+      "after": "    the picker uses already. A rating is metadata only; the value contract"
     }
   ]
 }
