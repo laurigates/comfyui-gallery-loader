@@ -52,13 +52,15 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | Path | Purpose |
 |------|---------|
 | `__init__.py` | Loader stub. Exports `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY="./web/dist"`. |
-| `gallery_loader.py` | `GalleryLoadImage` node + eight HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating,metadata}` plus `GET`/`POST /gallery_loader/pins`). `/list` takes **`recursive=1`** (sandboxed roots only) for the flat view: every descendant, `dirs:[]`, each file tagged with a forward-slashed `subpath`. Both listing paths are capped and report `truncated`. `GET /pins` answers `{ok, max, pins}` with every pin resolved (`exists`, plus a live file pin's `/list` per-file keys); `POST /pins` takes one **delta** — `{op: "add"｜"remove"｜"prune", item?}` — and answers with the same whole list, so a caller never needs a follow-up GET. |
+| `gallery_loader.py` | `GalleryLoadImage` node + HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating,tag,metadata,safeview_warm}` plus `GET`/`POST /gallery_loader/pins`). `/list` takes **`recursive=1`** (sandboxed roots only) for the flat view: every descendant, `dirs:[]`, each file tagged with a forward-slashed `subpath`. Both listing paths are capped and report `truncated`. `GET /pins` answers `{ok, max, pins}` with every pin resolved (`exists`, plus a live file pin's `/list` per-file keys); `POST /pins` takes one **delta** — `{op: "add"｜"remove"｜"prune", item?}` — and answers with the same whole list, so a caller never needs a follow-up GET. |
 | `pins_store.py` | **Canonical home** of the shared pin store — `comfyui-image-browser` vendors it verbatim, pinned to a commit of this repo (its `scripts/vendored-pin`); its daily `Vendored sync` workflow opens the PR that takes a change made here, so nothing downstream goes red when this file changes. Same direction as `xmp_meta.py` / `thumb_cache.py`, the opposite of `image_meta.py`. Pure-stdlib: normalization, the delta dispatcher, and atomic read/write of `<user_dir>/comfy-pins.json` — the one file both packs and both devices resolve. |
 | `image_meta.py` | **Vendored verbatim** from its canonical home `comfyui-image-browser/image_meta.py`, at the commit in `scripts/vendored-pin` — do not edit here. CI fails if it differs from that pinned commit (see `scripts/vendored.sh`). Pure-stdlib reader behind `/metadata`. The direction is the REVERSE of `xmp_meta.py` / `thumb_cache.py`, which this pack is canonical for: that pack owns the `/metadata` feature and the parser's attacker-shaped-input suite. Each file still has exactly one home. |
+| `safeview_store.py` | **Vendored verbatim** from its canonical home `comfyui-image-browser/safeview_store.py`, at the commit in `scripts/vendored-pin` — do not edit here. CI fails if it differs from that pinned commit (see `scripts/vendored.sh`); `just sync-safeview-store` restores it from the pin. Safe View's prompt-tier cache: stdlib `sqlite3` at `<user_dir>/comfy-safeview.sqlite` (shared with that pack, like the thumb cache and pins), keyed `sha1(path:mtime_ns:size)`, holding prompt+model TEXT, never a verdict. Same direction as `image_meta.py`, because it is a thin cache in front of it and has to live wherever that does. The fifth shared module; how the set is kept in step is #92. |
 | `xmp_meta.py` | Pure, stdlib-only XMP read/write (in-file PNG/JPEG surgery + `.xmp` sidecar fallback). No ComfyUI imports. Two owned vocabularies: the `xmp:Rating` star (ADR-0011) and the `dc:subject` keywords Safe View's tag tier matches, each mirrored to its `MicrosoftPhoto:` twin. Both writes go through `_write_xmp` + `update_xmp_packet`; see the hard rule below for why the two halves must never strip each other's. |
 | `src/index.ts` | Lone `bun build` entry. Imports both extension modules for their `app.registerExtension` side-effects. |
 | `src/gallery_loader.ts` | Inline-grid frontend for the `GalleryLoadImage` node (TS port of the former `web/js/gallery_loader.js`). |
 | `src/image-picker.ts` | Modal picker for stock `LoadImage` + VHS path loaders (TS port; consumes `@laurigates/comfy-modal-kit`). |
+| `src/scan-warm.ts` | Port of `comfyui-image-browser/src/scan-warm.ts`: an `executed` websocket listener that posts each fresh render's `images` + `video` outputs to `POST /gallery_loader/safeview_warm`, so the newest card is not stuck `"unscanned"`. Installed once, by the picker extension's `setup()`; gated per event on `MatchPrompt`. |
 | `src/safe-tag.ts` | The `🙈` mark-sensitive control, shared by both frontends: whether a file already carries the keyword, the `/tag` request body, and the button markup. **Which** keyword it writes is the kit's `sensitiveKeyword` (0.14.0) — that half moved out because `comfyui-image-browser` carried a byte-identical copy and both packs write the same files; the rest is per-pack and has diverged on purpose. |
 | `src/comfyui-shims.d.ts` | Types the `/scripts/app.js` runtime import via the `tsconfig.json` `paths` shim. |
 | `web/css/gallery_loader.css` | Inline-grid styles, copied into `web/dist/css/` by the build. (The modal injects its own `<style>` from `image-picker.ts`.) |
@@ -67,7 +69,7 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | `knip.json` | Dead-export / unused-dependency checker config. |
 | `package.json` | Bun scripts (`build`, `typecheck`, `test`, `lint`, `knip`); runtime dep `@laurigates/comfy-modal-kit`; dev deps. |
 | `pyproject.toml` | Comfy Registry metadata + `[tool.comfy] includes = ["web/dist"]`. `PublisherId` and `version` are the fields you'd touch. |
-| `scripts/vendored.sh` + `scripts/vendored-pin` | The vendoring pin (#92). `image_meta.py` is checked against comfyui-image-browser **at the pinned commit**, never against its `main`: diffing a moving `main` failed every PR opened after a canonical merge, whatever it changed (#89), and made merge order across the two repos something to plan. The pin moves only in a commit here — `just bump-vendored [ref]`, or the PR the daily `Vendored sync` workflow (`.github/workflows/vendored-sync.yml`, opened with the release-please App token so CI runs on it) opens when canonical `main` differs. `just sync-image-meta` restores the file **from the pin**. Tests: `tests/test_vendored_pin.py`, table `tests/mutations-vendored.json` (pytest, `exit-code` reporter, declared control so a healthy run exits 0). |
+| `scripts/vendored.sh` + `scripts/vendored-pin` | The vendoring pin (#92). `image_meta.py` and `safeview_store.py` are checked against comfyui-image-browser **at the pinned commit**, never against its `main`: diffing a moving `main` failed every PR opened after a canonical merge, whatever it changed (#89), and made merge order across the two repos something to plan. The pin moves only in a commit here — `just bump-vendored [ref]`, or the PR the daily `Vendored sync` workflow (`.github/workflows/vendored-sync.yml`, opened with the release-please App token so CI runs on it) opens when canonical `main` differs. `just sync-image-meta` and `just sync-safeview-store` restore them **from the pin**. Tests: `tests/test_vendored_pin.py`, table `tests/mutations-vendored.json` (pytest, `exit-code` reporter, declared control so a healthy run exits 0). |
 | `.github/workflows/publish.yml` | Auto-publish on `pyproject.toml` version bump (runs `bun run build` first). |
 | `.github/workflows/ci.yml` | CI: ruff, biome, tsc+build (bun), pytest, vitest (bun), Playwright, gitleaks. `test-js` `setup-node`s from `.node-version` because `vitest` is a Node bin that bun invokes through its `env node` shebang. `test-e2e` deliberately does **not** — `playwright` is a Node bin too, but at 1.56.0 `playwright install` downloads to 100% and then hangs in the extract step under Node 26 (measured: rc=124 at 300 s vs rc=0 at 10 s on 24.19.0, into a clean `PLAYWRIGHT_BROWSERS_PATH`; `engines` says `node: >=18`, so nothing warns). `tests/test_ci_node_pin.py` asserts both the pin and the exclusion. |
 | `.node-version` | `26`. The Node the **jsdom** suite runs under, in CI and locally (the browser tier is excluded — see the `ci.yml` row). Node put its built-in `localStorage` accessor on `globalThis` unflagged in **v25**, and it shadows jsdom's Storage (vitest copies jsdom's globals across only where absent), so the runtime decides which `Storage` implementation `tests/js/` exercises. Measured with `setupFiles` removed: 24.19.0 green on jsdom's own Storage; 25.0.0 and 26.5.0 red with `TypeError: Cannot read properties of undefined (reading 'clear')`. `comfyui-image-browser` pins the same file to the same value. |
@@ -487,6 +489,50 @@ different class prefix). Unifying them would silently reverse a considered
 decision. Two mutations in `tests/mutations.json` pin that each 🙈 call site
 reads the kit's function rather than a constant — one for the write path, one
 for the render pass.
+
+### Safe View's prompt tier: four states, and the two that look alike
+
+`/list?safe_prompt=1&safe_kw=…` tags each file with `prompt_match`, ported from
+`comfyui-image-browser` (its PR #83) rather than re-derived:
+
+| Value | Meaning | Blurred? |
+|---|---|---|
+| `true` / `false` | cached prompt text did / did not match | by verdict |
+| `"unscanned"` | participates (`METADATA_EXTS`), no cached text yet | **yes** — fail-safe |
+| key absent | does not participate: folder card, `.avi`, audio, pinned card | **never** |
+
+Collapsing the last two in either direction is a shipped bug: `?? "unscanned"`
+blurs every folder card and `.avi`; treating `"unscanned"` as `false` shows a
+sensitive render in the clear on a cold cache. Both frontends pass
+`f.prompt_match` straight into `isSensitive`, absent included — the modal
+picker's `isHiddenCard` **and** the inline grid's `renderGrid`; one honouring
+the tier and the other not is the split-brain the port closes.
+
+- **Gated like `safe_hide`**: the flag AND a non-empty `safe_kw`, independent of
+  `safe_hide`. The frontends send it only when `matchPrompt` is on and Safe View
+  is active, and treat the prompt keyword string as part of the listing
+  signature — rows fetched without the tier carry no verdicts, so switching it
+  on re-fetches rather than repaints.
+- **Where verdicts are computed** (`_probe_newest`): above the cap when hiding
+  is on (they decide membership; `"unscanned"` is dropped, mirroring the kit),
+  after the slice when it is off (only shipped rows need one).
+- **Matching** goes through `_is_sensitive(text, "", keywords)` — the same
+  tokenizer as every other haystack. The prompt text never leaves the server.
+- **Two warmers, neither subsumes the other.** The lazy background sweep
+  (`_maybe_start_sweep`, started by the first listing that reports
+  `safe_unscanned > 0`, at most once per `SWEEP_MIN_INTERVAL`) covers the
+  backlog; `src/scan-warm.ts` covers renders made after it.
+  `/safeview_warm` resolves through `_resolve_sandboxed_file` and is registered
+  with `_mutating_post` — it writes only the cache, but it is still a
+  state-changing POST.
+- **The pill polls, the inline grid does not.** The modal's `🔍 scanning N`
+  re-lists every 3 s, at most 20 times per location, cancelled in `onClose`.
+  The inline grid shows the count in its status line with no timer, because a
+  node has no close hook to cancel one.
+
+`tests/test_safe_prompt.py` and `tests/js/safe-prompt.test.js` pin all of the
+above with two-sided assertions; `tests/mutations.json` carries the matching
+`PROMPT` / `PILL` / `WARM` / `WARMER` entries.
 
 Safe View is **discretion, not access control** — the blur is CSS and the bytes
 are still served. Say so wherever it is documented; the README carries the

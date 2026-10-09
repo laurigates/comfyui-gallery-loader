@@ -58,6 +58,7 @@ import {
   openModalShell,
   openShellOverlay,
   type PointerPatchableWidget,
+  type PromptVerdict,
   patchWidgetPointer,
   postRating,
   type RatingAddress,
@@ -82,6 +83,7 @@ import {
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 import { hasSensitiveTag, markSensitiveHTML, postTag, TAG_URL } from "./safe-tag.js";
+import { installScanWarm } from "./scan-warm.js";
 
 const EXT_NAME = "comfyui-gallery-loader";
 const LIST_URL = "/gallery_loader/list";
@@ -90,6 +92,14 @@ const BASE_URL = "/gallery_loader/base";
 const RATING_URL = "/gallery_loader/rating";
 const METADATA_URL = "/gallery_loader/metadata";
 const STYLE_ID = "ip-style";
+
+// The prompt tier's progress poll — the same budget comfyui-image-browser uses.
+// 3 s x 20 is about a minute of watching a sweep before the pill goes quiet:
+// long enough to cover a typical library, short enough that a stalled sweep
+// does not leave a request loop running. Re-armed per LOCATION and by tapping
+// the pill.
+const SCAN_POLL_MS = 3000;
+const SCAN_POLL_MAX = 20;
 
 // Trace logging is opt-in. Enable in devtools with
 //   localStorage.setItem("comfyui-gallery-loader:debug", "1")
@@ -392,6 +402,16 @@ interface ListingFile {
   // it is not dropped, because "the file moved" and "you never pinned it" are
   // different facts.
   pinExists?: boolean;
+  // Safe View's opt-in prompt tier. Present ONLY when the listing was requested
+  // with `safe_prompt`, and only for a file whose container has a metadata
+  // reader. The snake_case name is the backend's JSON key verbatim.
+  //
+  // FOUR STATES, and the two easy to collapse are the two that matter:
+  // `"unscanned"` means the file participates but has no cached verdict yet and
+  // is read as SENSITIVE (fail-safe), while ABSENT means the file is outside the
+  // tier and is never sensitive by it. A folder card, a pinned card and a .avi
+  // are absent, not unscanned. See the kit's PromptVerdict doc comment.
+  prompt_match?: PromptVerdict;
 }
 
 // "loadimage" is the SANDBOXED flavour — Input/Output/Temp tabs over
@@ -1173,6 +1193,13 @@ export async function openImagePicker(
       // one leaked listener per modal open.
       disposeSafeViewSub?.();
       disposeSafeViewSub = null;
+      // Same rule again: the scan poll is a timer, and a timer that outlives
+      // the modal re-lists a dead grid every few seconds forever. The flag is
+      // what stops a poll whose fetch is still in flight: its response lands
+      // after this point, finds no timer to have been cancelled, and would
+      // otherwise arm a fresh one.
+      scanPollClosed = true;
+      cancelScanPoll();
       // The preview player must not outlive the modal: the shell detaching
       // the dialog is not a pause an engine is obliged to honour promptly,
       // and a stopped element still holds its fetch until its src is dropped.
@@ -1241,9 +1268,22 @@ export async function openImagePicker(
     return sub ? `${root}/${sub}` : root;
   }
 
-  /** Whether this card matches the filter AND the user has not revealed it. */
+  /**
+   * Whether this card matches the filter AND the user has not revealed it.
+   *
+   * `promptMatch` is passed straight through, INCLUDING when it is absent.
+   * Defaulting the absent case to anything — `false` or `"unscanned"` —
+   * collapses the kit's four states, and one of those two collapses blurs every
+   * pinned card and every file the backend has no reader for.
+   */
   function isHiddenCard(f: ListingFile, cfg: SafeViewConfig): boolean {
-    if (!isSensitive({ name: f.name, path: safeViewPath(f), tags: f.tags }, cfg)) return false;
+    const target = {
+      name: f.name,
+      path: safeViewPath(f),
+      tags: f.tags,
+      promptMatch: f.prompt_match,
+    };
+    if (!isSensitive(target, cfg)) return false;
     return !revealSet.has(fileType(f), fileSub(f), f.name);
   }
 
@@ -1413,12 +1453,74 @@ export async function openImagePicker(
     toggleSafeView();
   });
 
+  // Safe View's prompt tier reports how many files it could not yet judge.
+  // That number is the difference between "these files matched your keywords"
+  // and "I have not looked at these yet" — without it, first enabling the tier
+  // on a large library shows a mostly-blurred grid that looks broken rather
+  // than busy. Hidden whenever the count is 0, which is the steady state.
+  //
+  // A button, not a label: tapping it re-lists, so a user watching the sweep
+  // can pull progress. The bounded auto-poll below does the same on a timer.
+  const scanPillEl = document.createElement("button");
+  scanPillEl.type = "button";
+  scanPillEl.className = "ip-control ip-scan-pill";
+  scanPillEl.title =
+    "Files whose generation prompt has not been scanned yet — blurred until it is. Tap to refresh.";
+  scanPillEl.style.display = "none";
+
+  // ---- The prompt tier's "scanning N" pill ------------------------
+  //
+  // Bounded auto-poll, deliberately. The backend's sweep has no channel to push
+  // progress here, so the grid would otherwise stay blurred until the user
+  // happened to re-list. It is cancelled on close and re-armed by each load (so
+  // nothing scheduled outlives the modal or a navigation), stops the moment the
+  // count reaches 0, and is capped at SCAN_POLL_MAX ticks so a stalled sweep
+  // settles into a visible pill rather than an endless request loop.
+  let scanPollTimer: ReturnType<typeof setTimeout> | null = null;
+  let scanPollsLeft = 0;
+  let scanPollLocation: string | null = null;
+  let scanPollClosed = false;
+
+  function cancelScanPoll(): void {
+    if (scanPollTimer !== null) {
+      clearTimeout(scanPollTimer);
+      scanPollTimer = null;
+    }
+  }
+
+  /** Paint the pill from a listing's unscanned count, and arm the next poll. */
+  function renderScanPill(unscanned: number): void {
+    cancelScanPoll();
+    if (unscanned <= 0) {
+      scanPillEl.style.display = "none";
+      scanPollsLeft = 0;
+      return;
+    }
+    scanPillEl.style.display = "";
+    scanPillEl.textContent = `🔍 scanning ${unscanned}`;
+    if (scanPollsLeft > 0 && !scanPollClosed) {
+      scanPollsLeft -= 1;
+      scanPollTimer = setTimeout(() => {
+        scanPollTimer = null;
+        void loadAndRender({ preserveScroll: true });
+      }, SCAN_POLL_MS);
+    }
+  }
+
+  scanPillEl.addEventListener("click", () => {
+    // An explicit tap re-arms the budget: the user asking for progress is the
+    // signal that the poll is worth spending again.
+    scanPollsLeft = SCAN_POLL_MAX;
+    void loadAndRender({ preserveScroll: true });
+  });
+
   modal.toolbarEl.append(
     crumbsEl,
     ...(viewToggleEl ? [viewToggleEl] : []),
     ...(pinToggleEl ? [pinToggleEl] : []),
     ...(pruneEl ? [pruneEl] : []),
     safeViewEl,
+    scanPillEl,
     sortEl,
     refreshEl,
     ...(pinsEl ? [pinsEl] : []),
@@ -2179,7 +2281,27 @@ export async function openImagePicker(
       p.set("safe_kw", kw);
       p.set("safe_hide", "1");
     }
+    // The opt-in prompt tier, under the same both-conditions rule as
+    // `safe_hide`: the backend refuses to run it on an empty keyword list, so
+    // the flag alone would ask for a filter it will not get. `safe_kw` is set
+    // here too rather than assumed from the branch above — the two flags are
+    // independent, and the prompt tier is usable with hiding off.
+    const promptKw = safePromptKeywords();
+    if (promptKw) {
+      p.set("safe_kw", promptKw);
+      p.set("safe_prompt", "1");
+    }
     return `${LIST_URL}?${p.toString()}`;
+  }
+
+  /**
+   * The keyword string to send for the prompt tier, or "" when it is off. Also
+   * part of the listing signature: rows fetched without the tier carry no
+   * verdicts, so switching it on needs a re-fetch, not a repaint.
+   */
+  function safePromptKeywords(): string {
+    const cfg = readSafeViewConfig();
+    return cfg.matchPrompt && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
   }
 
   /**
@@ -2234,6 +2356,7 @@ export async function openImagePicker(
   // fetch was made with. Both are compared, never assumed.
   let revealLocation: string | null = null;
   let lastSafeHideKeywords = safeHideKeywords();
+  let lastSafePromptKeywords = safePromptKeywords();
 
   /** Identifies the tab/folder being shown. A change resets the reveals. */
   function locationKey(): string {
@@ -2249,11 +2372,12 @@ export async function openImagePicker(
   disposeSafeViewSub = onSafeViewChange(() => {
     renderSafeViewToggle();
     const kw = safeHideKeywords();
-    if (kw !== lastSafeHideKeywords) {
+    if (kw !== lastSafeHideKeywords || safePromptKeywords() !== lastSafePromptKeywords) {
       // The server would now return a different SET of rows, so a repaint of
       // the rows we already have would show a stale listing — notably when
       // hiding is switched OFF, where the hidden files are simply not in
-      // `state.files` to un-blur.
+      // `state.files` to un-blur, and when the prompt tier is switched ON,
+      // where the rows we hold carry no verdicts to blur by.
       void loadAndRender({ preserveScroll: true });
       return;
     }
@@ -2262,12 +2386,20 @@ export async function openImagePicker(
 
   async function loadAndRender(opts?: { preserveScroll?: boolean }): Promise<void> {
     lastSafeHideKeywords = safeHideKeywords();
+    lastSafePromptKeywords = safePromptKeywords();
     // Reveals are dropped on a tab/folder change but survive a plain refresh
     // and a delete-triggered re-render, which is why this compares the location
     // rather than clearing on every load.
     const here = locationKey();
     if (revealLocation !== null && revealLocation !== here) revealSet.clear();
     revealLocation = here;
+    if (scanPollLocation !== here) {
+      // A fresh location gets a fresh poll budget. Re-arming per LOAD instead
+      // would make the budget unbounded: each poll is a load, so the poll would
+      // top up the allowance it just spent and never stop.
+      scanPollLocation = here;
+      scanPollsLeft = SCAN_POLL_MAX;
+    }
     renderTabs();
     renderCrumbs();
     renderViewToggle();
@@ -2282,6 +2414,10 @@ export async function openImagePicker(
     if (isPinned()) {
       await pinsDone;
       applyPinnedListing();
+      // /pins carries no prompt_match, so every pinned card is outside the
+      // tier; a stale count from the previous folder would claim a scan that
+      // is not running for this listing.
+      renderScanPill(0);
     } else {
       try {
         const r = await fetch(buildListingURL());
@@ -2292,6 +2428,9 @@ export async function openImagePicker(
         if (!data?.ok) throw new Error(data?.error || "listing failed");
         state.dirs = data.dirs || [];
         state.files = data.files || [];
+        // Read only when this request asked for the tier: a count the request
+        // did not ask for describes a scan this listing is not waiting on.
+        renderScanPill(lastSafePromptKeywords ? Number(data.safe_unscanned) || 0 : 0);
         modal.setStatus(data.exists ? "" : "Directory not found.");
         if (data.truncated) {
           notify({
@@ -2306,6 +2445,9 @@ export async function openImagePicker(
         modal.setStatus(`Error: ${(e as Error).message}`);
         state.dirs = [];
         state.files = [];
+        // A failed load says nothing about the scan; polling on top of an error
+        // would retry the failing request on a timer.
+        renderScanPill(0);
       }
       await pinsDone;
     }
@@ -2885,6 +3027,7 @@ const PICKER_CSS = `
     border-color: #5a4a2a;
 }
 .ip-prune:hover { background: #3a3320; color: #ffd866; }
+.ip-scan-pill { white-space: nowrap; color: #c8b06a; border-color: #4a4230; }
 
 /* Metadata overlay (in-dialog — a nested modal shell would dismiss the picker). */
 .ip-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }
@@ -3177,6 +3320,12 @@ try {
       // the KIT build the row is what stops two rows appearing with drifting
       // labels when both packs are installed.
       registerSafeViewHubToggle();
+      // Safe View's fast cache warmer. Installed unconditionally and gated at
+      // EVENT time on the `MatchPrompt` setting — a user who switches the tier
+      // on mid-session is covered without a reload, and one who never does
+      // never sends a request. Installed by this extension alone (not also by
+      // the inline grid's), so one execution posts once.
+      installScanWarm();
       debug("image-picker setup running");
       const nodes = (app?.graph as { _nodes?: unknown[] } | undefined)?._nodes;
       if (Array.isArray(nodes)) {

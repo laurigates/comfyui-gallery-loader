@@ -71,7 +71,7 @@ probe:
 # "Vendored sync" workflow opens the PR that moves the pin; to move it by hand,
 # run `just bump-vendored`. Logic lives in scripts/vendored.sh.
 
-# Move the pin to a canonical ref (default: main) and re-fetch image_meta.py.
+# Move the pin to a canonical ref (default: main) and re-fetch every vendored file.
 [group: "vendored"]
 bump-vendored ref="main":
     scripts/vendored.sh bump {{ref}}
@@ -85,6 +85,20 @@ sync-image-meta:
 [group: "vendored"]
 check-image-meta-drift:
     @scripts/vendored.sh check image_meta.py
+
+# safeview_store.py, Safe View's prompt-tier cache, is vendored the same way and
+# the same direction: it is a thin cache in front of image_meta.py, so it lives
+# where that does.
+
+# Restore the vendored safeview_store.py from the pinned canonical commit.
+[group: "vendored"]
+sync-safeview-store:
+    scripts/vendored.sh sync safeview_store.py
+
+# Fail if the vendored safeview_store.py differs from the pinned canonical commit.
+[group: "vendored"]
+check-safeview-store-drift:
+    @scripts/vendored.sh check safeview_store.py
 
 ##########
 # Assets

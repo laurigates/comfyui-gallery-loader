@@ -180,7 +180,7 @@ chooser. Settings live under **Settings → Touch Tools → Safe View**:
 | Keywords | `nsfw` | Comma- or space-separated. |
 | Remove matches from the listing entirely | off | Drops matches server-side so they never reach the browser. |
 | Block out names too | on | Replaces the name, its folder label and its tooltip with a solid block. |
-| Also match the generation prompt and model | off | Not implemented yet — see below. |
+| Also match the generation prompt and model | off | Matches the prompt and checkpoint name embedded in each render — see [below](#matching-the-generation-prompt). |
 
 Keywords match **whole words**, never substrings. `nsfw` matches
 `output/nsfw/pic.png` and `my_nsfw_pic.png`; it does **not** match
@@ -227,6 +227,34 @@ both packs are installed you will see one benign `console.warn` about a
 duplicate setting id at load; that is the sharing mechanism working, not a
 fault.
 
+### Matching the generation prompt
+
+With **Also match the generation prompt and model** on, a fourth haystack joins
+the name, the folders and the `dc:subject` keywords: the positive and negative
+prompt and the model name ComfyUI embedded in the file. A render called
+`ComfyUI_00042_.png` in an innocent folder is blurred because of what its
+prompt says. Matching is the same whole-word rule as everywhere else.
+
+Reading a prompt means opening the file, so the text is cached server-side in
+`<user_dir>/comfy-safeview.sqlite`, keyed on path + modification time + size.
+The cache holds the text, not the verdict, so changing your keywords costs no
+re-scan; the prompt itself is never sent to the browser, only one yes/no per
+file. The cache is **shared with comfyui-image-browser**, so a file either pack
+has scanned is known to both.
+
+A file that has not been scanned yet is **blurred** — the cautious reading of
+an unknown — and the toolbar shows a `🔍 scanning N` pill while that is the
+case (the inline node grid puts the count in its status line). Two things fill
+the cache:
+
+- the first listing that finds unscanned files starts a one-off background
+  sweep of input/output/temp, which covers everything already on disk;
+- every finished render is scanned the moment it lands, while a ComfyUI tab is
+  open, so the newest card is not the one stuck blurred.
+
+Files the metadata reader cannot open (`.avi`, audio, folder cards) are outside
+this tier entirely: never blurred by it, never counted as waiting.
+
 ### What it does not cover
 
 Worth reading before relying on it — these are known gaps, not bugs:
@@ -242,8 +270,14 @@ Worth reading before relying on it — these are known gaps, not bugs:
 - **Confirmations and toasts name files in plain text.** A rating failure or a
   pin error names the file it was about, unblurred.
 - **The metadata panel (`ⓘ`) shows the full prompt**, whether or not the card
-  is blurred. Prompt/model matching is a later phase; the setting for it is
-  listed above but does nothing yet.
+  is blurred.
+- **The prompt tier does not reach a symlinked subfolder.** The background
+  sweep does not follow links, and the render-time scan uses the same
+  sandboxed resolver as the metadata writes, so files under
+  `output/renders -> /mnt/nas/renders` stay "not scanned" — and blurred —
+  while the tier is on.
+- **The pinned view carries no prompt verdicts.** Pinned cards are matched on
+  name, path and keywords only.
 - **A node's own canvas preview is untouched.** A fresh render appears
   full-size on the graph, unfiltered — that is ComfyUI's own output preview and
   nothing in this pack can reach it.
@@ -274,11 +308,12 @@ the current absolute path.
 
 | Route                         | Purpose                                                                 |
 |-------------------------------|-------------------------------------------------------------------------|
-| `GET /gallery_loader/list`    | Directory listing. Params: `type=input\|output\|temp\|path`, `subfolder`, `path`, `extensions` (CSV), plus `safe_kw` (CSV keywords) + `safe_hide=1` for Safe View's server-side hide. Both Safe View params are required together; either alone filters nothing. Name/path hiding is applied **above** the newest-N cap, and the `dc:subject` keyword tier (which needs the XMP read) tops the page back up as it probes, so a mostly-sensitive folder still returns a full page of the rest. Every row carries `tags` — the file's `dc:subject` keywords, read in the same pass as the rating. Image dims (width/height) are populated for image entries only. |
+| `GET /gallery_loader/list`    | Directory listing. Params: `type=input\|output\|temp\|path`, `subfolder`, `path`, `extensions` (CSV), plus `safe_kw` (CSV keywords) + `safe_hide=1` for Safe View's server-side hide. Both Safe View params are required together; either alone filters nothing. `safe_prompt=1` (also with `safe_kw`) turns on the prompt tier: each file with a metadata reader carries `prompt_match` — `true`, `false`, or `"unscanned"` — and the response carries `safe_unscanned`, the count of the last. A file outside the tier has no `prompt_match` key at all. With `safe_hide=1` as well, prompt matches and unscanned files are dropped above the cap like any other match. Name/path hiding is applied **above** the newest-N cap, and the `dc:subject` keyword tier (which needs the XMP read) tops the page back up as it probes, so a mostly-sensitive folder still returns a full page of the rest. Every row carries `tags` — the file's `dc:subject` keywords, read in the same pass as the rating. Image dims (width/height) are populated for image entries only. |
 | `GET /gallery_loader/base`    | Returns `base_path`, `input_dir`, `output_dir`, `temp_dir`, `user_dir`. Used by the modal to default VHS path-mode to the ComfyUI install root. |
 | `GET /gallery_loader/thumb`   | Webp 512px thumbnail for an image in a sandboxed root or at an absolute path inside the read reach. Managed-type listings use core `/api/view` directly. |
 | `GET /gallery_loader/file`    | Streams a whitelisted-extension file (images + common video formats) at an absolute path inside the read reach. Used for video posters in path-mode where core `/api/view` doesn't apply. |
 | `POST /gallery_loader/tag`    | Add or remove ONE `dc:subject` keyword: `{type, subfolder, name, tag, present}`. A delta — the file's other keywords, its rating and every foreign XMP property survive. Answers `{ok, tags, backend}` where `tags` is read back off the file **after** the write, not echoed from the request. |
+| `POST /gallery_loader/safeview_warm` | Scan and cache the prompt text of freshly rendered files: `{items: [{type, subfolder, name}, ...]}`, at most 64, sandboxed roots only. A non-participating or invalid item is skipped, not refused. Answers `{ok, scanned}`. Driven by the frontend's `executed` listener. |
 | `GET /gallery_loader/pins`    | The pin list, every entry resolved: `{ok, max, pins}`, each pin carrying `exists` plus (for a live file pin) the same per-file keys `/list` emits. An unresolvable pin is returned with `exists: false`, never dropped. |
 | `POST /gallery_loader/pins`   | One **delta** — `{op: "add"\|"remove"\|"prune", item?}` — never a whole-list PUT (two open browsers would each send their own list and the second write would discard the first's pin). Answers with the same whole list as the GET. `add` on an existing pin is a successful no-op. |
 

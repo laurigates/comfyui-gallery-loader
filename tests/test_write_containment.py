@@ -528,6 +528,7 @@ MUTATING_PATHS = {
     "/gallery_loader/rating",
     "/gallery_loader/tag",
     "/gallery_loader/pins",
+    "/gallery_loader/safeview_warm",
 }
 
 
@@ -552,6 +553,7 @@ class TestJsonContentTypeGuard:
             ("gallery_set_rating", "/gallery_loader/rating"),
             ("gallery_set_tag", "/gallery_loader/tag"),
             ("gallery_pins_post", "/gallery_loader/pins"),
+            ("gallery_safeview_warm", "/gallery_loader/safeview_warm"),
         ],
     )
     def test_the_handler_that_was_REGISTERED_is_the_guarded_one(self, name, path):
@@ -643,6 +645,7 @@ class TestNoPostRouteBypassesTheGuard:
         _, guarded = self._decorated()
         assert sorted(guarded) == [
             "gallery_pins_post",
+            "gallery_safeview_warm",
             "gallery_set_rating",
             "gallery_set_tag",
         ]

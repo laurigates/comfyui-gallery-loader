@@ -2,7 +2,7 @@
   "command": [
     "bash",
     "-c",
-    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_helpers.py tests/test_safe_view.py tests/test_endpoints.py tests/test_write_containment.py tests/test_rating_endpoint.py tests/test_scan_dimensions.py && bun run test"
+    "uv run pytest -q -p no:cacheprovider tests/test_xmp.py tests/test_helpers.py tests/test_safe_view.py tests/test_safe_prompt.py tests/test_endpoints.py tests/test_write_containment.py tests/test_rating_endpoint.py tests/test_scan_dimensions.py && bun run test"
   ],
   "reporter": "exit-code",
   "mutations": [
@@ -333,8 +333,8 @@
     {
       "label": "TAGS picker \u2014 the card is matched without its keywords, so a tag-only match is never blurred",
       "file": "src/image-picker.ts",
-      "before": "    if (!isSensitive({ name: f.name, path: safeViewPath(f), tags: f.tags }, cfg)) return false;",
-      "after": "    if (!isSensitive({ name: f.name, path: safeViewPath(f) }, cfg)) return false;"
+      "before": "      path: safeViewPath(f),\n      tags: f.tags,\n      promptMatch: f.prompt_match,",
+      "after": "      path: safeViewPath(f),\n      promptMatch: f.prompt_match,"
     },
     {
       "label": "TAGS picker \u2014 the \ud83d\ude48 WRITE hardcodes the packaged default instead of the keyword the user configured",
@@ -605,6 +605,234 @@
       "file": "gallery_loader.py",
       "before": "    if os.path.splitext(name)[1].lower() not in MEDIA_EXTS:\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")",
       "after": "    if os.path.splitext(name)[1].lower() not in (IMG_EXTS | VIDEO_EXTS):\n        return None, \"unsupported file type\"\n    base, err = _resolve_listing_base(type_name, subfolder, \"\")"
+    },
+    {
+      "label": "PROMPT backend \u2014 `unscanned` is reported as a definite `false` (a cold cache shows sensitive renders in the clear)",
+      "file": "gallery_loader.py",
+      "before": "        out[path] = _PROMPT_UNSCANNED if text is None else _is_sensitive(text, \"\", keywords)",
+      "after": "        out[path] = False if text is None else _is_sensitive(text, \"\", keywords)"
+    },
+    {
+      "label": "PROMPT backend \u2014 a container with NO metadata reader is treated as unscanned (every .avi blurs)",
+      "file": "gallery_loader.py",
+      "before": "    participating = [e for e in entries if _has_metadata_reader(e[2])]",
+      "after": "    participating = list(entries)"
+    },
+    {
+      "label": "PROMPT backend \u2014 the prompt is matched as SUBSTRINGS (`ass` matches \"assets\")",
+      "file": "gallery_loader.py",
+      "before": "        out[path] = _PROMPT_UNSCANNED if text is None else _is_sensitive(text, \"\", keywords)",
+      "after": "        out[path] = _PROMPT_UNSCANNED if text is None else any(k in text for k in keywords)"
+    },
+    {
+      "label": "PROMPT backend \u2014 the flag alone is honoured, ignoring the keyword list",
+      "file": "gallery_loader.py",
+      "before": "    prompt_keywords = _parse_safe_keywords(q.get(\"safe_kw\", \"\")) if safe_prompt else []",
+      "after": "    prompt_keywords = (_parse_safe_keywords(q.get(\"safe_kw\", \"\")) or [\"nsfw\"]) if safe_prompt else []"
+    },
+    {
+      "label": "PROMPT backend \u2014 the tier runs whatever the flag says (a `maybe` starts parsing metadata)",
+      "file": "gallery_loader.py",
+      "before": "    safe_prompt = q.get(\"safe_prompt\", \"\") in (\"1\", \"true\", \"yes\")",
+      "after": "    safe_prompt = True"
+    },
+    {
+      "label": "PROMPT backend \u2014 hiding ignores the prompt verdict (a matched render is listed in the clear)",
+      "file": "gallery_loader.py",
+      "before": "    if prompt_keywords:\n        if safe_keywords:\n            verdicts",
+      "after": "    if prompt_keywords:\n        if False:\n            verdicts"
+    },
+    {
+      "label": "PROMPT backend \u2014 hiding KEEPS an unscanned file (a not-yet-judged render is listed in the clear)",
+      "file": "gallery_loader.py",
+      "before": "            found = [entry for entry in found if verdicts.get(entry[4]) in (None, False)]",
+      "after": "            found = [\n                entry\n                for entry in found\n                if verdicts.get(entry[4]) in (None, False, _PROMPT_UNSCANNED)\n            ]"
+    },
+    {
+      "label": "PROMPT backend \u2014 blur-only judges the whole tree, not the shipped page (the count stops describing the grid)",
+      "file": "gallery_loader.py",
+      "before": "            verdicts = _prompt_verdicts(found[:cap], prompt_keywords)",
+      "after": "            verdicts = _prompt_verdicts(found, prompt_keywords)"
+    },
+    {
+      "label": "PROMPT backend \u2014 the tier never reaches the recursive walk (flat view stops matching prompts)",
+      "file": "gallery_loader.py",
+      "before": "            prompt_keywords=prompt_keywords,\n        )\n    else:",
+      "after": "            prompt_keywords=(),\n        )\n    else:"
+    },
+    {
+      "label": "PROMPT backend \u2014 the sweep starts on every listing, cached or not (a warm library re-walks per request)",
+      "file": "gallery_loader.py",
+      "before": "    if unscanned:\n        _maybe_start_sweep()",
+      "after": "    if True:\n        _maybe_start_sweep()"
+    },
+    {
+      "label": "INERT sweep trigger \u2014 it never fires (nothing ever warms the backlog)",
+      "file": "gallery_loader.py",
+      "before": "    if unscanned:\n        _maybe_start_sweep()",
+      "after": "    if False:\n        _maybe_start_sweep()"
+    },
+    {
+      "label": "INERT prompt backend \u2014 every verdict is `unscanned` (the whole library blurs; a one-sided cold-cache test cannot see it)",
+      "file": "gallery_loader.py",
+      "before": "    participating = [e for e in entries if _has_metadata_reader(e[2])]",
+      "after": "    return {e[4]: _PROMPT_UNSCANNED for e in entries if _has_metadata_reader(e[2])}\n    participating = [e for e in entries if _has_metadata_reader(e[2])]"
+    },
+    {
+      "label": "WARM \u2014 the batch cap is dropped (a client can hand the executor a whole library)",
+      "file": "gallery_loader.py",
+      "before": "    if len(items) > MAX_WARM_BATCH:",
+      "after": "    if False:"
+    },
+    {
+      "label": "WARM \u2014 the sandbox perimeter is swapped for the listing resolver (type=path reaches the scanner)",
+      "file": "gallery_loader.py",
+      "before": "        target, err = _resolve_sandboxed_file(type_name, subfolder, name)",
+      "after": "        base, err = _resolve_listing_base(type_name, subfolder, subfolder)\n        target = os.path.join(base, name) if base else None"
+    },
+    {
+      "label": "WARM \u2014 the metadata-reader gate is dropped (an .avi is parsed for a guaranteed empty result)",
+      "file": "gallery_loader.py",
+      "before": "        if err or target is None or not _has_metadata_reader(target):",
+      "after": "        if err or target is None:"
+    },
+    {
+      "label": "STORE (vendored) \u2014 a file carrying no prompt is NOT cached (it stays unscanned, and blurred, forever)",
+      "file": "safeview_store.py",
+      "before": "        pending.append((key, extract_text(target)))",
+      "after": "        text = extract_text(target)\n        if text:\n            pending.append((key, text))"
+    },
+    {
+      "label": "STORE (vendored) \u2014 the model name is dropped from the haystack",
+      "file": "safeview_store.py",
+      "before": "TEXT_KEYS = (\"positive\", \"negative\", \"model\")",
+      "after": "TEXT_KEYS = (\"positive\", \"negative\")"
+    },
+    {
+      "label": "CONTROL \u2014 prompt-tier comment text only; MUST be MISSED, or the prompt assertions are over-triggering",
+      "file": "gallery_loader.py",
+      "before": "# Upper bound on one /safeview_warm batch.",
+      "after": "# Upper limit on one /safeview_warm batch."
+    },
+    {
+      "label": "PROMPT picker \u2014 the verdict is never passed to the matcher (a matched prompt renders in the clear)",
+      "file": "src/image-picker.ts",
+      "before": "      tags: f.tags,\n      promptMatch: f.prompt_match,\n    };",
+      "after": "      tags: f.tags,\n    };"
+    },
+    {
+      "label": "PROMPT picker \u2014 an ABSENT verdict is defaulted to `unscanned` (every folder-less .avi and pinned card blurs)",
+      "file": "src/image-picker.ts",
+      "before": "      promptMatch: f.prompt_match,\n    };",
+      "after": "      promptMatch: f.prompt_match ?? (\"unscanned\" as const),\n    };"
+    },
+    {
+      "label": "PROMPT picker \u2014 the listing never asks for the tier (it silently never runs)",
+      "file": "src/image-picker.ts",
+      "before": "    if (promptKw) {\n      p.set(\"safe_kw\", promptKw);",
+      "after": "    if (false) {\n      p.set(\"safe_kw\", promptKw);"
+    },
+    {
+      "label": "PROMPT picker \u2014 switching the tier on repaints stale rows instead of re-fetching",
+      "file": "src/image-picker.ts",
+      "before": "    if (kw !== lastSafeHideKeywords || safePromptKeywords() !== lastSafePromptKeywords) {",
+      "after": "    if (kw !== lastSafeHideKeywords) {"
+    },
+    {
+      "label": "PILL \u2014 the scanning pill never reports a count (a mostly-blurred grid looks broken, not busy)",
+      "file": "src/image-picker.ts",
+      "before": "        renderScanPill(lastSafePromptKeywords ? Number(data.safe_unscanned) || 0 : 0);",
+      "after": "        renderScanPill(0);"
+    },
+    {
+      "label": "INERT pill \u2014 it is shown even at zero, so it never goes away",
+      "file": "src/image-picker.ts",
+      "before": "    if (unscanned <= 0) {",
+      "after": "    if (false) {"
+    },
+    {
+      "label": "PILL \u2014 the poll is not cancelled on close (a dead grid re-lists every 3 s)",
+      "file": "src/image-picker.ts",
+      "before": "      cancelScanPoll();\n      // The preview player must not outlive the modal",
+      "after": "      // The preview player must not outlive the modal"
+    },
+    {
+      "label": "PILL — a poll in flight at close re-arms the timer (a dead grid re-lists until the budget runs out)",
+      "file": "src/image-picker.ts",
+      "before": "    if (scanPollsLeft > 0 && !scanPollClosed) {",
+      "after": "    if (scanPollsLeft > 0) {"
+    },
+    {
+      "label": "PILL \u2014 the poll budget is re-armed per LOAD, so a stalled sweep polls forever",
+      "file": "src/image-picker.ts",
+      "before": "    if (scanPollLocation !== here) {",
+      "after": "    if (true) {"
+    },
+    {
+      "label": "WARM picker \u2014 setup() never installs the executed warmer (every fresh render stays blurred)",
+      "file": "src/image-picker.ts",
+      "before": "      installScanWarm();\n",
+      "after": "\n"
+    },
+    {
+      "label": "PROMPT inline grid \u2014 the verdict is never passed to the matcher (the second call site disagrees with the picker)",
+      "file": "src/gallery_loader.ts",
+      "before": "{ name: f.name, path: svPath, tags: f.tags, promptMatch: f.prompt_match },",
+      "after": "{ name: f.name, path: svPath, tags: f.tags },"
+    },
+    {
+      "label": "PROMPT inline grid \u2014 the listing never asks for the tier",
+      "file": "src/gallery_loader.ts",
+      "before": "      if (promptKw) {\n        params.set(\"safe_kw\", promptKw);",
+      "after": "      if (false) {\n        params.set(\"safe_kw\", promptKw);"
+    },
+    {
+      "label": "PROMPT inline grid \u2014 the status line drops the scanning count",
+      "file": "src/gallery_loader.ts",
+      "before": "const scanning = unscanned > 0 ? ` \u00b7 \ud83d\udd0d scanning ${unscanned}` : \"\";",
+      "after": "const scanning = \"\";"
+    },
+    {
+      "label": "WARMER \u2014 videos are not swept (every freshly generated clip stays blurred forever)",
+      "file": "src/scan-warm.ts",
+      "before": "const MEDIA_KEYS = [\"images\", \"video\"] as const;",
+      "after": "const MEDIA_KEYS = [\"images\"] as const;"
+    },
+    {
+      "label": "WARMER \u2014 audio is swept too (a round trip for a container no reader can parse)",
+      "file": "src/scan-warm.ts",
+      "before": "const MEDIA_KEYS = [\"images\", \"video\"] as const;",
+      "after": "const MEDIA_KEYS = [\"images\", \"video\", \"audio\"] as const;"
+    },
+    {
+      "label": "WARMER \u2014 an item with no filename is posted anyway (a bogus address gets scanned)",
+      "file": "src/scan-warm.ts",
+      "before": "      if (typeof filename !== \"string\" || filename === \"\") continue;",
+      "after": "      if (false) continue;"
+    },
+    {
+      "label": "WARMER \u2014 an unsandboxed root is posted (the request the backend's perimeter must then refuse)",
+      "file": "src/scan-warm.ts",
+      "before": "      if (typeof type !== \"string\" || !SANDBOXED_TYPES.includes(type)) continue;",
+      "after": "      if (typeof type !== \"string\") continue;"
+    },
+    {
+      "label": "WARMER \u2014 it runs with the tier switched off (work nobody asked for, on every render)",
+      "file": "src/scan-warm.ts",
+      "before": "    if (!cfg.matchPrompt) return;",
+      "after": "    if (false) return;"
+    },
+    {
+      "label": "WARMER \u2014 the teardown does not remove the listener (one leak per install)",
+      "file": "src/scan-warm.ts",
+      "before": "  return () => api.removeEventListener(\"executed\", onExecuted);",
+      "after": "  return () => {};"
+    },
+    {
+      "label": "INERT warmer \u2014 it never posts (a one-sided \"no posts\" assertion cannot tell this from correct restraint)",
+      "file": "src/scan-warm.ts",
+      "before": "    if (items.length === 0) return;",
+      "after": "    if (true) return;"
     },
     {
       "label": "AUDIO PREVIEW — ▶ is dropped from the commit handler's skip list, so tapping it commits and closes the picker",

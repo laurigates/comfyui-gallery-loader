@@ -17,12 +17,14 @@ The list endpoint ``/gallery_loader/list`` powers the picker UI.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import hashlib
 import logging
 import mimetypes
 import os
 import re
+import time
 from collections.abc import Sequence
 from email.utils import formatdate
 from typing import Any
@@ -39,12 +41,13 @@ try:
     # ComfyUI imports custom_nodes as packages, so the sibling module must
     # be pulled in relatively — a bare ``import xmp_meta`` raises
     # ModuleNotFoundError at load time because the pack dir isn't on sys.path.
-    from . import image_meta, pins_store, thumb_cache, xmp_meta
+    from . import image_meta, pins_store, safeview_store, thumb_cache, xmp_meta
 except ImportError:
     # Pytest imports this module flat (pack root on sys.path via pyproject's
     # ``pythonpath = ["."]``); fall back to the absolute import.
     import image_meta
     import pins_store
+    import safeview_store
     import thumb_cache
     import xmp_meta
 
@@ -159,6 +162,20 @@ def _is_sensitive(name: str, path: str, keywords: Sequence[str], tags: Sequence[
 # tree in one request", so the extensions parameter is clamped to this rather
 # than passed through — see gallery_list.
 MEDIA_EXTS = IMG_EXTS | VIDEO_EXTS | AUDIO_EXTS
+
+# The files that PARTICIPATE in Safe View's prompt tier: every image, plus the
+# video containers the vendored image_meta can actually read (MP4/MOV/M4V,
+# WebM/MKV). Derived exactly as comfyui-image-browser derives it, from the same
+# two inputs, because the two packs render the same files: a file that takes
+# part in one pack's tier and not the other's is blurred in one grid and plain
+# in the other over the same bytes. Anything outside it (`.avi`, audio, a
+# folder card) carries NO verdict at all — never "unscanned".
+METADATA_EXTS = IMG_EXTS | (VIDEO_EXTS & set(image_meta.FORMAT_EXTS))
+
+
+def _has_metadata_reader(name: str) -> bool:
+    return os.path.splitext(name)[1].lower() in METADATA_EXTS
+
 
 # Upper bound on files a recursive ("flat") listing RETURNS. The walk itself
 # always covers the whole subtree (see FLAT_WALK_CAP) and the cap is applied
@@ -652,6 +669,117 @@ def _scan_file_entry(
 _FoundEntry = tuple[float, str, str, str, str, os.stat_result]
 
 
+# ---------------------------------------------------------------------------
+# Safe View — the opt-in prompt-metadata tier
+# ---------------------------------------------------------------------------
+#
+# A PORT of comfyui-image-browser's tier, not a re-derivation: both packs render
+# the same files and read the same cache, so they must agree file-for-file.
+#
+# The free tiers match the keyword list against a file's NAME, the FOLDERS above
+# it and its XMP TAGS, all of which /list already knows. This tier adds a fourth
+# haystack: the file's embedded GENERATION PROMPT and model name. It is off by
+# default (`TouchTools.SafeView.MatchPrompt`) because it is the only tier that
+# costs a file parse per file — see safeview_store.py for the cache that makes it
+# affordable at all.
+#
+# FOUR STATES, not two. Per file, /list reports:
+#
+#   True         cached text matched a keyword
+#   False        cached text did not match
+#   "unscanned"  the file participates but has no cached text yet — the kit
+#                reads this as SENSITIVE, because the fail-safe direction for an
+#                unknown is to blur
+#   (key absent) the file does not participate at all (no metadata reader for
+#                its container) — never sensitive by this tier
+#
+# The last two are the pair that is easy to collapse and must not be: treating a
+# folder card or an .avi as unscanned would blur the entire grid the moment the
+# tier came on. The kit's PromptVerdict type carries the same four states.
+#
+# THE RESPONSE NEVER CARRIES PROMPT TEXT. Matching happens here, against the
+# cached text, through the SAME `_is_sensitive` the name/path/tag haystacks use —
+# so the semantics cannot drift between tiers, and the text the user asked not
+# to see on screen is never sent to the screen.
+
+_PROMPT_UNSCANNED = "unscanned"
+
+# Upper bound on one /safeview_warm batch. The frontend posts the outputs of a
+# single execution, which is a handful of files; the cap exists so a client
+# cannot ask the executor to parse a whole library through the fast path that
+# deliberately bypasses the sweep's batching.
+MAX_WARM_BATCH = 64
+
+# Minimum gap between two background sweeps. The sweep is started lazily by a
+# listing that found unscanned files, so without this a grid full of
+# freshly-deleted-and-rewritten files could start one per request.
+SWEEP_MIN_INTERVAL = 60.0
+
+_sweep_task: asyncio.Task[int] | None = None
+_sweep_started_at = 0.0
+
+
+def _safeview_db() -> str:
+    # Resolved lazily (not at import) so a test stub of folder_paths doesn't
+    # break module load — same reason as _thumb_cache_dir. The same
+    # <user_dir>/comfy-safeview.sqlite is used by comfyui-image-browser, so one
+    # scan serves both packs, exactly like the shared thumbnail cache.
+    return safeview_store.db_path(str(folder_paths.get_user_directory()))
+
+
+def _prompt_verdicts(entries: list[_FoundEntry], keywords: Sequence[str]) -> dict[str, bool | str]:
+    """Map each entry's path to its prompt-tier verdict.
+
+    Entries whose container has no metadata reader are OMITTED — they do not
+    participate in the tier, which is a different fact from "not scanned yet"
+    (see the block comment above). One batched cache read for the whole list;
+    per-file reads would put a query per card on the event loop.
+    """
+    participating = [e for e in entries if _has_metadata_reader(e[2])]
+    if not participating:
+        return {}
+    keyed = [(safeview_store.cache_key(e[4], e[5]), e[4]) for e in participating]
+    cached = safeview_store.read_cached(_safeview_db(), [k for k, _ in keyed])
+    out: dict[str, bool | str] = {}
+    for key, path in keyed:
+        text = cached.get(key)
+        # The text goes through `_is_sensitive` as a haystack of its own, so it
+        # is tokenized exactly like a name or a tag: whole tokens, never
+        # substrings (`ass` does not match "assets").
+        out[path] = _PROMPT_UNSCANNED if text is None else _is_sensitive(text, "", keywords)
+    return out
+
+
+def _maybe_start_sweep() -> None:
+    """Start the background cache sweep, unless one is already running.
+
+    LAZY BY DESIGN: nothing here runs until a request actually asks for the
+    prompt tier, so a user who never enables it never pays for a walk of their
+    output tree.
+
+    Fails soft in every direction: no running loop (a unit test), no user
+    directory, a cancelled task — the tier still answers, just with more
+    "unscanned" verdicts until a warmer catches up.
+    """
+    global _sweep_task, _sweep_started_at
+    if _sweep_task is not None and not _sweep_task.done():
+        return
+    now = time.monotonic()
+    if _sweep_task is not None and now - _sweep_started_at < SWEEP_MIN_INTERVAL:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        roots = [folder_paths.get_directory_by_type(t) for t in SANDBOXED_TYPES]
+        db = _safeview_db()
+    except Exception as exc:
+        log.warning("safe-view sweep could not start: %s", exc)
+        return
+    _sweep_started_at = now
+    _sweep_task = loop.create_task(
+        safeview_store.sweep(db, [str(r) for r in roots if r], METADATA_EXTS)
+    )
+
+
 def _probe_newest(
     found: list[_FoundEntry],
     image_subset: set[str],
@@ -661,7 +789,8 @@ def _probe_newest(
     with_subpath: bool,
     safe_keywords: Sequence[str] = (),
     safe_base: str = "",
-) -> tuple[list[dict[str, Any]], bool]:
+    prompt_keywords: Sequence[str] = (),
+) -> tuple[list[dict[str, Any]], bool, int]:
     """Sort newest-first, slice to ``cap``, then probe only the survivors.
 
     The ordering matters. Probing during enumeration and stopping at the cap
@@ -696,6 +825,20 @@ def _probe_newest(
     exactly the same number of probes as before whenever nothing is tagged.
     ``PROBE_BUDGET_FACTOR`` bounds the pathological case (a whole tree tagged),
     where the honest answer is a short page marked ``truncated``.
+
+    ``prompt_keywords`` turns on the opt-in prompt tier, tagging each
+    participating file with a ``prompt_match`` verdict. The third return value
+    is how many files were ``"unscanned"`` — the number the toolbar's
+    "scanning N" pill reports. The tier is evaluated at TWO different points
+    depending on hiding, because the two answers need different sets:
+
+      * with hiding on, the verdict decides MEMBERSHIP, so it is computed for
+        every candidate — above the cap, for the same reason the name/path
+        hide is. ``"unscanned"`` is dropped there too, mirroring the kit's
+        ``isSensitive``: hiding mode has no blur to fall back on.
+      * with hiding off, only the files that ship need a verdict, so it is
+        computed AFTER the slice — one batched cache read over ``cap`` keys
+        rather than over the whole tree.
     """
     if safe_keywords:
         found = [
@@ -704,6 +847,16 @@ def _probe_newest(
             if not _is_sensitive(entry[2], _safe_join(safe_base, entry[1]), safe_keywords)
         ]
     found.sort(key=lambda f: (-f[0], f[1], f[2]))
+    unscanned = 0
+    verdicts: dict[str, bool | str] = {}
+    if prompt_keywords:
+        if safe_keywords:
+            verdicts = _prompt_verdicts(found, prompt_keywords)
+            unscanned = sum(1 for v in verdicts.values() if v == _PROMPT_UNSCANNED)
+            found = [entry for entry in found if verdicts.get(entry[4]) in (None, False)]
+        else:
+            verdicts = _prompt_verdicts(found[:cap], prompt_keywords)
+            unscanned = sum(1 for v in verdicts.values() if v == _PROMPT_UNSCANNED)
     budget = cap * PROBE_BUDGET_FACTOR if safe_keywords else cap
     files: list[dict[str, Any]] = []
     probed = 0
@@ -718,9 +871,14 @@ def _probe_newest(
             continue
         if with_subpath:
             fd["subpath"] = subpath
+        # Absent for a file outside the tier — a container with no metadata
+        # reader. The frontend reads an absent key as "does not participate",
+        # which is NOT the same as "unscanned" and is never blurred.
+        if path in verdicts:
+            fd["prompt_match"] = verdicts[path]
         files.append(fd)
     truncated = walk_truncated or probed < len(found)
-    return files, truncated
+    return files, truncated, unscanned
 
 
 def _walk_files(
@@ -731,7 +889,8 @@ def _walk_files(
     *,
     safe_keywords: Sequence[str] = (),
     safe_base: str = "",
-) -> tuple[list[dict[str, Any]], bool]:
+    prompt_keywords: Sequence[str] = (),
+) -> tuple[list[dict[str, Any]], bool, int]:
     """Recursively collect files under ``base``, newest first, capped.
 
     Two phases: a cheap stat-only enumeration of the whole subtree, then the
@@ -786,6 +945,7 @@ def _walk_files(
         with_subpath=True,
         safe_keywords=safe_keywords,
         safe_base=safe_base,
+        prompt_keywords=prompt_keywords,
     )
 
 
@@ -828,6 +988,14 @@ async def gallery_list(request: web.Request) -> web.Response:
     safe_hide = q.get("safe_hide", "") in ("1", "true", "yes")
     safe_keywords = _parse_safe_keywords(q.get("safe_kw", "")) if safe_hide else []
 
+    # The opt-in prompt tier, gated exactly like `safe_hide`: BOTH the flag and
+    # a non-empty keyword list, so a request that forgot the list cannot blur a
+    # user's whole grid on "unscanned" verdicts nobody asked for. Independent of
+    # `safe_hide` — the two compose (see _probe_newest), and blur-only is the
+    # default mode for this tier as it is for the others.
+    safe_prompt = q.get("safe_prompt", "") in ("1", "true", "yes")
+    prompt_keywords = _parse_safe_keywords(q.get("safe_kw", "")) if safe_prompt else []
+
     base, err = _resolve_listing_base(type_name, subfolder, abs_path)
     if err:
         status = 403 if err == READ_REACH_REFUSAL else 400
@@ -859,13 +1027,14 @@ async def gallery_list(request: web.Request) -> web.Response:
     files: list[dict[str, Any]] = []
     if recursive:
         # Flat view: no folder cards, files carry their relative subpath.
-        files, truncated = _walk_files(
+        files, truncated, unscanned = _walk_files(
             base,
             exts,
             image_subset,
             FLAT_LIST_CAP,
             safe_keywords=safe_keywords,
             safe_base=safe_base,
+            prompt_keywords=prompt_keywords,
         )
     else:
         found: list[_FoundEntry] = []
@@ -904,7 +1073,7 @@ async def gallery_list(request: web.Request) -> web.Response:
         # Same enumerate → sort → slice → probe shape as the recursive path, so
         # a huge single directory costs the expensive probes only for the files
         # that ship. Newest first — the common case is "I just rendered this".
-        files, truncated = _probe_newest(
+        files, truncated, unscanned = _probe_newest(
             found,
             image_subset,
             DIR_LIST_CAP,
@@ -912,22 +1081,34 @@ async def gallery_list(request: web.Request) -> web.Response:
             with_subpath=False,
             safe_keywords=safe_keywords,
             safe_base=safe_base,
+            prompt_keywords=prompt_keywords,
         )
 
     dirs.sort(key=lambda d: d["name"].lower())
 
-    return web.json_response(
-        {
-            "ok": True,
-            "type": type_name,
-            "subfolder": subfolder,
-            "path": base,
-            "dirs": dirs,
-            "files": files,
-            "exists": True,
-            "truncated": truncated,
-        }
-    )
+    # A listing that found unscanned files is the trigger for the background
+    # sweep — the tier's only backlog warmer. Started HERE rather than at import
+    # so a user who never enables it never pays for a walk of their output tree,
+    # and skipped once everything in view is cached so a warm library does not
+    # re-walk on every request.
+    if unscanned:
+        _maybe_start_sweep()
+
+    body: dict[str, Any] = {
+        "ok": True,
+        "type": type_name,
+        "subfolder": subfolder,
+        "path": base,
+        "dirs": dirs,
+        "files": files,
+        "exists": True,
+        "truncated": truncated,
+    }
+    # Present only when the tier is on, so the default response stays
+    # byte-identical to what it was before this tier existed.
+    if prompt_keywords:
+        body["safe_unscanned"] = unscanned
+    return web.json_response(body)
 
 
 @PromptServer.instance.routes.get("/gallery_loader/base")
@@ -1230,6 +1411,70 @@ async def gallery_set_tag(request: web.Request) -> web.Response:
             "backend": backend,
         }
     )
+
+
+@_mutating_post("/gallery_loader/safeview_warm")
+async def gallery_safeview_warm(request: web.Request) -> web.Response:
+    """Scan and cache the prompt text of the files a render just produced.
+
+    Body: ``{items: [{type, subfolder, name}, ...]}``. Answers
+    ``{ok, scanned}`` — how many files were newly parsed (an already-cached
+    file counts 0).
+
+    THE SECOND CACHE WARMER. The background sweep covers the BACKLOG but
+    finishes; this covers FRESH RENDERS the moment they land, driven by the
+    frontend's ``executed`` websocket listener (``src/scan-warm.ts``). Without
+    it every new generation would be "unscanned" — and therefore blurred —
+    until the next sweep, which is the most visible file in the grid being the
+    one Safe View hides.
+
+    It writes only the cache, never the file, but it is still a POST that
+    changes server state, so it is registered through ``_mutating_post`` like
+    every other one.
+
+    Perimeter: ``_resolve_sandboxed_file``, the same resolver the metadata
+    writes use, so ``type=path`` is refused — ComfyUI's own output addresses
+    are always sandboxed. A bad or non-participating item (an ``.avi``, a
+    traversal, a malformed entry) is SKIPPED rather than refused: the frontend
+    posts every output of an execution, and a mixed batch must not lose its
+    images because one entry was unreadable.
+
+    The parse runs in an executor. ``image_meta`` on the event loop is exactly
+    the stall this whole tier is built to avoid.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+    items = body.get("items") if isinstance(body, dict) else None
+    if not isinstance(items, list) or not items:
+        return web.json_response(
+            {"ok": False, "error": "items must be a non-empty list"}, status=400
+        )
+    if len(items) > MAX_WARM_BATCH:
+        return web.json_response(
+            {"ok": False, "error": f"too many items (max {MAX_WARM_BATCH})"}, status=400
+        )
+
+    targets: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        type_name = item.get("type", "")
+        subfolder = item.get("subfolder") or ""
+        name = item.get("name", "")
+        if not isinstance(type_name, str) or not isinstance(subfolder, str):
+            continue
+        target, err = _resolve_sandboxed_file(type_name, subfolder, name)
+        if err or target is None or not _has_metadata_reader(target):
+            continue
+        targets.append(target)
+    if not targets:
+        return web.json_response({"ok": True, "scanned": 0})
+
+    loop = asyncio.get_running_loop()
+    scanned = await loop.run_in_executor(None, safeview_store.scan_paths, _safeview_db(), targets)
+    return web.json_response({"ok": True, "scanned": scanned})
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import {
   nextRating,
   notify,
   onSafeViewChange,
+  type PromptVerdict,
   postRating,
   type RatingAddress,
   ratingOf,
@@ -154,6 +155,10 @@ interface ListingFile {
   // `dc:subject` keywords, read from the file's XMP alongside the rating.
   // Absent (not empty) from a backend older than this key.
   tags?: string[];
+  // Safe View's prompt-tier verdict — the same four-state field the modal
+  // picker reads (see its ListingFile): `"unscanned"` is sensitive, ABSENT
+  // means outside the tier and is never sensitive. Passed through as-is.
+  prompt_match?: PromptVerdict;
 }
 
 interface ParsedValue {
@@ -421,7 +426,18 @@ export function attachGallery(node: GalleryNode): void {
     return cfg.hide && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
   }
 
+  /**
+   * The keyword string for the prompt tier, or "" when it is off. Part of the
+   * listing signature too: rows fetched without the tier carry no verdicts, so
+   * switching it on needs a re-fetch. Same rule as the modal picker's.
+   */
+  function safePromptKeywords(): string {
+    const cfg = readSafeViewConfig();
+    return cfg.matchPrompt && isSafeViewActive(cfg) ? cfg.keywords.join(",") : "";
+  }
+
   let lastSafeHideKeywords = safeHideKeywords();
+  let lastSafePromptKeywords = safePromptKeywords();
 
   // This grid lives on a node, which can be deleted without any teardown hook
   // reaching us — so the listener retires itself once its root leaves the
@@ -435,7 +451,7 @@ export function attachGallery(node: GalleryNode): void {
     }
     renderSafeViewToggle();
     const kw = safeHideKeywords();
-    if (kw !== lastSafeHideKeywords) {
+    if (kw !== lastSafeHideKeywords || safePromptKeywords() !== lastSafePromptKeywords) {
       void loadAndRender();
       return;
     }
@@ -675,6 +691,7 @@ export function attachGallery(node: GalleryNode): void {
 
   async function loadAndRender(): Promise<void> {
     lastSafeHideKeywords = safeHideKeywords();
+    lastSafePromptKeywords = safePromptKeywords();
     const here = locationKey();
     if (revealLocation !== null && revealLocation !== here) revealSet.clear();
     revealLocation = here;
@@ -701,14 +718,27 @@ export function attachGallery(node: GalleryNode): void {
         params.set("safe_kw", kw);
         params.set("safe_hide", "1");
       }
+      // The opt-in prompt tier — same both-conditions rule, independent of
+      // hiding (see the modal picker's buildListingURL).
+      const promptKw = safePromptKeywords();
+      if (promptKw) {
+        params.set("safe_kw", promptKw);
+        params.set("safe_prompt", "1");
+      }
       const res = await fetch(`${LIST_URL}?${params.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "list failed");
       state.dirs = data.dirs || [];
       state.files = data.files || [];
+      // The prompt tier's cold-cache count, so a mostly-blurred grid reads as
+      // busy rather than broken. A status suffix rather than the modal's
+      // polling pill: this grid lives on a node with no close hook, so a timer
+      // here would have nothing to cancel it.
+      const unscanned = promptKw ? Number(data.safe_unscanned) || 0 : 0;
+      const scanning = unscanned > 0 ? ` · 🔍 scanning ${unscanned}` : "";
       refs.status.textContent = data.exists
-        ? `${state.dirs.length} dir, ${state.files.length} img`
+        ? `${state.dirs.length} dir, ${state.files.length} img${scanning}`
         : "Directory not found.";
     } catch (e) {
       console.error("[gallery_loader] list failed:", e);
@@ -807,7 +837,10 @@ export function attachGallery(node: GalleryNode): void {
                 ${writable ? starsHTML("gl", ratingOf(f)) : ""}
             `;
       if (
-        isSensitive({ name: f.name, path: svPath, tags: f.tags }, svCfg) &&
+        isSensitive(
+          { name: f.name, path: svPath, tags: f.tags, promptMatch: f.prompt_match },
+          svCfg,
+        ) &&
         !revealSet.has(state.type, state.subfolder, f.name)
       ) {
         applySafeView(c, svCfg, () => {

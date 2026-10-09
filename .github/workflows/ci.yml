@@ -182,9 +182,9 @@ jobs:
           if-no-files-found: ignore
 
   vendored-drift:
-    # Diffs image_meta.py against comfyui-image-browser at the commit in
-    # scripts/vendored-pin, NOT against its main: a canonical merge must not
-    # turn an unrelated PR here red (#92). The "Vendored sync" workflow is what
+    # Diffs image_meta.py and safeview_store.py against comfyui-image-browser
+    # at the commit in scripts/vendored-pin, NOT against its main: a canonical
+    # merge must not turn an unrelated PR here red (#92). The "Vendored sync" workflow is what
     # notices canonical moving and opens the PR that bumps the pin.
     name: Vendored modules match canonical
     runs-on: ubuntu-latest

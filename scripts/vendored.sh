@@ -23,7 +23,7 @@
 set -euo pipefail
 
 CANONICAL_REPO="laurigates/comfyui-image-browser"
-VENDORED_FILES=(image_meta.py)
+VENDORED_FILES=(image_meta.py safeview_store.py)
 PIN_FILE="scripts/vendored-pin"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
