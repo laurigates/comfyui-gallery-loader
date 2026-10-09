@@ -105,7 +105,7 @@
     {
       "label": "ENDPOINTS \u2014 /thumb reports a resolver error as 404, hiding a rejected address behind 'not found'",
       "file": "gallery_loader.py",
-      "before": "    path, err = _resolve_thumb_target(request.rel_url.query)\n    if err:\n        return web.Response(status=400)",
+      "before": "    path, err = _resolve_thumb_target(request.rel_url.query)\n    if err:\n        return web.Response(status=403 if err == READ_REACH_REFUSAL else 400)",
       "after": "    path, err = _resolve_thumb_target(request.rel_url.query)\n    if err:\n        return web.Response(status=404)"
     },
     {
@@ -141,8 +141,8 @@
     {
       "label": "ENDPOINTS \u2014 /file skips abspath normalisation, so the served path is not the one that was probed",
       "file": "gallery_loader.py",
-      "before": "    path = os.path.abspath(os.path.expanduser(abs_path))",
-      "after": "    path = os.path.expanduser(abs_path)"
+      "before": "    path = os.path.abspath(os.path.expanduser(abs_path))\n    # Reach first, before any stat, so an outside path is no existence oracle.",
+      "after": "    path = os.path.expanduser(abs_path)\n    # Reach first, before any stat, so an outside path is no existence oracle."
     },
     {
       "label": "ENDPOINTS \u2014 /base stops reporting user_dir, which is where the shared pin store and thumb cache live",
