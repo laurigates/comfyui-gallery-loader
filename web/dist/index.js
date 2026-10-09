@@ -3482,11 +3482,11 @@ async function openImagePicker(widget, node, opts) {
     } else {
       try {
         const r = await fetch(buildListingURL());
+        const data = await r.json().catch(() => null);
         if (!r.ok)
-          throw new Error(`HTTP ${r.status}`);
-        const data = await r.json();
-        if (!data.ok)
-          throw new Error(data.error || "listing failed");
+          throw new Error(data?.error || `HTTP ${r.status}`);
+        if (!data?.ok)
+          throw new Error(data?.error || "listing failed");
         state.dirs = data.dirs || [];
         state.files = data.files || [];
         modal.setStatus(data.exists ? "" : "Directory not found.");

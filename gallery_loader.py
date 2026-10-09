@@ -211,27 +211,107 @@ def _parse_extensions(raw: str) -> set[str]:
     return out or IMG_EXTS
 
 
-def _resolve_input_string(image: str) -> str:
-    """Resolve a node 'image' string to an absolute path.
+# ---------------------------------------------------------------------------
+# Read reach: absolute-path reads stop at ComfyUI's own directories
+# ---------------------------------------------------------------------------
+#
+# ComfyUI ships no authentication, so an endpoint that reads "any absolute
+# path" reads it for everyone on the LAN of a --listen 0.0.0.0 install and for
+# a DNS-rebound page in the user's own browser. Registry moderation flagged
+# exactly that (issue #121). The reach is therefore the directories ComfyUI
+# itself knows about. To browse another directory the operator registers it in
+# extra_model_paths.yaml (it lands in folder_names_and_paths) or symlinks it
+# inside the tree: both need the server's filesystem, and no HTTP route grants
+# that. A ComfyUI *setting* could not be the boundary — core's
+# POST /settings/{id} lets any caller write one.
 
-    Accepts annotated forms (``foo.png [input]``) and absolute paths.
-    Absolute paths are returned as-is; relative paths fall back to
-    input dir, matching core LoadImage behavior.
+READ_REACH_REFUSAL = (
+    "path is outside ComfyUI's directories. To browse another folder, register it in "
+    "extra_model_paths.yaml or symlink it inside the ComfyUI tree, then restart ComfyUI."
+)
+
+
+def _read_roots() -> list[str]:
+    """Absolute directories an absolute-path read may reach.
+
+    ``base_path``, the input/output/temp/user directories (which
+    --output-directory and friends can move outside base_path), and every path
+    registered in ``folder_paths.folder_names_and_paths`` — models,
+    custom_nodes, and the operator's extra_model_paths.yaml entries. Anything
+    that is not an absolute string is dropped: a relative entry would resolve
+    against the server's working directory, which is not a root of anything.
+    """
+    candidates: list[Any] = [getattr(folder_paths, "base_path", None)]
+    for getter in (
+        "get_input_directory",
+        "get_output_directory",
+        "get_temp_directory",
+        "get_user_directory",
+    ):
+        fn = getattr(folder_paths, getter, None)
+        try:
+            candidates.append(fn() if callable(fn) else None)
+        except Exception:
+            continue
+    registered = getattr(folder_paths, "folder_names_and_paths", None)
+    if isinstance(registered, dict):
+        for entry in registered.values():
+            if isinstance(entry, (tuple, list)) and entry and isinstance(entry[0], (list, tuple)):
+                candidates.extend(entry[0])
+    return [os.path.abspath(c) for c in candidates if isinstance(c, str) and os.path.isabs(c)]
+
+
+def _within_read_roots(path: str) -> bool:
+    """True when ``path`` lies lexically inside one of ``_read_roots()``.
+
+    Lexical on purpose: ``abspath`` folds ``..`` away before the compare, so a
+    traversal cannot escape, while a symlink the operator placed inside the
+    tree stays followable — that is the documented way to widen the reach, and
+    nothing reachable over HTTP can create one. ``commonpath`` rather than a
+    prefix test, so ``/x/comfy-private`` is not inside ``/x/comfy``.
+    """
+    target = os.path.abspath(path)
+    for root in _read_roots():
+        try:
+            if os.path.commonpath([target, root]) == root:
+                return True
+        except ValueError:
+            # Different drives on Windows: not inside this root.
+            continue
+    return False
+
+
+def _resolve_input_string(image: str) -> str:
+    """Resolve a node 'image' string to an absolute path inside the read reach.
+
+    Accepts annotated forms (``foo.png [input]``) and absolute paths; bare
+    relative paths fall back to the input dir, matching core LoadImage. The
+    resolved path must lie inside ``_read_roots()``: /prompt is as
+    unauthenticated as any route here, and the widget is a STRING, so core's
+    combo "value not in list" check never runs — an annotated
+    ``../../x.png [input]`` would otherwise resolve to wherever it points.
     """
     image = (image or "").strip()
     if not image:
         raise ValueError("Gallery Load Image: no image selected.")
 
-    # Annotated path (relative to input/output/temp)
     if image.endswith("[input]") or image.endswith("[output]") or image.endswith("[temp]"):
-        return folder_paths.get_annotated_filepath(image)
+        # Annotated path (relative to input/output/temp)
+        path = folder_paths.get_annotated_filepath(image)
+    elif os.path.isabs(image):
+        path = image
+    else:
+        # Bare relative path — fall back to input dir.
+        path = folder_paths.get_annotated_filepath(image)
 
-    # Absolute path — trust it (user typed it; same posture as VHS path nodes).
-    if os.path.isabs(image):
-        return image
-
-    # Bare relative path — fall back to input dir.
-    return folder_paths.get_annotated_filepath(image)
+    # Return the FOLDED path, the one _within_read_roots judged. Handed the raw
+    # string, the OS resolves ``..`` after following a directory symlink, so
+    # ``input/link/../../x.png`` (lexically inside) opens wherever link's
+    # grandparent is.
+    path = os.path.abspath(path)
+    if not _within_read_roots(path):
+        raise ValueError(f"Gallery Load Image: {READ_REACH_REFUSAL}")
+    return path
 
 
 def _load_image_tensor(path: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -362,6 +442,8 @@ def _resolve_listing_base(type_name: str, subfolder: str, abs_path: str) -> tupl
         if not abs_path:
             return None, "missing path"
         target = os.path.abspath(os.path.expanduser(abs_path))
+        if not _within_read_roots(target):
+            return None, READ_REACH_REFUSAL
         return target, ""
     return None, f"unknown type: {type_name}"
 
@@ -748,7 +830,8 @@ async def gallery_list(request: web.Request) -> web.Response:
 
     base, err = _resolve_listing_base(type_name, subfolder, abs_path)
     if err:
-        return web.json_response({"ok": False, "error": err}, status=400)
+        status = 403 if err == READ_REACH_REFUSAL else 400
+        return web.json_response({"ok": False, "error": err}, status=status)
     assert base is not None
 
     # The LOGICAL folder address, which is what the frontend matches against
@@ -881,6 +964,9 @@ async def gallery_file(request: web.Request) -> web.Response:
     if not abs_path:
         return web.Response(status=400)
     path = os.path.abspath(os.path.expanduser(abs_path))
+    # Reach first, before any stat, so an outside path is no existence oracle.
+    if not _within_read_roots(path):
+        return web.Response(status=403)
     if not os.path.isfile(path):
         return web.Response(status=404)
     ext = os.path.splitext(path)[1].lower()
@@ -921,7 +1007,10 @@ def _resolve_thumb_target(q: Any) -> tuple[str | None, str]:
     abs_path = q.get("path", "")
     if not abs_path:
         return None, "missing path"
-    return os.path.abspath(os.path.expanduser(abs_path)), ""
+    path = os.path.abspath(os.path.expanduser(abs_path))
+    if not _within_read_roots(path):
+        return None, READ_REACH_REFUSAL
+    return path, ""
 
 
 def _thumb_cache_dir() -> str:
@@ -943,7 +1032,7 @@ async def gallery_thumb(request: web.Request) -> web.Response:
     """
     path, err = _resolve_thumb_target(request.rel_url.query)
     if err:
-        return web.Response(status=400)
+        return web.Response(status=403 if err == READ_REACH_REFUSAL else 400)
     assert path is not None
     if not os.path.isfile(path) or not _is_image_file(path):
         return web.Response(status=404)
@@ -987,7 +1076,8 @@ async def gallery_metadata(request: web.Request) -> web.Response:
     """
     path, err = _resolve_thumb_target(request.rel_url.query)
     if err:
-        return web.json_response({"ok": False, "error": err}, status=400)
+        status = 403 if err == READ_REACH_REFUSAL else 400
+        return web.json_response({"ok": False, "error": err}, status=status)
     assert path is not None
     if not _is_image_file(path):
         return web.json_response({"ok": False, "error": "unsupported file type"}, status=400)

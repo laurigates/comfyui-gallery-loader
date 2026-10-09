@@ -152,3 +152,18 @@ class _NoopRoutes:
 # PromptServer.instance.routes is read at module load; supply a real
 # object so attribute access doesn't trigger _StubModule's MagicMock path.
 _server.PromptServer = SimpleNamespace(instance=SimpleNamespace(routes=_NoopRoutes()))
+
+
+@pytest.fixture(autouse=True)
+def comfy_base_is_tmp_path(tmp_path, monkeypatch):
+    """Make each test's tmp_path ComfyUI's base_path.
+
+    Absolute-path reads stop at ComfyUI's own directories (``_read_roots``), and
+    the stubbed folder_paths has none, so without this every ``type=path`` test
+    would be refused before reaching the behaviour it is about. Files a test
+    writes under tmp_path are therefore "inside ComfyUI", as real renders are.
+    ``tests/test_read_reach.py`` overrides it to build an inside/outside split.
+    """
+    import folder_paths
+
+    monkeypatch.setattr(folder_paths, "base_path", str(tmp_path), raising=False)

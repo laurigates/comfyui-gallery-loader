@@ -1,0 +1,49 @@
+{
+  "command": [
+    "uv",
+    "run",
+    "pytest",
+    "-q",
+    "tests/test_vendored_pin.py"
+  ],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): the exit-code comment reworded, which no test can see",
+      "file": "scripts/vendored.sh",
+      "before": "# Exit codes: 0 ok",
+      "after": "# Exit statuses: 0 ok",
+      "control": true
+    },
+    {
+      "label": "the check diffs against canonical main again (the #92 behaviour): a canonical merge turns every PR red",
+      "file": "scripts/vendored.sh",
+      "before": "        fetch \"$ref\" \"$f\" \"$tmp/$f\"\n        if diff",
+      "after": "        fetch main \"$f\" \"$tmp/$f\"\n        if diff"
+    },
+    {
+      "label": "a drifted vendored copy is reported as matching",
+      "file": "scripts/vendored.sh",
+      "before": "            drift=1\n",
+      "after": "            drift=0\n"
+    },
+    {
+      "label": "bump writes the pin before fetching, so a failed fetch leaves the pin moved and the files stale",
+      "file": "scripts/vendored.sh",
+      "before": "    for f in \"${VENDORED_FILES[@]}\"; do fetch \"$new\"",
+      "after": "    printf '%s\\n' \"$new\" >\"$PIN_FILE\"\n    for f in \"${VENDORED_FILES[@]}\"; do fetch \"$new\""
+    },
+    {
+      "label": "a file that is not vendored is silently accepted as a check target",
+      "file": "scripts/vendored.sh",
+      "before": "        [ -n \"$ok\" ] || die",
+      "after": "        [ -n \"$ok\" ] || true ||  die"
+    },
+    {
+      "label": "a branch name in the pin file is accepted and fetched",
+      "file": "scripts/vendored.sh",
+      "before": "    is_sha \"$ref\" || die \"$PIN_FILE must hold",
+      "after": "    true || die \"$PIN_FILE must hold"
+    }
+  ]
+}

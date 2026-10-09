@@ -53,8 +53,8 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 |------|---------|
 | `__init__.py` | Loader stub. Exports `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY="./web/dist"`. |
 | `gallery_loader.py` | `GalleryLoadImage` node + eight HTTP endpoints (`/gallery_loader/{list,base,thumb,file,rating,metadata}` plus `GET`/`POST /gallery_loader/pins`). `/list` takes **`recursive=1`** (sandboxed roots only) for the flat view: every descendant, `dirs:[]`, each file tagged with a forward-slashed `subpath`. Both listing paths are capped and report `truncated`. `GET /pins` answers `{ok, max, pins}` with every pin resolved (`exists`, plus a live file pin's `/list` per-file keys); `POST /pins` takes one **delta** — `{op: "add"｜"remove"｜"prune", item?}` — and answers with the same whole list, so a caller never needs a follow-up GET. |
-| `pins_store.py` | **Canonical home** of the shared pin store — `comfyui-image-browser` vendors it verbatim (`just sync-pins-store` there + a CI drift job pull from this repo's `main`), so a change here must be synced downstream. Same direction as `xmp_meta.py` / `thumb_cache.py`, the opposite of `image_meta.py`. Pure-stdlib: normalization, the delta dispatcher, and atomic read/write of `<user_dir>/comfy-pins.json` — the one file both packs and both devices resolve. |
-| `image_meta.py` | **Vendored verbatim** from its canonical home `comfyui-image-browser/image_meta.py` — do not edit here. Re-sync with `just sync-image-meta`; CI fails on drift. Pure-stdlib reader behind `/metadata`. The direction is the REVERSE of `xmp_meta.py` / `thumb_cache.py`, which this pack is canonical for: that pack owns the `/metadata` feature and the parser's attacker-shaped-input suite. Each file still has exactly one home. |
+| `pins_store.py` | **Canonical home** of the shared pin store — `comfyui-image-browser` vendors it verbatim, pinned to a commit of this repo (its `scripts/vendored-pin`); its daily `Vendored sync` workflow opens the PR that takes a change made here, so nothing downstream goes red when this file changes. Same direction as `xmp_meta.py` / `thumb_cache.py`, the opposite of `image_meta.py`. Pure-stdlib: normalization, the delta dispatcher, and atomic read/write of `<user_dir>/comfy-pins.json` — the one file both packs and both devices resolve. |
+| `image_meta.py` | **Vendored verbatim** from its canonical home `comfyui-image-browser/image_meta.py`, at the commit in `scripts/vendored-pin` — do not edit here. CI fails if it differs from that pinned commit (see `scripts/vendored.sh`). Pure-stdlib reader behind `/metadata`. The direction is the REVERSE of `xmp_meta.py` / `thumb_cache.py`, which this pack is canonical for: that pack owns the `/metadata` feature and the parser's attacker-shaped-input suite. Each file still has exactly one home. |
 | `xmp_meta.py` | Pure, stdlib-only XMP read/write (in-file PNG/JPEG surgery + `.xmp` sidecar fallback). No ComfyUI imports. Two owned vocabularies: the `xmp:Rating` star (ADR-0011) and the `dc:subject` keywords Safe View's tag tier matches, each mirrored to its `MicrosoftPhoto:` twin. Both writes go through `_write_xmp` + `update_xmp_packet`; see the hard rule below for why the two halves must never strip each other's. |
 | `src/index.ts` | Lone `bun build` entry. Imports both extension modules for their `app.registerExtension` side-effects. |
 | `src/gallery_loader.ts` | Inline-grid frontend for the `GalleryLoadImage` node (TS port of the former `web/js/gallery_loader.js`). |
@@ -67,11 +67,13 @@ changes the committed widget value. See `xmp_meta.py` and ADR-0011.
 | `knip.json` | Dead-export / unused-dependency checker config. |
 | `package.json` | Bun scripts (`build`, `typecheck`, `test`, `lint`, `knip`); runtime dep `@laurigates/comfy-modal-kit`; dev deps. |
 | `pyproject.toml` | Comfy Registry metadata + `[tool.comfy] includes = ["web/dist"]`. `PublisherId` and `version` are the fields you'd touch. |
+| `scripts/vendored.sh` + `scripts/vendored-pin` | The vendoring pin (#92). `image_meta.py` is checked against comfyui-image-browser **at the pinned commit**, never against its `main`: diffing a moving `main` failed every PR opened after a canonical merge, whatever it changed (#89), and made merge order across the two repos something to plan. The pin moves only in a commit here — `just bump-vendored [ref]`, or the PR the daily `Vendored sync` workflow (`.github/workflows/vendored-sync.yml`, opened with the release-please App token so CI runs on it) opens when canonical `main` differs. `just sync-image-meta` restores the file **from the pin**. Tests: `tests/test_vendored_pin.py`, table `tests/mutations-vendored.json` (pytest, `exit-code` reporter, declared control so a healthy run exits 0). |
 | `.github/workflows/publish.yml` | Auto-publish on `pyproject.toml` version bump (runs `bun run build` first). |
 | `.github/workflows/ci.yml` | CI: ruff, biome, tsc+build (bun), pytest, vitest (bun), Playwright, gitleaks. `test-js` `setup-node`s from `.node-version` because `vitest` is a Node bin that bun invokes through its `env node` shebang. `test-e2e` deliberately does **not** — `playwright` is a Node bin too, but at 1.56.0 `playwright install` downloads to 100% and then hangs in the extract step under Node 26 (measured: rc=124 at 300 s vs rc=0 at 10 s on 24.19.0, into a clean `PLAYWRIGHT_BROWSERS_PATH`; `engines` says `node: >=18`, so nothing warns). `tests/test_ci_node_pin.py` asserts both the pin and the exclusion. |
 | `.node-version` | `26`. The Node the **jsdom** suite runs under, in CI and locally (the browser tier is excluded — see the `ci.yml` row). Node put its built-in `localStorage` accessor on `globalThis` unflagged in **v25**, and it shadows jsdom's Storage (vitest copies jsdom's globals across only where absent), so the runtime decides which `Storage` implementation `tests/js/` exercises. Measured with `setupFiles` removed: 24.19.0 green on jsdom's own Storage; 25.0.0 and 26.5.0 red with `TypeError: Cannot read properties of undefined (reading 'clear')`. `comfyui-image-browser` pins the same file to the same value. |
 | `.pre-commit-config.yaml` | Pre-commit hooks: ruff, biome (2.4.15), gitleaks, file hygiene. |
 | `biome.json` | Biome (TS/JSON) lint + format config. |
+| `tests/mutations-read-reach.json` | Read-reach mutation table (issue #121): `just mutation-check comfyui-gallery-loader tests/mutations-read-reach.json`. Scoped to `tests/test_read_reach.py` + `tests/js/list-refusal.test.js`; its CONTROL is declared, so a healthy run exits 0. |
 | `tests/mutations.json` / `tests/mutations-e2e.json` | Mutation tables driving `just mutation-check comfyui-gallery-loader [tests/mutations-e2e.json]` from the workspace root. Two files because the tiers differ: the first runs vitest+pytest, the second rebuilds the bundle and runs the **browser** suite, because the scroll wiring is not observable anywhere else. Each carries a deliberate **CONTROL** mutation (a comment edit) the suite must MISS — a harness reporting everything as CAUGHT is indistinguishable from a broken one — so a healthy run exits **1**. Read the per-mutation lines, not the exit code. |
 | `tests/` | pytest suite for the Python backend + Vitest suite (`tests/js/`) for the kit's pure helpers. **No layout engine** — see `tests/e2e/` for the half of the picker's behaviour this suite structurally cannot see. |
 | `tests/conftest.py` | The stub layer that makes endpoint-level pytest possible at all: `web.json_response` → `_stub_json_response`, and `web.Response` / `web.FileResponse` → `_stub_response` / `_stub_file_response`. Without the latter two the non-JSON handlers hand back MagicMocks, so `/thumb`'s ETag/304 logic and `/file`'s whitelist have nothing assertable. `FakeGetRequest` (exposed as the `get_request` fixture) carries `.headers` as well as `.rel_url.query` — the `_FakeGetRequest` in `test_helpers.py` does not, and a conditional-request test written against that one silently takes the unconditional branch. |
@@ -152,12 +154,15 @@ Three consequences, each pinned by a mutation:
   measured +40% on the metadata pass over a 2000-file directory, for nothing.
 
 `tests/mutations.json` pins all of this — `just mutation-check
-comfyui-gallery-loader` from the workspace root. There is a SECOND table,
-`tests/mutations-e2e.json`, for the scroll wiring: its mutations are only
-observable in a real browser, so it rebuilds the bundle and runs the Playwright
-suite per mutation (`just mutation-check comfyui-gallery-loader
-tests/mutations-e2e.json` — six real mutations CAUGHT, the CONTROL correctly
-MISSED, so a healthy run exits 1).
+comfyui-gallery-loader` from the workspace root. The rating/keyword read cache
+(`read_meta_cached`, an LRU whose cap must exceed the most probes one listing
+can make) has its own table, `tests/mutations-xmp-cache.json`, which runs only
+the two pytest files that cover it. There is a SECOND table,
+`tests/mutations-e2e.json`, for the scroll wiring and the lazy-thumb band: its
+mutations are only observable in a real browser, so it rebuilds the bundle and
+runs the Playwright suite per mutation (`just mutation-check
+comfyui-gallery-loader tests/mutations-e2e.json` — every real mutation CAUGHT,
+the CONTROL correctly MISSED, so a healthy run exits 1).
 
 ### Pack directory name is part of the URL
 
@@ -165,20 +170,30 @@ MISSED, so a healthy run exits 1).
 `/extensions/comfyui-gallery-loader/js/image-picker.js`. Renaming
 the pack directory breaks every fetch the frontend makes. Don't.
 
-### Arbitrary-path endpoints are extension-whitelisted
+### Absolute-path reads: inside ComfyUI's directories, and extension-whitelisted
 
-`/gallery_loader/thumb` and `/gallery_loader/file` accept an absolute
-`path` query parameter. They both enforce an extension whitelist
-(images for `thumb`, images + common video formats for `file`). When
-adding new file types, widen the whitelist explicitly — never read
-arbitrary paths without the extension gate.
+`/list?type=path`, `/thumb?path=`, `/metadata?path=` and `/file` accept an
+absolute path, and so does the `GalleryLoadImage` node. Two gates apply, and
+neither replaces the other:
+
+- **Reach.** The path must lie inside `_read_roots()`: `base_path`,
+  input/output/temp/user, and every `folder_paths.folder_names_and_paths`
+  entry. Check it before any stat. A new read route that takes a path calls
+  `_within_read_roots` first. Widening is done on the server's filesystem
+  (`extra_model_paths.yaml`, or a symlink inside the tree). Never widen it
+  through a ComfyUI setting, which core's `POST /settings/{id}` lets any
+  caller write, and never through `os.environ`, a scanner tripwire. ADR-0004's
+  2026-10 amendment covers this, and `tests/test_read_reach.py` pins it.
+- **Kind.** The extension whitelist (images for `thumb`/`metadata`, images and
+  common video formats for `file`). When adding new file types, widen the
+  whitelist explicitly.
 
 ### READS reach further than WRITES, and the two resolvers are separate
 
 `_resolve_listing_base` serves the READ side (`/list`, `/thumb`,
 `/metadata`, pin resolution). It accepts `type=path` deliberately — the
 VHS path browser exists to reach files that are not under
-input/output/temp — and it has **no realpath gate**, because
+input/output/temp, though only inside `_read_roots()` (above) — and it has **no realpath gate**, because
 `output/renders -> /mnt/nas/renders` is an ordinary setup and refusing
 to list it would break the pack for anyone keeping outputs on another
 volume.
@@ -286,9 +301,12 @@ element's *whole bounding box*, so every card reports as intersecting on the
 first callback and the "lazy" load fires for the entire listing at once — one
 `/thumb` request per file plus a `src` + `preload=metadata` on every `<video>`.
 Measured 400/400 off-screen cards intersecting with the grid as root vs 20/400
-with the real scroller; at scale it OOMs the tab. There is a regression test
-(`tests/js/image-picker.test.js`) asserting the picker's root. If you move
-either grid into or out of a scrolling container, move its `root` with it.
+with the real scroller; at scale it OOMs the tab. `tests/js/image-picker.test.js`
+asserts the picker's root; `tests/e2e/lazy-thumbs.spec.js` measures the
+consequence in Chromium (how many of a 400-card folder's thumbnails load, and
+which), which the root assertion alone cannot — it would pass with the right
+root and a wrong margin. If you move either grid into or out of a scrolling
+container, move its `root` with it.
 
 ### Scroll position: restored through the kit, remembered per LOCATION
 
@@ -622,9 +640,12 @@ fuzzy-matcher tests don't need that hook today.
 jsdom suites: `image-picker.test.js` (lazy-thumb root, flat view, folder pins,
 highlighting), `video-loaders.test.js` (node detection, audio cards and the ▶
 preview), `pins.test.js` (the
-pinned tab + the `fileType()` address sweep) and `pins-migration.test.js` (the
+pinned tab + the `fileType()` address sweep), `pins-migration.test.js` (the
 one-shot localStorage drain — its own file because the migration guard is
-module-level, so a second run in the same registry is a no-op by design).
+module-level, so a second run in the same registry is a no-op by design),
+`picker-navigation.test.js` (directory mode, VHS path mode, folder / `..` /
+breadcrumb / tab navigation) and `node-grid-surfaces.test.js` (the inline grid's
+source chips, `.gl-pathinput`, and what it asks `addDOMWidget` for).
 
 `tests/js/setup-jsdom.js` (a `setupFiles` entry) restores `localStorage`: Node
 22+ defines its own global accessor that is `undefined` without
@@ -720,9 +741,9 @@ See `RELEASE-CHECKLIST.md` for the full playbook. High level:
 
 ## Things not to do
 
-- **Don't read arbitrary paths without the extension whitelist.** The
-  `/thumb` and `/file` endpoints are the security perimeter; widen
-  the allowed extensions explicitly.
+- **Don't read an absolute path without both gates**: `_within_read_roots`
+  first, then the extension whitelist. Widen the allowed extensions
+  explicitly, and widen the reach only on the server's filesystem.
 - **Don't break the value contract** for the Input source (bare
   relative form). It's how existing workflows serialize.
 - **Don't add a Python dependency.** Backend libs must be the ones
