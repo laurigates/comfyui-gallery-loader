@@ -153,11 +153,11 @@ Three consequences, each pinned by a mutation:
 
 `tests/mutations.json` pins all of this — `just mutation-check
 comfyui-gallery-loader` from the workspace root. There is a SECOND table,
-`tests/mutations-e2e.json`, for the scroll wiring: its mutations are only
-observable in a real browser, so it rebuilds the bundle and runs the Playwright
-suite per mutation (`just mutation-check comfyui-gallery-loader
-tests/mutations-e2e.json` — six real mutations CAUGHT, the CONTROL correctly
-MISSED, so a healthy run exits 1).
+`tests/mutations-e2e.json`, for the scroll wiring and the lazy-thumb band: its
+mutations are only observable in a real browser, so it rebuilds the bundle and
+runs the Playwright suite per mutation (`just mutation-check
+comfyui-gallery-loader tests/mutations-e2e.json` — every real mutation CAUGHT,
+the CONTROL correctly MISSED, so a healthy run exits 1).
 
 ### Pack directory name is part of the URL
 
@@ -286,9 +286,12 @@ element's *whole bounding box*, so every card reports as intersecting on the
 first callback and the "lazy" load fires for the entire listing at once — one
 `/thumb` request per file plus a `src` + `preload=metadata` on every `<video>`.
 Measured 400/400 off-screen cards intersecting with the grid as root vs 20/400
-with the real scroller; at scale it OOMs the tab. There is a regression test
-(`tests/js/image-picker.test.js`) asserting the picker's root. If you move
-either grid into or out of a scrolling container, move its `root` with it.
+with the real scroller; at scale it OOMs the tab. `tests/js/image-picker.test.js`
+asserts the picker's root; `tests/e2e/lazy-thumbs.spec.js` measures the
+consequence in Chromium (how many of a 400-card folder's thumbnails load, and
+which), which the root assertion alone cannot — it would pass with the right
+root and a wrong margin. If you move either grid into or out of a scrolling
+container, move its `root` with it.
 
 ### Scroll position: restored through the kit, remembered per LOCATION
 
@@ -601,9 +604,12 @@ fuzzy-matcher tests don't need that hook today.
 
 jsdom suites: `image-picker.test.js` (lazy-thumb root, flat view, folder pins,
 highlighting), `video-loaders.test.js` (node detection), `pins.test.js` (the
-pinned tab + the `fileType()` address sweep) and `pins-migration.test.js` (the
+pinned tab + the `fileType()` address sweep), `pins-migration.test.js` (the
 one-shot localStorage drain — its own file because the migration guard is
-module-level, so a second run in the same registry is a no-op by design).
+module-level, so a second run in the same registry is a no-op by design),
+`picker-navigation.test.js` (directory mode, VHS path mode, folder / `..` /
+breadcrumb / tab navigation) and `node-grid-surfaces.test.js` (the inline grid's
+source chips, `.gl-pathinput`, and what it asks `addDOMWidget` for).
 
 `tests/js/setup-jsdom.js` (a `setupFiles` entry) restores `localStorage`: Node
 22+ defines its own global accessor that is `undefined` without
