@@ -19,6 +19,7 @@ knip.json
 vitest.config.js
 package.json
 .node-version
+.bun-version
 bun.lock
 uv.lock
 pylock.toml
