@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.32](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.31...comfyui-gallery-loader-v0.1.32) (2026-10-09)
+
+
+### Features
+
+* **picker:** preview an audio card with a play button ([#124](https://github.com/laurigates/comfyui-gallery-loader/issues/124)) ([1c53643](https://github.com/laurigates/comfyui-gallery-loader/commit/1c53643e7a408bbce73b05bcceda04d3da3947fc))
+
+
+### Bug Fixes
+
+* **security:** confine absolute-path reads to ComfyUI's directories ([#127](https://github.com/laurigates/comfyui-gallery-loader/issues/127)) ([23a7621](https://github.com/laurigates/comfyui-gallery-loader/commit/23a7621b1f196d0ac696e4b67b05befdfb7a991c))
+
+
+### Performance Improvements
+
+* **xmp:** stop one full listing from evicting its own rating cache ([#123](https://github.com/laurigates/comfyui-gallery-loader/issues/123)) ([1878bf5](https://github.com/laurigates/comfyui-gallery-loader/commit/1878bf55f5e207ef798c6e69c69f014de2ddc46a))
+
 ## [0.1.31](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.30...comfyui-gallery-loader-v0.1.31) (2026-08-27)
 
 
