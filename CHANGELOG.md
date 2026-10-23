@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.33](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.32...comfyui-gallery-loader-v0.1.33) (2026-10-23)
+
+
+### Miscellaneous
+
+* **deps:** update all non-major dependencies ([#122](https://github.com/laurigates/comfyui-gallery-loader/issues/122)) ([e36aa79](https://github.com/laurigates/comfyui-gallery-loader/commit/e36aa7946b4d2ea39320df91871d0a2cf7bac419))
+
 ## [0.1.32](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.31...comfyui-gallery-loader-v0.1.32) (2026-10-09)
 
 
