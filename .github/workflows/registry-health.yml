@@ -14,7 +14,8 @@ name: Registry health
 #      version, and Deleted is expected to (not yet verified against /install).
 #      Each alert carries a hidden marker; a run whose verdict matches the
 #      newest marker on the open issue posts nothing, and an unchanged Flagged
-#      verdict ends with a warning instead of failing the run.
+#      verdict with no phantom version ends with a warning instead of failing
+#      the run.
 #
 # The registry security scan is async: a freshly published version is Pending
 # for a while before it flips to Active or Flagged. So a run triggered right
@@ -153,7 +154,11 @@ jobs:
               else
                 impact="- Flagged is not Banned, so installs are not blocked by this status: ${installs}."
               fi
-              listing="- Discoverability is affected: the registry listing's \`latest_version\` counts only Active versions, so it shows **\`${listed:-none}\`** rather than \`${ver}\`."
+              # The listing's latest_version can itself be a Flagged version, so
+              # report a discoverability gap only when it differs from ${ver}.
+              if [ "$listed" != "$ver" ]; then
+                listing="- Discoverability is affected: the registry listing's \`latest_version\` shows **\`${listed:-none}\`** rather than \`${ver}\`."
+              fi
               header="Declared version **\`${ver}\`** is **Flagged** by Comfy-Org registry moderation."
             fi
             {
@@ -228,7 +233,8 @@ jobs:
             # Flagged still installs, so an unchanged Flagged verdict needs no
             # new action and should not turn the schedule red every day. The
             # commit status set above stays failure, so the verdict stays visible.
-            if [ -n "$unchanged" ] && [ "$problem" = "flagged" ]; then
+            # A phantom version still needs a release above it, so it keeps exit 1.
+            if [ -n "$unchanged" ] && [ "$problem" = "flagged" ] && [ -z "$phantom" ]; then
               echo "::warning::release ${ver} is still flagged, unchanged since the last alert on #${existing}"
               exit 0
             fi
