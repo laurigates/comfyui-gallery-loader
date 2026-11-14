@@ -14,10 +14,10 @@ jobs:
     name: Lint & format (Python)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v7.6.0
 
       - name: Set up Python
         run: uv python install 3.12
@@ -32,10 +32,10 @@ jobs:
     name: Lint & format (JavaScript)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
 
       - name: Setup Biome
-        uses: biomejs/setup-biome@v2
+        uses: biomejs/setup-biome@v2.7.1
         with:
           # Pin to the schema version declared in biome.json.
           version: 2.4.15
@@ -47,10 +47,10 @@ jobs:
     name: Typecheck & build (TypeScript)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@v2.2.0
         with:
           # web/dist is committed and the step below diffs it against this
           # job's build, so the bundler must be the one that produced it: bun's
@@ -78,10 +78,10 @@ jobs:
     name: Tests (Python)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v7.6.0
 
       - name: Set up Python
         run: uv python install 3.12
@@ -93,10 +93,10 @@ jobs:
     name: Tests (JavaScript)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@v2.2.0
         with:
           bun-version-file: .bun-version
 
@@ -112,7 +112,7 @@ jobs:
       # `TypeError: Cannot read properties of undefined (reading 'clear')`.
       # See tests/js/setup-jsdom.js and #75.
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v6.5.0
         with:
           node-version-file: .node-version
 
@@ -133,9 +133,9 @@ jobs:
     name: Tests (browser, Playwright)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@v2.2.0
         with:
           bun-version-file: .bun-version
       # NO setup-node here, deliberately — see tests/test_ci_node_pin.py, which
@@ -174,7 +174,7 @@ jobs:
         run: bun run test:e2e
       - name: Upload traces from failed tests
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: playwright-traces
           path: tests/e2e/test-results/
@@ -189,7 +189,7 @@ jobs:
     name: Vendored modules match canonical
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
       - name: Diff vendored modules against the pinned canonical commit
         run: scripts/vendored.sh check
 
@@ -197,12 +197,12 @@ jobs:
     name: Security scanning
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
         with:
           # gitleaks scans <prev>^..<head>; needs full history.
           fetch-depth: 0
 
       - name: Gitleaks secret scan
-        uses: gitleaks/gitleaks-action@v3
+        uses: gitleaks/gitleaks-action@v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
