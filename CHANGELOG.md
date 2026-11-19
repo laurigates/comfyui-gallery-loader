@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.34](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.33...comfyui-gallery-loader-v0.1.34) (2026-11-16)
+
+
+### Bug Fixes
+
+* **ci:** sync vendored safeview_store.py to clear ruff SIM102 ([#146](https://github.com/laurigates/comfyui-gallery-loader/issues/146)) ([5455943](https://github.com/laurigates/comfyui-gallery-loader/commit/54559435b9a0d3187cc0985fa3df1e5861ebe307))
+* **types:** move @comfyorg/comfyui-frontend-types to ^1.60.0 ([#145](https://github.com/laurigates/comfyui-gallery-loader/issues/145)) ([45e2cb4](https://github.com/laurigates/comfyui-gallery-loader/commit/45e2cb4396a52052d3ced0428fa42bfaf60387ed))
+
 ## [0.1.33](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.32...comfyui-gallery-loader-v0.1.33) (2026-10-31)
 
 

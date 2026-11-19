@@ -325,11 +325,13 @@ def walk_candidates(
                             if entry.name in ("clipspace", "__pycache__"):
                                 continue
                             stack.append(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
-                            if os.path.splitext(entry.name)[1].lower() in exts:
-                                out.append(entry.path)
-                                if len(out) >= cap:
-                                    return out
+                        elif (
+                            entry.is_file(follow_symlinks=False)
+                            and os.path.splitext(entry.name)[1].lower() in exts
+                        ):
+                            out.append(entry.path)
+                            if len(out) >= cap:
+                                return out
                     except OSError:
                         continue
         except OSError:
