@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "extraKnownMarketplaces": {
+    "laurigates-claude-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "laurigates/claude-plugins"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "python-plugin@laurigates-claude-plugins": true,
+    "typescript-plugin@laurigates-claude-plugins": true
+  },
+  "enabledMcpjsonServers": [
+    "pal",
+    "context7",
+    "sequential-thinking"
+  ]
+}
