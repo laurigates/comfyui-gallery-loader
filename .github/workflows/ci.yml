@@ -38,7 +38,7 @@ jobs:
         uses: biomejs/setup-biome@v2
         with:
           # Pin to the schema version declared in biome.json.
-          version: 2.4.15
+          version: 2.6.8
 
       - name: Biome check
         run: biome check .
