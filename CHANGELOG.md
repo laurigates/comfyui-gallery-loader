@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.35](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.34...comfyui-gallery-loader-v0.1.35) (2026-11-26)
+
+
+### Miscellaneous
+
+* **claude:** reconcile Claude Code config with the repo baseline ([#141](https://github.com/laurigates/comfyui-gallery-loader/issues/141)) ([300b1a0](https://github.com/laurigates/comfyui-gallery-loader/commit/300b1a0de609750c8a78398352592ac553cba9d3))
+* **deps:** update dependency virtualenv to v21.14.10 [security] ([#149](https://github.com/laurigates/comfyui-gallery-loader/issues/149)) ([c3384db](https://github.com/laurigates/comfyui-gallery-loader/commit/c3384dba40e965c38a12be5acda6a75533497f3e))
+
 ## [0.1.34](https://github.com/laurigates/comfyui-gallery-loader/compare/comfyui-gallery-loader-v0.1.33...comfyui-gallery-loader-v0.1.34) (2026-11-16)
 
 
