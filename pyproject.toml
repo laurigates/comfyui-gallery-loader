@@ -37,7 +37,7 @@ Issues = "https://github.com/laurigates/comfyui-gallery-loader/issues"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.11",
+    "ruff==0.17.6",
     "pytest>=8",
     "pre-commit>=4",
     "pathspec>=1.1.1",

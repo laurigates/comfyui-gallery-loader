@@ -3,5 +3,12 @@
   "extends": ["config:recommended"],
   "pre-commit": {
     "enabled": true
-  }
+  },
+  "packageRules": [
+    {
+      "description": "One ruff version for CI (uv.lock), local runs and the pre-commit hook; tests/test_ci_ruff_pin.py fails if they diverge.",
+      "matchDepNames": ["ruff", "astral-sh/ruff-pre-commit"],
+      "groupName": "ruff"
+    }
+  ]
 }
